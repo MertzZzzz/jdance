@@ -7,8 +7,8 @@
 //! `cargo test --release -p jdance-engine --test stress -- --ignored --nocapture`
 
 use jdance_domain::{
-    Channel, ChannelId, ChannelSource, CompressorParams, Effect, Insert, InsertId, MixerTrack,
-    Project, SampleRef, Send, SendId, Sidechain, Tap, TrackId,
+    Channel, ChannelId, ChannelSource, Effect, EffectKind, Insert, InsertId, MixerTrack, Project,
+    SampleRef, Send, SendId, Sidechain, Tap, TrackId,
 };
 use jdance_dsp::SampleBuffer;
 use jdance_engine::{compile, create_engine};
@@ -29,10 +29,7 @@ fn stress_project() -> Project {
     let comp = |sc: Option<Sidechain>, id: u64| Insert {
         id: InsertId(id),
         bypass: false,
-        effect: Effect::Compressor(CompressorParams {
-            lookahead_ms: 1.0,
-            ..Default::default()
-        }),
+        effect: Effect::new(EffectKind::Compressor).with("lookahead", 1.0),
         sidechain: sc,
     };
     let track_ids: Vec<TrackId> = (0..32).map(|_| TrackId(id())).collect();

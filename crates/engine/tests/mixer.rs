@@ -6,8 +6,8 @@
 //! impulses from all paths land on the same output sample.
 
 use jdance_domain::{
-    Channel, ChannelId, ChannelSource, CompressorParams, Effect, Insert, InsertId, MixerTrack,
-    Project, SampleRef, Send, SendId, Sidechain, Tap, TrackId,
+    Channel, ChannelId, ChannelSource, Effect, EffectKind, Insert, InsertId, MixerTrack, Project,
+    SampleRef, Send, SendId, Sidechain, Tap, TrackId,
 };
 use jdance_dsp::SampleBuffer;
 use jdance_engine::{OfflineRender, PlaybackSnapshot, compile, create_engine, render_offline};
@@ -17,11 +17,9 @@ use std::sync::Arc;
 const SR: u32 = 48_000;
 
 fn delay_effect(ms: f32) -> Effect {
-    Effect::Compressor(CompressorParams {
-        ratio: 1.0,
-        lookahead_ms: ms,
-        ..Default::default()
-    })
+    Effect::new(EffectKind::Compressor)
+        .with("ratio", 1.0)
+        .with("lookahead", ms)
 }
 
 fn insert(id: u64, effect: Effect, sidechain: Option<Sidechain>) -> Insert {
@@ -153,14 +151,11 @@ fn sidechain_onset(kick_latency_ms: f32, bass_pre_latency_ms: f32) -> (usize, u3
         .push(insert(11, delay_effect(bass_pre_latency_ms), None));
     bass.inserts.push(insert(
         12,
-        Effect::Compressor(CompressorParams {
-            threshold_db: -40.0,
-            ratio: 20.0,
-            attack_ms: 0.0,
-            release_ms: 500.0,
-            makeup_db: 0.0,
-            lookahead_ms: 0.0,
-        }),
+        Effect::new(EffectKind::Compressor)
+            .with("threshold", -40.0)
+            .with("ratio", 20.0)
+            .with("attack", 0.0)
+            .with("release", 500.0),
         Some(Sidechain {
             source: TrackId(1),
             tap: Tap::PreFader,

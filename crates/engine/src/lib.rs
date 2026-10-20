@@ -14,13 +14,17 @@
 //! The processor does not depend on any audio device: offline rendering
 //! drives the very same code ([`render_offline`]).
 
+mod effect_rt;
 mod feedback;
 mod offline;
+mod param_diff;
 mod processor;
 mod snapshot;
 
-pub use feedback::{EngineFeedback, FeedbackReading};
+pub use effect_rt::{EffectRt, InsertRt, RESET_BUDGET};
+pub use feedback::{EngineFeedback, FeedbackReading, MeterSlot, Meters};
 pub use offline::{OfflineRender, render_offline};
+pub use param_diff::{ParamChange, param_only_changes};
 pub use processor::EngineProcessor;
 pub use snapshot::{ChannelRt, PlaybackSnapshot, StepEvent, compile};
 
@@ -41,10 +45,19 @@ pub const MAX_COMMANDS_PER_RENDER: usize = 64;
 #[derive(Debug)]
 pub(crate) enum Command {
     Play,
+    /// Fades the output out, then clears voices and effect state.
     Stop,
     /// Silences all voices immediately.
     Panic,
+    /// Jumps to a sample position; sounding voices get a short release.
+    Seek(u64),
     SetSnapshot(Box<PlaybackSnapshot>),
+    /// Changes one effect parameter without recompiling (smoothed).
+    SetParam {
+        insert: jdance_domain::InsertId,
+        index: u16,
+        value: f32,
+    },
 }
 
 /// Objects handed back to the non-realtime side for destruction.
@@ -110,6 +123,27 @@ impl EngineHandle {
 
     pub fn panic(&mut self) -> Result<(), EngineError> {
         self.send(Command::Panic)
+    }
+
+    /// Jumps to `position` (samples). Notes that started before the new
+    /// position are not restored (MVP limitation).
+    pub fn seek(&mut self, position: u64) -> Result<(), EngineError> {
+        self.send(Command::Seek(position))
+    }
+
+    /// Changes an effect parameter in place, smoothed by the effect.
+    /// Parameters that change latency must go through a recompile.
+    pub fn set_param(
+        &mut self,
+        insert: jdance_domain::InsertId,
+        index: u16,
+        value: f32,
+    ) -> Result<(), EngineError> {
+        self.send(Command::SetParam {
+            insert,
+            index,
+            value,
+        })
     }
 
     /// Replaces the playing snapshot. Its sample rate must match the engine.

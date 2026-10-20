@@ -2,7 +2,7 @@
 
 Статусы по разделу 0.2 Amendment 02. `PASS` только с артефактом:
 тест в репозитории, лог CI или acceptance-отчёт.
-Последнее обновление: 2026-10-20 (Milestone R).
+Последнее обновление: 2026-10-20 (встроенные эффекты).
 
 ## Milestone 0
 
@@ -66,6 +66,27 @@
 | Формат проекта v3 + миграции v1→v2→v3 (PER-001) | PASS | `persistence` тест миграции |
 | Бюджет stress-проекта (MIX-060) | PASS (контейнер), reference machine NOT RUN | `engine/tests/stress.rs` (ignored): 32 трека, 8 sends, 4 sidechain, 64 канала, 48 kHz/256 — p50 6.7%, p99 14.6%, max 24.4% бюджета на Xeon 2.8 GHz (облачный контейнер) |
 
+## Built-in effects и master chain (spec-mixer-playlist-effects)
+
+| Пункт | Статус | Артефакт / комментарий |
+|---|---|---|
+| Signal flow шины: inserts → gain/balance → mute/solo → meter → master → limiter → output meter | PASS | `engine/src/processor.rs`, `engine/tests/effects.rs` |
+| 8 insert slots, add/remove/reorder/bypass/params/undo | PASS | `commands` тесты (`reorder_inserts_and_undo`, лимит 8) |
+| Именованные параметры, schema version, без runtime-буферов в project.json | PASS | `persistence` тесты, миграция v3→v4 |
+| Lifecycle prepare/process/reset/latency/tail | PASS | `dsp/src/processor.rs` |
+| Parameter events с frame offset | PASS (архитектура) | `process_with_events`, тест |
+| Parametric EQ: unity, response, extremes, smoothing, график | PASS | `dsp/tests/effects.rs`; график — скриншот NOT RUN (параметры свёрнуты) |
+| Tempo Delay: первое эхо, feedback, sync при разных BPM, synced > 2 с, ping-pong, crossfade | PASS | `dsp/tests/effects.rs` |
+| Reverb: IR, bounded, decay, тишина после, без аллокаций при смене decay | PASS | RT60 1 с → измерено 66 dB/s на 44.1/48/96 kHz |
+| Safety Limiter: ceiling, stereo link, release, transients, GR meter | PASS | `dsp` и `engine` тесты |
+| Все эффекты: sample rates, block sizes (бит в бит), NaN/Inf, reset | PASS | `all_effects_*` |
+| Bypass crossfade без щелчка, hard reset | PASS | `effect_rt` и `engine/tests/effects.rs` |
+| Fade при добавлении/удалении/перестановке эффекта | PASS | мутационная проверка: без fade тест падает (скачок 0.35) |
+| Stop: fade + ограниченный reset | PASS | `stop_fades_out_without_click`, `stop_clears_effect_state` |
+| Realtime/offline equivalence | PASS | property-тест, полная цепочка эффектов + limiter |
+| Нет аллокаций в render (RT-001) со всеми эффектами, SetParam, Stop | PASS | `engine/tests/rt_alloc.rs` |
+| Export tail 5 с, настраиваемый, предупреждение | NOT RUN | следующий шаг |
+
 ## Milestone 1A / 1B
 
 | Пункт | Статус |
@@ -79,4 +100,3 @@
 
 - Ресемплинг сэмплов без anti-aliasing (BLD-041, ADR-012).
 - Один паттерн; piano roll, playlist, автоматизация, плагины — не начаты.
-- Нет reverb/delay среди встроенных эффектов.

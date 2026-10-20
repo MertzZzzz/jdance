@@ -4,15 +4,25 @@
 //! Functions marked "realtime-safe" do not allocate, lock or panic for valid
 //! inputs and run in time proportional to their buffer length.
 
-mod compressor;
+pub mod compressor;
 mod delay;
+pub mod eq;
+pub mod limiter;
+pub mod processor;
 mod resample;
+pub mod reverb;
 mod sampler;
+pub mod tempo_delay;
 
-pub use compressor::{Compressor, CompressorSettings};
+pub use compressor::Compressor;
 pub use delay::DelayLine;
+pub use eq::ParametricEq;
+pub use limiter::SafetyLimiter;
+pub use processor::{ParamEvent, ProcessContext, Processor, Tail, process_with_events};
 pub use resample::resample_cubic;
+pub use reverb::Reverb;
 pub use sampler::{SampleBuffer, SamplerVoice};
+pub use tempo_delay::TempoDelay;
 
 /// Constant-power pan law, −3 dB at center (MIX-013 candidate).
 ///
@@ -119,6 +129,10 @@ impl Smoothed {
 
     pub fn target(&self) -> f32 {
         self.target
+    }
+
+    pub fn current(&self) -> f32 {
+        self.current
     }
 
     /// Continues from `old`'s current value towards this smoother's target.

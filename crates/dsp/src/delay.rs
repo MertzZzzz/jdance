@@ -48,6 +48,12 @@ impl DelayLine {
         }
     }
 
+    /// Zeroes the buffered audio. Realtime-safe; O(len).
+    pub fn clear(&mut self) {
+        self.l.fill(0.0);
+        self.r.fill(0.0);
+    }
+
     /// Takes over `other`'s buffered audio if both have the same length,
     /// by swapping buffers (no allocation). Returns whether it did.
     pub fn take_state(&mut self, other: &mut DelayLine) -> bool {

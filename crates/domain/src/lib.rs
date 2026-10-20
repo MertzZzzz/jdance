@@ -5,13 +5,18 @@
 //! compiles a [`Project`] into its own realtime representation; the UI edits
 //! it exclusively through `jdance-commands`.
 
+mod effects;
 mod ids;
 mod mixer;
 
+pub use effects::{
+    DELAY_DIVISIONS, EQ_MAX_FREQ, Effect, EffectKind, LimiterSettings, Mapping, ParamSpec,
+    ParamUnit, Smoothing,
+};
 pub use ids::{ChannelId, IdAllocator, InsertId, PatternId, SendId, TrackId};
 pub use mixer::{
-    CompressorParams, Effect, Insert, MAX_INSERTS_PER_TRACK, MAX_SEND_LEVEL, MAX_SENDS_PER_TRACK,
-    MAX_TRACKS, Mixer, MixerTrack, RoutingError, Send, Sidechain, Tap,
+    Insert, MAX_INSERTS_PER_TRACK, MAX_SEND_LEVEL, MAX_SENDS_PER_TRACK, MAX_TRACKS, Mixer,
+    MixerTrack, RoutingError, Send, Sidechain, Tap,
 };
 
 use serde::{Deserialize, Serialize};

@@ -3,7 +3,7 @@
 //! handling and snapshot swaps.
 
 use jdance_domain::{
-    CompressorParams, Effect, Insert, InsertId, MixerTrack, Project, Send, SendId, Sidechain, Tap,
+    Effect, EffectKind, Insert, InsertId, MixerTrack, Project, Send, SendId, Sidechain, Tap,
     TrackId,
 };
 use jdance_engine::{compile, create_engine};
@@ -44,6 +44,9 @@ fn render_does_not_allocate() {
             40 => handle.stop().unwrap(),
             41 => handle.play().unwrap(),
             45 => handle.panic().unwrap(),
+            20 => handle.set_param(InsertId(9012), 4, 0.9).unwrap(),
+            25 => handle.stop().unwrap(),
+            27 => handle.play().unwrap(),
             _ => {}
         }
         let n = [64, 1, 333, 1024, 4096][i % 5];
@@ -57,12 +60,7 @@ fn render_does_not_allocate() {
 /// Routes channels through tracks with sends, a lookahead compressor and a
 /// sidechain, so swaps exercise every state-transfer path.
 fn with_mixer(mut p: Project, volume: f32) -> Project {
-    let comp = |lookahead_ms| {
-        Effect::Compressor(CompressorParams {
-            lookahead_ms,
-            ..Default::default()
-        })
-    };
+    let comp = |lookahead_ms| Effect::new(EffectKind::Compressor).with("lookahead", lookahead_ms);
     let mut drums = MixerTrack::new(TrackId(9001), "Drums");
     drums.volume = volume;
     drums.inserts.push(Insert {
@@ -87,7 +85,31 @@ fn with_mixer(mut p: Project, volume: f32) -> Project {
             tap: Tap::PreFader,
         }),
     });
-    let ret = MixerTrack::new(TrackId(9003), "Return");
+    let mut ret = MixerTrack::new(TrackId(9003), "Return");
+    for (id, kind) in [
+        (9012, EffectKind::TempoDelay),
+        (9013, EffectKind::Reverb),
+        (9014, EffectKind::ParametricEq),
+    ] {
+        ret.inserts.push(Insert {
+            id: InsertId(id),
+            bypass: volume < 0.5 && id == 9013,
+            effect: Effect::new(kind).with(
+                if kind == EffectKind::ParametricEq {
+                    "mid1_gain"
+                } else {
+                    "wet"
+                },
+                0.5,
+            ),
+            sidechain: None,
+        });
+    }
+    if volume < 0.5 {
+        // Structural difference between the two snapshots.
+        ret.inserts.swap(0, 2);
+    }
+    p.mixer.limiter.enabled = true;
     p.mixer.tracks = vec![drums, bass, ret];
     for (i, c) in p.channels.iter_mut().enumerate() {
         c.track = [TrackId(9001), TrackId(9002), TrackId::MASTER][i % 3];

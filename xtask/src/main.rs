@@ -5,8 +5,8 @@
 //! - `gen-demo`: regenerates `assets/demo` (synthesized samples, CR-006).
 
 use jdance_domain::{
-    Channel, ChannelId, ChannelSource, CompressorParams, Effect, Insert, InsertId, MixerTrack,
-    Project, SampleRef, Sidechain, Tap, TrackId,
+    Channel, ChannelId, ChannelSource, Effect, EffectKind, Insert, InsertId, MixerTrack, Project,
+    SampleRef, Sidechain, Tap, TrackId,
 };
 use jdance_persistence::{WavExportFormat, save_project, write_wav};
 use serde_json::Value;
@@ -32,11 +32,13 @@ const ALLOWED: &[(&str, &[&str])] = &[
     ("jdance-audio-cpal", &["jdance-audio-api"]),
     ("jdance-persistence", &["jdance-domain"]),
     ("jdance-plugin-api", &[]),
+    // dsp is pure math with no dependencies (EQ response graph).
     (
         "jdance-ui",
         &[
             "jdance-domain",
             "jdance-commands",
+            "jdance-dsp",
             "jdance-audio-api",
             "jdance-plugin-api",
         ],
@@ -311,20 +313,58 @@ fn gen_demo() -> Result<(), String> {
     perc.inserts.push(Insert {
         id: InsertId(project.ids.next()),
         bypass: false,
-        effect: Effect::Compressor(CompressorParams {
-            threshold_db: -30.0,
-            ratio: 6.0,
-            attack_ms: 1.0,
-            release_ms: 150.0,
-            makeup_db: 0.0,
-            lookahead_ms: 0.0,
-        }),
+        effect: Effect::new(EffectKind::Compressor)
+            .with("threshold", -30.0)
+            .with("ratio", 6.0)
+            .with("attack", 1.0)
+            .with("release", 150.0),
         sidechain: Some(Sidechain {
             source: kick_track,
             tap: Tap::PreFader,
         }),
     });
-    project.mixer.tracks = vec![MixerTrack::new(kick_track, "Kick"), perc];
+    // Reverb return fed by a send from Perc; EQ on the kick; tempo delay
+    // on the perc; safety limiter on the master.
+    let verb_track = TrackId(project.ids.next());
+    let mut verb = MixerTrack::new(verb_track, "Reverb");
+    verb.inserts.push(Insert {
+        id: InsertId(project.ids.next()),
+        bypass: false,
+        effect: Effect::new(EffectKind::Reverb)
+            .with("wet", 1.0)
+            .with("decay", 1.6),
+        sidechain: None,
+    });
+    perc.sends.push(jdance_domain::Send {
+        id: jdance_domain::SendId(project.ids.next()),
+        dest: verb_track,
+        level: 0.35,
+        pre_fader: false,
+    });
+    perc.inserts.push(Insert {
+        id: InsertId(project.ids.next()),
+        bypass: false,
+        effect: Effect::new(EffectKind::TempoDelay)
+            .with("division", 4.0)
+            .with("feedback", 0.35)
+            .with("wet", 0.2)
+            .with("ping_pong", 1.0),
+        sidechain: None,
+    });
+    let mut kick_bus = MixerTrack::new(kick_track, "Kick");
+    kick_bus.inserts.push(Insert {
+        id: InsertId(project.ids.next()),
+        bypass: false,
+        effect: Effect::new(EffectKind::ParametricEq)
+            .with("low_freq", 80.0)
+            .with("low_gain", 3.0)
+            .with("mid1_freq", 350.0)
+            .with("mid1_gain", -4.0)
+            .with("mid1_q", 1.4),
+        sidechain: None,
+    });
+    project.mixer.tracks = vec![kick_bus, perc, verb];
+    project.mixer.limiter.enabled = true;
     let parts: [(&str, Vec<f32>, &[u32], f32); 3] = [
         ("Kick", kick(), &[0, 4, 8, 12], 0.0),
         ("Snare", snare(), &[4, 12], 0.05),

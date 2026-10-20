@@ -236,6 +236,29 @@ pub(crate) fn apply(edit: &Edit, p: &mut Project) -> Result<Edit, EditError> {
             }
             Ok(())
         }),
+        Edit::MoveInsert(id, to) => structural(p, |p| {
+            let t = tracks_mut(&mut p.mixer)
+                .find(|t| t.inserts.iter().any(|i| i.id == *id))
+                .ok_or(EditError::NoSuchMixerObject(id.0))?;
+            let from = t
+                .inserts
+                .iter()
+                .position(|i| i.id == *id)
+                .expect("found above");
+            let ins = t.inserts.remove(from);
+            let at = (*to).min(t.inserts.len());
+            t.inserts.insert(at, ins);
+            Ok(())
+        }),
+        Edit::SetLimiter(settings) => {
+            settings
+                .validate()
+                .map_err(|m| EditError::Routing(RoutingError::InvalidValue(m)))?;
+            Ok(Edit::SetLimiter(std::mem::replace(
+                &mut p.mixer.limiter,
+                *settings,
+            )))
+        }
         Edit::SetInsertSidechain(id, sc) => structural(p, |p| {
             insert_mut(&mut p.mixer, *id)?.sidechain = *sc;
             Ok(())
@@ -322,10 +345,10 @@ pub fn add_insert(
 mod tests {
     use super::*;
     use crate::add_sampler_channel;
-    use jdance_domain::{CompressorParams, Sidechain, Tap};
+    use jdance_domain::{EffectKind, Sidechain, Tap};
 
     fn comp() -> Effect {
-        Effect::Compressor(CompressorParams::default())
+        Effect::new(EffectKind::Compressor)
     }
 
     #[test]
@@ -408,6 +431,42 @@ mod tests {
     }
 
     #[test]
+    fn reorder_inserts_and_undo() {
+        let mut p = Project::new();
+        let mut h = History::default();
+        let t = add_track(&mut h, &mut p, "T").unwrap();
+        let a = add_insert(&mut h, &mut p, t, Effect::new(EffectKind::ParametricEq)).unwrap();
+        let b = add_insert(&mut h, &mut p, t, Effect::new(EffectKind::Reverb)).unwrap();
+        h.execute(&mut p, Edit::MoveInsert(b, 0)).unwrap();
+        let order: Vec<_> = p
+            .mixer
+            .track(t)
+            .unwrap()
+            .inserts
+            .iter()
+            .map(|i| i.id)
+            .collect();
+        assert_eq!(order, [b, a]);
+        h.undo(&mut p).unwrap();
+        let order: Vec<_> = p
+            .mixer
+            .track(t)
+            .unwrap()
+            .inserts
+            .iter()
+            .map(|i| i.id)
+            .collect();
+        assert_eq!(order, [a, b]);
+        for _ in 0..6 {
+            add_insert(&mut h, &mut p, t, comp()).unwrap();
+        }
+        assert!(
+            add_insert(&mut h, &mut p, t, comp()).is_err(),
+            "limit of 8 inserts"
+        );
+    }
+
+    #[test]
     fn parameter_edits_validate_and_merge() {
         let mut p = Project::new();
         let mut h = History::default();
@@ -421,14 +480,13 @@ mod tests {
         assert!(h.execute(&mut p, Edit::SetSendLevel(s, 3.0)).is_err());
         h.undo(&mut p).unwrap();
         assert!(!h.is_dirty());
-        let bad = CompressorParams {
-            ratio: 0.5,
-            ..Default::default()
-        };
         let ins = add_insert(&mut h, &mut p, t, comp()).unwrap();
         assert!(
-            h.execute(&mut p, Edit::SetInsertEffect(ins, Effect::Compressor(bad)))
-                .is_err()
+            h.execute(
+                &mut p,
+                Edit::SetInsertEffect(ins, comp().with("ratio", 0.5))
+            )
+            .is_err()
         );
         assert!(
             h.execute(&mut p, Edit::RemoveTrack(TrackId::MASTER))

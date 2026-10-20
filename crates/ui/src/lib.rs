@@ -10,13 +10,14 @@ mod rack;
 mod settings;
 
 pub use host::{
-    Host, LatencyInfo, Notice, NoticeLevel, SampleStatus, StreamStatus, TransportStatus,
+    Host, LatencyInfo, MeterReadings, Notice, NoticeLevel, SampleStatus, StreamStatus,
+    TransportStatus,
 };
 
 use egui::{Key, KeyboardShortcut, Modifiers};
 use jdance_commands::{Edit, History, add_insert, add_sampler_channel, add_send, add_track};
 use jdance_domain::{
-    ChannelId, CompressorParams, Effect, MAX_TEMPO_BPM, MAX_VOLUME, MIN_TEMPO_BPM, Project, TrackId,
+    ChannelId, Effect, MAX_TEMPO_BPM, MAX_VOLUME, MIN_TEMPO_BPM, Project, TrackId,
 };
 use settings::SettingsWindow;
 use std::path::{Path, PathBuf};
@@ -450,11 +451,11 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             mixer::MixerAction::AddSend { from, to } => {
                 add_send(&mut self.history, &mut self.project, from, to).map(|_| ())
             }
-            mixer::MixerAction::AddCompressor(track) => add_insert(
+            mixer::MixerAction::AddEffect(track, kind) => add_insert(
                 &mut self.history,
                 &mut self.project,
                 track,
-                Effect::Compressor(CompressorParams::default()),
+                Effect::new(kind),
             )
             .map(|_| ()),
             mixer::MixerAction::Rename(id) => {
@@ -592,13 +593,14 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
         let mut mix = mixer::MixerOutput::default();
         if self.show_mixer {
             let latency = self.host.latency();
+            let meters = self.host.meters();
             egui::Panel::bottom("mixer")
                 .resizable(true)
                 .default_size(330.0)
                 .min_size(120.0)
                 .show(ui, |ui| {
                     egui::ScrollArea::vertical().show(ui, |ui| {
-                        mix = mixer::show(ui, &self.project.mixer, &latency);
+                        mix = mixer::show(ui, &self.project.mixer, &latency, &meters);
                     });
                 });
         }

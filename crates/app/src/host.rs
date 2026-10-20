@@ -9,15 +9,56 @@ use jdance_audio_api::{
     DeviceSettings, OutputStream, RenderCallback, StreamState,
 };
 use jdance_audio_cpal::CpalBackend;
+use jdance_domain::TrackId;
 use jdance_domain::{Project, SampleRef};
-use jdance_engine::{EngineHandle, EngineProcessor, FeedbackReading, compile, create_engine};
+use jdance_engine::{
+    EngineHandle, EngineProcessor, FeedbackReading, Meters, compile, create_engine,
+    param_only_changes,
+};
 use jdance_persistence::{WavExportFormat, resolve_sample_path};
-use jdance_ui::{Host, LatencyInfo, Notice, SampleStatus, StreamStatus, TransportStatus};
+use jdance_ui::{
+    Host, LatencyInfo, MeterReadings, Notice, SampleStatus, StreamStatus, TransportStatus,
+};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, channel};
 
 /// Rate used for samples and export when no device is open.
 const FALLBACK_RATE: u32 = 48_000;
+
+/// Meter display state: peaks read from the engine with a visual fall-off
+/// (the engine reports raw peaks since the previous read).
+#[derive(Debug, Default)]
+struct MeterState {
+    readings: MeterReadings,
+}
+
+impl MeterState {
+    /// Per UI frame: ≈ 20 dB/s fall-off at 60 frames per second.
+    const FALL: f32 = 0.93;
+
+    fn update(&mut self, m: &Meters) {
+        let fall = |old: f32, new: f32| new.max(old * Self::FALL);
+        let mut buses = Vec::with_capacity(self.readings.buses.len());
+        for slot in m.buses.iter() {
+            let (id, l, r) = slot.take();
+            if id == u64::MAX {
+                continue;
+            }
+            let id = TrackId(id);
+            let (ol, or) = self.readings.bus(id);
+            buses.push((id, fall(ol, l), fall(or, r)));
+        }
+        let (_, l, r) = m.output.take();
+        let (ol, or) = self.readings.output;
+        let gain = m.take_limiter_gain();
+        self.readings = MeterReadings {
+            buses,
+            output: (fall(ol, l), fall(or, r)),
+            // Show reduction recovering visually like a meter.
+            limiter_gain: gain.min(1.0 - (1.0 - self.readings.limiter_gain) * Self::FALL),
+        };
+    }
+}
 
 /// Adapts the engine processor to the audio-api callback.
 struct EngineCallback(EngineProcessor);
@@ -40,6 +81,7 @@ pub struct AudioHost {
     active: Option<Active>,
     reading: FeedbackReading,
     latency: LatencyInfo,
+    meters: MeterState,
     project: Project,
     project_dir: Option<PathBuf>,
     needs_compile: bool,
@@ -75,6 +117,7 @@ impl AudioHost {
             active: None,
             reading: FeedbackReading::default(),
             latency: LatencyInfo::default(),
+            meters: MeterState::default(),
             project: Project::new(),
             project_dir: None,
             needs_compile: true,
@@ -213,6 +256,7 @@ impl Host for AudioHost {
         if let Some(a) = &mut self.active {
             a.engine.collect_garbage();
             self.reading = a.engine.feedback().read();
+            self.meters.update(&a.engine.feedback().meters);
             if let StreamState::Failed(e) = a.stream.state()
                 && !a.failure_reported
             {
@@ -240,6 +284,24 @@ impl Host for AudioHost {
     }
 
     fn set_project(&mut self, project: &Project, project_dir: Option<&Path>) {
+        let same_dir = self.project_dir.as_deref() == project_dir;
+        // Fast path: only effect parameters changed → smoothed parameter
+        // commands instead of rebuilding effect buffers.
+        if same_dir
+            && !self.needs_compile
+            && let Some(changes) = param_only_changes(&self.project, project)
+            && let Some(a) = &mut self.active
+        {
+            let sent = changes
+                .iter()
+                .all(|c| a.engine.set_param(c.insert, c.index, c.value).is_ok());
+            self.project = project.clone();
+            if !sent {
+                self.needs_compile = true;
+                self.recompile();
+            }
+            return;
+        }
         self.project = project.clone();
         self.project_dir = project_dir.map(Path::to_path_buf);
         let paths: Vec<PathBuf> = project
@@ -288,6 +350,13 @@ impl Host for AudioHost {
 
     fn latency(&self) -> LatencyInfo {
         self.latency.clone()
+    }
+
+    fn meters(&self) -> MeterReadings {
+        if self.active.is_none() {
+            return MeterReadings::default();
+        }
+        self.meters.readings.clone()
     }
 
     fn stream(&self) -> Option<StreamStatus> {

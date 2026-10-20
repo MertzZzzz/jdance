@@ -10,9 +10,9 @@ mod mixer;
 pub use mixer::{add_insert, add_send, add_track};
 
 use jdance_domain::{
-    Channel, ChannelId, Effect, InsertId, MAX_CHANNELS, MAX_TEMPO_BPM, MAX_VOLUME, MIN_TEMPO_BPM,
-    Mixer, MixerTrack, PatternId, Project, RoutingError, SampleRef, SendId, Sidechain, Step,
-    StepRow, TrackId,
+    Channel, ChannelId, Effect, InsertId, LimiterSettings, MAX_CHANNELS, MAX_TEMPO_BPM, MAX_VOLUME,
+    MIN_TEMPO_BPM, Mixer, MixerTrack, PatternId, Project, RoutingError, SampleRef, SendId,
+    Sidechain, Step, StepRow, TrackId,
 };
 use thiserror::Error;
 
@@ -91,7 +91,12 @@ pub enum Edit {
         index: usize,
     },
     RemoveInsert(InsertId),
+    /// Moves an insert to a new position within its track.
+    MoveInsert(InsertId, usize),
     SetInsertSidechain(InsertId, Option<Sidechain>),
+    SetLimiter(LimiterSettings),
+    /// Several edits applied as one undo step, in order; all or nothing.
+    Batch(Vec<Edit>),
     /// Restores the mixer and the channel → track assignments.
     RestoreMixer {
         mixer: Box<Mixer>,
@@ -111,6 +116,7 @@ pub enum MergeKey {
     TrackPan(TrackId),
     SendLevel(SendId),
     InsertEffect(InsertId),
+    Limiter,
 }
 
 impl Edit {
@@ -143,6 +149,9 @@ impl Edit {
             Edit::SetSendPreFader(..) => "Change send mode",
             Edit::AddInsert { .. } => "Add effect",
             Edit::RemoveInsert(_) => "Remove effect",
+            Edit::MoveInsert(..) => "Reorder effects",
+            Edit::SetLimiter(_) => "Change limiter",
+            Edit::Batch(_) => "Edit",
             Edit::SetInsertSidechain(..) => "Change sidechain",
             Edit::RestoreMixer { .. } => "Change mixer",
         }
@@ -158,6 +167,7 @@ impl Edit {
             Edit::SetTrackPan(id, _) => Some(MergeKey::TrackPan(*id)),
             Edit::SetSendLevel(id, _) => Some(MergeKey::SendLevel(*id)),
             Edit::SetInsertEffect(id, _) => Some(MergeKey::InsertEffect(*id)),
+            Edit::SetLimiter(_) => Some(MergeKey::Limiter),
             _ => None,
         }
     }
@@ -286,6 +296,23 @@ impl Edit {
                     &mut p.mixer.master.volume,
                     v,
                 )))
+            }
+            Edit::Batch(edits) => {
+                let mut inverses = Vec::with_capacity(edits.len());
+                for e in edits {
+                    match e.apply(p) {
+                        Ok(inv) => inverses.push(inv),
+                        Err(err) => {
+                            // Roll back what was applied so far.
+                            for inv in inverses.iter().rev() {
+                                inv.apply(p).expect("inverse of an applied edit applies");
+                            }
+                            return Err(err);
+                        }
+                    }
+                }
+                inverses.reverse();
+                Ok(Edit::Batch(inverses))
             }
             other => mixer::apply(other, p),
         }
@@ -597,6 +624,34 @@ mod tests {
         );
         assert_eq!(p, before);
         assert!(!h.is_dirty());
+    }
+
+    #[test]
+    fn batch_is_one_step_and_atomic() {
+        let (mut p, mut h, ch, pat) = setup();
+        let before = p.clone();
+        let step = |i| Edit::SetStep {
+            pattern: pat,
+            channel: ch,
+            index: i,
+            step: on(1.0),
+        };
+        h.execute(
+            &mut p,
+            Edit::Batch(vec![step(1), step(2), Edit::SetTempo(100.0)]),
+        )
+        .unwrap();
+        assert!(p.patterns[0].step(ch, 2).unwrap().on);
+        h.undo(&mut p).unwrap();
+        assert_eq!(p.tempo_bpm, before.tempo_bpm);
+        assert!(!p.patterns[0].step(ch, 1).unwrap().on);
+        // A failing member rolls everything back.
+        let snapshot = p.clone();
+        assert!(
+            h.execute(&mut p, Edit::Batch(vec![step(3), Edit::SetTempo(1e9)]))
+                .is_err()
+        );
+        assert_eq!(p, snapshot);
     }
 
     #[test]

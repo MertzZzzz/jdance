@@ -9,5 +9,9 @@ publish.workspace = true
 
 [dependencies]
 
+[dev-dependencies]
+jdance-domain.workspace = true
+proptest.workspace = true
+
 [lints]
 workspace = true

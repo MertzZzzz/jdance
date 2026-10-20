@@ -2,7 +2,7 @@
 //! Project file format (PER-001): a single JSON file.
 //!
 //! ```json
-//! { "format": "jdance-project", "format_version": 3, "project": { … } }
+//! { "format": "jdance-project", "format_version": 4, "project": { … } }
 //! ```
 //!
 //! Any schema change increments `format_version` and adds a migration step
@@ -14,7 +14,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 pub const FORMAT_TAG: &str = "jdance-project";
-pub const CURRENT_FORMAT_VERSION: u32 = 3;
+pub const CURRENT_FORMAT_VERSION: u32 = 4;
 pub const PROJECT_EXTENSION: &str = "jdance";
 
 /// Saves `project` to `path` atomically. Sample paths inside the project
@@ -31,13 +31,20 @@ pub fn save_project(path: &Path, project: &Project) -> Result<(), PersistError> 
             s.path = rel;
         }
     }
-    let value = serde_json::json!({
-        "format": FORMAT_TAG,
-        "format_version": CURRENT_FORMAT_VERSION,
-        "project": doc,
-    });
-    let mut bytes =
-        serde_json::to_vec_pretty(&value).map_err(|e| PersistError::Corrupt(e.to_string()))?;
+    // Serialize directly (not through `serde_json::Value`) so `f32` values
+    // keep their shortest representation (0.7, not 0.699999988…).
+    #[derive(serde::Serialize)]
+    struct File<'a> {
+        format: &'static str,
+        format_version: u32,
+        project: &'a Project,
+    }
+    let mut bytes = serde_json::to_vec_pretty(&File {
+        format: FORMAT_TAG,
+        format_version: CURRENT_FORMAT_VERSION,
+        project: &doc,
+    })
+    .map_err(|e| PersistError::Corrupt(e.to_string()))?;
     bytes.push(b'\n');
     write_atomically(path, &bytes)
 }
@@ -84,8 +91,14 @@ fn parse_project(bytes: &[u8]) -> Result<Project, PersistError> {
         version,
         value.get("project").cloned().unwrap_or(Value::Null),
     )?;
-    let project: Project =
+    let mut project: Project =
         serde_json::from_value(project).map_err(|e| PersistError::Corrupt(e.to_string()))?;
+    // Parameters added in a newer schema of an effect take defaults.
+    for t in std::iter::once(&mut project.mixer.master).chain(project.mixer.tracks.iter_mut()) {
+        for i in &mut t.inserts {
+            i.effect.complete();
+        }
+    }
     validate(&project)?;
     Ok(project)
 }
@@ -101,10 +114,77 @@ fn migrate(version: u32, mut project: Value) -> Result<Value, PersistError> {
         project = v2_to_v3(project)?;
         v = 3;
     }
+    if v == 3 {
+        project = v3_to_v4(project)?;
+        v = 4;
+    }
     match v {
         CURRENT_FORMAT_VERSION => Ok(project),
         v => Err(PersistError::Corrupt(format!("unknown format_version {v}"))),
     }
+}
+
+/// v4 stores effects as `{kind, schema, params{id: value}}` with named
+/// parameters (spec "Built-in Effects") and adds the master limiter.
+fn v3_to_v4(mut project: Value) -> Result<Value, PersistError> {
+    let corrupt = |m: &str| PersistError::Corrupt(format!("v3 project: {m}"));
+    let mixer = project
+        .get_mut("mixer")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| corrupt("missing mixer"))?;
+    mixer.insert(
+        "limiter".into(),
+        serde_json::json!({"enabled": false, "ceiling_db": -0.3, "release_ms": 80.0}),
+    );
+    let mut tracks: Vec<&mut Value> = Vec::new();
+    let (master, rest): (Option<&mut Value>, Option<&mut Value>) = {
+        let mut master = None;
+        let mut rest = None;
+        for (k, v) in mixer.iter_mut() {
+            match k.as_str() {
+                "master" => master = Some(v),
+                "tracks" => rest = Some(v),
+                _ => {}
+            }
+        }
+        (master, rest)
+    };
+    tracks.extend(master);
+    if let Some(Value::Array(list)) = rest {
+        tracks.extend(list.iter_mut());
+    }
+    // v3 compressor fields → v4 parameter IDs.
+    const RENAME: [(&str, &str); 6] = [
+        ("threshold_db", "threshold"),
+        ("ratio", "ratio"),
+        ("attack_ms", "attack"),
+        ("release_ms", "release"),
+        ("makeup_db", "makeup"),
+        ("lookahead_ms", "lookahead"),
+    ];
+    for t in tracks {
+        let Some(inserts) = t.get_mut("inserts").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for ins in inserts {
+            let effect = ins
+                .get_mut("effect")
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| corrupt("bad insert"))?;
+            if effect.get("kind").and_then(Value::as_str) != Some("compressor") {
+                return Err(corrupt("unknown effect kind"));
+            }
+            let mut params = serde_json::Map::new();
+            for (old, new) in RENAME {
+                if let Some(v) = effect.remove(old) {
+                    params.insert(new.into(), v);
+                }
+            }
+            effect.insert("schema".into(), Value::from(1));
+            effect.insert("params".into(), Value::Object(params));
+        }
+    }
+    Ok(project)
 }
 
 /// v3 added solo on mixer tracks (MIX-012); nothing was soloed before.
@@ -279,16 +359,16 @@ mod tests {
     #[test]
     fn rejects_semantically_broken_projects() {
         let p = sample_project("a.wav");
-        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 3, "project": p});
+        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 4, "project": p});
         v["project"]["channels"][0]["volume"] = serde_json::json!(50.0);
         assert!(matches!(
             parse_project(v.to_string().as_bytes()),
             Err(PersistError::Corrupt(_))
         ));
-        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 3, "project": p});
+        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 4, "project": p});
         v["project"]["patterns"][0]["rows"][0]["steps"] = serde_json::json!([]);
         assert!(parse_project(v.to_string().as_bytes()).is_err());
-        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 3, "project": p});
+        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 4, "project": p});
         v["project"]["ids"]["next"] = serde_json::json!(1);
         assert!(parse_project(v.to_string().as_bytes()).is_err());
     }
@@ -317,6 +397,58 @@ mod tests {
     }
 
     #[test]
+    fn migrates_v3_compressor_to_named_parameters() {
+        let v3 = br#"{
+          "format": "jdance-project",
+          "format_version": 3,
+          "project": {
+            "tempo_bpm": 120.0, "channels": [],
+            "patterns": [{"id": 1, "name": "P", "length_steps": 16, "rows": []}],
+            "mixer": {
+              "master": {"id": 0, "name": "Master", "volume": 1.0, "pan": 0.0, "muted": false,
+                         "solo": false, "main_out": 0, "sends": [], "inserts": []},
+              "tracks": [{"id": 2, "name": "T", "volume": 1.0, "pan": 0.0, "muted": false,
+                          "solo": false, "main_out": 0, "sends": [],
+                          "inserts": [{"id": 3, "bypass": true, "sidechain": null,
+                                       "effect": {"kind": "compressor", "threshold_db": -30.0,
+                                                  "ratio": 6.0, "attack_ms": 1.0, "release_ms": 150.0,
+                                                  "makeup_db": 2.0, "lookahead_ms": 0.5}}]}]
+            },
+            "ids": {"next": 4}
+          }
+        }"#;
+        let p = parse_project(v3).unwrap();
+        let ins = &p.mixer.tracks[0].inserts[0];
+        assert!(ins.bypass);
+        assert_eq!(ins.effect.kind, jdance_domain::EffectKind::Compressor);
+        assert_eq!(ins.effect.get("threshold"), -30.0);
+        assert_eq!(ins.effect.get("lookahead"), 0.5);
+        assert!(!p.mixer.limiter.enabled);
+    }
+
+    #[test]
+    fn effect_params_are_saved_by_name() {
+        use jdance_domain::{Effect, EffectKind, Insert, InsertId, MixerTrack, TrackId};
+        let mut p = sample_project("a.wav");
+        let mut t = MixerTrack::new(TrackId(p.ids.next()), "FX");
+        t.inserts.push(Insert {
+            id: InsertId(p.ids.next()),
+            bypass: false,
+            effect: Effect::new(EffectKind::TempoDelay).with("feedback", 0.7),
+            sidechain: None,
+        });
+        p.mixer.tracks.push(t);
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("fx.jdance");
+        save_project(&file, &p).unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.contains("\"feedback\": 0.7"));
+        assert!(text.contains("\"kind\": \"tempo_delay\""));
+        assert!(!text.contains("buf"), "no runtime buffers in the project");
+        assert_eq!(load_project(&file).unwrap(), p);
+    }
+
+    #[test]
     fn rejects_cyclic_routing() {
         use jdance_domain::{MixerTrack, Send, SendId, TrackId};
         let mut p = sample_project("a.wav");
@@ -331,7 +463,7 @@ mod tests {
             pre_fader: false,
         });
         p.mixer.tracks = vec![a, b];
-        let v = serde_json::json!({"format": FORMAT_TAG, "format_version": 3, "project": p});
+        let v = serde_json::json!({"format": FORMAT_TAG, "format_version": 4, "project": p});
         let err = parse_project(v.to_string().as_bytes()).unwrap_err();
         assert!(err.to_string().contains("feedback loop"), "{err}");
     }
@@ -340,7 +472,7 @@ mod tests {
     fn truncated_files_never_panic() {
         let p = sample_project("a.wav");
         let full = serde_json::to_vec(&serde_json::json!({
-            "format": FORMAT_TAG, "format_version": 3, "project": p
+            "format": FORMAT_TAG, "format_version": 4, "project": p
         }))
         .unwrap();
         for n in 0..full.len() {

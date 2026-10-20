@@ -1,26 +1,31 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Mixer panel: one strip per track (MIX-001…MIX-034).
+//! Mixer panel: one strip per bus.
 //!
-//! Like the rack, drawing only collects edits; routing menus offer only
-//! destinations that keep the graph acyclic (MIX-021), and the commands
-//! layer validates again.
+//! Strip layout follows the signal flow: inserts → gain/balance →
+//! mute/solo → bus meter; the master strip adds the safety limiter and the
+//! output meter. Effect controls are generated from each effect's
+//! parameter schema. Drawing only collects edits; routing menus offer
+//! only destinations that keep the graph acyclic (MIX-021).
 
-use crate::LatencyInfo;
-use egui::{Color32, RichText};
+use crate::{LatencyInfo, MeterReadings};
+use egui::{Color32, CornerRadius, Rect, RichText, Sense, Stroke, StrokeKind, pos2, vec2};
 use jdance_commands::Edit;
 use jdance_domain::{
-    CompressorParams, Effect, Insert, MAX_INSERTS_PER_TRACK, MAX_SEND_LEVEL, MAX_SENDS_PER_TRACK,
-    MAX_TRACKS, MAX_VOLUME, Mixer, MixerTrack, Sidechain, Tap, TrackId,
+    Effect, EffectKind, Insert, LimiterSettings, MAX_INSERTS_PER_TRACK, MAX_SEND_LEVEL,
+    MAX_SENDS_PER_TRACK, MAX_TRACKS, MAX_VOLUME, Mapping, Mixer, MixerTrack, ParamUnit, Sidechain,
+    Tap, TrackId,
 };
+use jdance_dsp::Processor;
 
-const STRIP_WIDTH: f32 = 170.0;
+const STRIP_WIDTH: f32 = 190.0;
+const FADER_HEIGHT: f32 = 110.0;
 
-/// Mixer changes that need new IDs, applied by the caller.
+/// Mixer changes that need new IDs or dialogs, applied by the caller.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum MixerAction {
     AddTrack,
     AddSend { from: TrackId, to: TrackId },
-    AddCompressor(TrackId),
+    AddEffect(TrackId, EffectKind),
     Rename(TrackId),
 }
 
@@ -45,7 +50,45 @@ fn track_name(mixer: &Mixer, id: TrackId) -> String {
         .map_or_else(|| format!("#{}", id.0), |t| t.name.clone())
 }
 
-pub(crate) fn show(ui: &mut egui::Ui, mixer: &Mixer, latency: &LatencyInfo) -> MixerOutput {
+/// Vertical stereo peak meter; −60..+6 dB, red above 0 dBFS.
+fn meter(ui: &mut egui::Ui, height: f32, (l, r): (f32, f32)) {
+    let (rect, _) = ui.allocate_exact_size(vec2(12.0, height), Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, CornerRadius::same(2), ui.visuals().extreme_bg_color);
+    let frac = |v: f32| {
+        if v <= 0.0 {
+            0.0
+        } else {
+            ((20.0 * v.log10() + 60.0) / 66.0).clamp(0.0, 1.0)
+        }
+    };
+    for (i, v) in [l, r].into_iter().enumerate() {
+        let x0 = rect.left() + 1.0 + i as f32 * 5.5;
+        let top = rect.bottom() - frac(v) * rect.height();
+        let bar = Rect::from_min_max(pos2(x0, top), pos2(x0 + 4.5, rect.bottom()));
+        let color = if v > 1.0 {
+            Color32::from_rgb(230, 70, 60)
+        } else if v > 0.5 {
+            Color32::from_rgb(230, 200, 60)
+        } else {
+            Color32::from_rgb(90, 190, 110)
+        };
+        painter.rect_filled(bar, CornerRadius::ZERO, color);
+    }
+    // 0 dBFS mark.
+    let y0 = rect.bottom() - (60.0 / 66.0) * rect.height();
+    painter.line_segment(
+        [pos2(rect.left(), y0), pos2(rect.right(), y0)],
+        Stroke::new(1.0, ui.visuals().weak_text_color()),
+    );
+}
+
+pub(crate) fn show(
+    ui: &mut egui::Ui,
+    mixer: &Mixer,
+    latency: &LatencyInfo,
+    meters: &MeterReadings,
+) -> MixerOutput {
     let mut out = MixerOutput::default();
     ui.horizontal(|ui| {
         ui.strong("Mixer");
@@ -63,7 +106,7 @@ pub(crate) fn show(ui: &mut egui::Ui, mixer: &Mixer, latency: &LatencyInfo) -> M
     egui::ScrollArea::horizontal().show(ui, |ui| {
         ui.horizontal_top(|ui| {
             for track in mixer.all_tracks() {
-                strip(ui, mixer, track, latency, &mut out);
+                strip(ui, mixer, track, latency, meters, &mut out);
                 ui.separator();
             }
             if mixer.tracks.len() < MAX_TRACKS && ui.button("+ Track").clicked() {
@@ -79,6 +122,7 @@ fn strip(
     mixer: &Mixer,
     t: &MixerTrack,
     latency: &LatencyInfo,
+    meters: &MeterReadings,
     out: &mut MixerOutput,
 ) {
     ui.vertical(|ui| {
@@ -110,9 +154,39 @@ fn strip(
             {
                 out.edits.push((Edit::SetTrackMuted(t.id, muted), false));
             }
+            if !t.is_master() {
+                let mut solo = t.solo;
+                if ui
+                    .toggle_value(&mut solo, "S")
+                    .on_hover_text("Solo (sources and the path to the master stay audible)")
+                    .changed()
+                {
+                    out.edits.push((Edit::SetTrackSolo(t.id, solo), false));
+                }
+            }
         });
 
+        // Inserts come first in the signal flow.
+        for (index, ins) in t.inserts.iter().enumerate() {
+            insert_ui(ui, mixer, t, ins, index, out);
+        }
+        if t.inserts.len() < MAX_INSERTS_PER_TRACK {
+            ui.menu_button(
+                format!("+ Effect ({}/{MAX_INSERTS_PER_TRACK})", t.inserts.len()),
+                |ui| {
+                    for kind in EffectKind::ALL {
+                        if ui.button(kind.name()).clicked() {
+                            out.actions.push(MixerAction::AddEffect(t.id, kind));
+                            ui.close();
+                        }
+                    }
+                },
+            );
+        }
+        ui.separator();
+
         ui.horizontal(|ui| {
+            ui.spacing_mut().slider_width = FADER_HEIGHT;
             let mut vol = t.volume;
             let r = ui.add(
                 egui::Slider::new(&mut vol, 0.0..=MAX_VOLUME)
@@ -123,6 +197,12 @@ fn strip(
                 out.edits.push((Edit::SetTrackVolume(t.id, vol), true));
             }
             out.end_gesture |= r.drag_stopped();
+            let levels = if t.is_master() {
+                meters.output
+            } else {
+                meters.bus(t.id)
+            };
+            meter(ui, FADER_HEIGHT, levels);
             ui.vertical(|ui| {
                 ui.label(db_label(t.volume));
                 ui.spacing_mut().slider_width = 80.0;
@@ -146,7 +226,9 @@ fn strip(
             });
         });
 
-        if !t.is_master() {
+        if t.is_master() {
+            limiter_ui(ui, &mixer.limiter, meters.limiter_gain, out);
+        } else {
             ui.horizontal(|ui| {
                 ui.label("Out");
                 egui::ComboBox::from_id_salt(("out", t.id.0))
@@ -167,59 +249,105 @@ fn strip(
         }
 
         ui.separator();
-        for ins in &t.inserts {
-            insert_ui(ui, mixer, t, ins, out);
-        }
-        if t.inserts.len() < MAX_INSERTS_PER_TRACK && ui.small_button("+ Compressor").clicked() {
-            out.actions.push(MixerAction::AddCompressor(t.id));
-        }
+        sends_ui(ui, mixer, t, out);
+    });
+}
 
-        ui.separator();
-        for s in &t.sends {
-            ui.horizontal(|ui| {
-                ui.label(format!("→ {}", track_name(mixer, s.dest)));
-                if ui.small_button("x").on_hover_text("Remove send").clicked() {
-                    out.edits.push((Edit::RemoveSend(s.id), false));
-                }
-            });
-            ui.horizontal(|ui| {
-                ui.spacing_mut().slider_width = 80.0;
-                let mut level = s.level;
-                let r = ui
-                    .add(egui::Slider::new(&mut level, 0.0..=MAX_SEND_LEVEL).show_value(false))
-                    .on_hover_text(db_label(s.level));
-                if r.changed() {
-                    out.edits.push((Edit::SetSendLevel(s.id, level), true));
-                }
-                out.end_gesture |= r.drag_stopped();
-                let mut pre = s.pre_fader;
-                if ui
-                    .toggle_value(&mut pre, "Pre")
-                    .on_hover_text("Pre-fader send (not affected by fader or mute)")
-                    .changed()
-                {
-                    out.edits.push((Edit::SetSendPreFader(s.id, pre), false));
-                }
-            });
-        }
-        if t.sends.len() < MAX_SENDS_PER_TRACK {
-            let dests: Vec<TrackId> = mixer
-                .valid_destinations(t.id)
-                .into_iter()
-                .filter(|d| !t.sends.iter().any(|s| s.dest == *d))
-                .collect();
-            if !dests.is_empty() {
-                ui.menu_button("+ Send", |ui| {
-                    for d in dests {
-                        if ui.button(track_name(mixer, d)).clicked() {
-                            out.actions.push(MixerAction::AddSend { from: t.id, to: d });
-                            ui.close();
-                        }
-                    }
-                });
-            }
+fn limiter_ui(ui: &mut egui::Ui, lim: &LimiterSettings, gain: f32, out: &mut MixerOutput) {
+    let mut s = *lim;
+    let mut changed = false;
+    let mut stopped = false;
+    ui.horizontal(|ui| {
+        changed |= ui
+            .checkbox(&mut s.enabled, "Safety limiter")
+            .on_hover_text(
+                "Sample-peak protection on the master output; not a mastering or true-peak limiter",
+            )
+            .changed();
+        if s.enabled {
+            let gr = if gain < 1.0 {
+                -20.0 * gain.max(1e-6).log10()
+            } else {
+                0.0
+            };
+            ui.label(format!("GR {gr:.1} dB"));
         }
     });
+    if s.enabled {
+        ui.horizontal(|ui| {
+            ui.label("Ceiling");
+            let r = ui.add(
+                egui::DragValue::new(&mut s.ceiling_db)
+                    .range(LimiterSettings::CEILING_DB.0..=LimiterSettings::CEILING_DB.1)
+                    .speed(0.05)
+                    .suffix(" dBFS"),
+            );
+            changed |= r.changed();
+            stopped |= r.drag_stopped() || r.lost_focus();
+        });
+        ui.horizontal(|ui| {
+            ui.label("Release");
+            let r = ui.add(
+                egui::DragValue::new(&mut s.release_ms)
+                    .range(LimiterSettings::RELEASE_MS.0..=LimiterSettings::RELEASE_MS.1)
+                    .speed(1.0)
+                    .suffix(" ms"),
+            );
+            changed |= r.changed();
+            stopped |= r.drag_stopped() || r.lost_focus();
+        });
+    }
+    if changed && s != *lim {
+        out.edits.push((Edit::SetLimiter(s), true));
+    }
+    out.end_gesture |= stopped;
+}
+
+fn sends_ui(ui: &mut egui::Ui, mixer: &Mixer, t: &MixerTrack, out: &mut MixerOutput) {
+    for s in &t.sends {
+        ui.horizontal(|ui| {
+            ui.label(format!("Send to {}", track_name(mixer, s.dest)));
+            if ui.small_button("x").on_hover_text("Remove send").clicked() {
+                out.edits.push((Edit::RemoveSend(s.id), false));
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.spacing_mut().slider_width = 90.0;
+            let mut level = s.level;
+            let r = ui
+                .add(egui::Slider::new(&mut level, 0.0..=MAX_SEND_LEVEL).show_value(false))
+                .on_hover_text(db_label(s.level));
+            if r.changed() {
+                out.edits.push((Edit::SetSendLevel(s.id, level), true));
+            }
+            out.end_gesture |= r.drag_stopped();
+            let mut pre = s.pre_fader;
+            if ui
+                .toggle_value(&mut pre, "Pre")
+                .on_hover_text("Pre-fader send (not affected by fader or mute)")
+                .changed()
+            {
+                out.edits.push((Edit::SetSendPreFader(s.id, pre), false));
+            }
+        });
+    }
+    if t.sends.len() < MAX_SENDS_PER_TRACK {
+        let dests: Vec<TrackId> = mixer
+            .valid_destinations(t.id)
+            .into_iter()
+            .filter(|d| !t.sends.iter().any(|s| s.dest == *d))
+            .collect();
+        if !dests.is_empty() {
+            ui.menu_button("+ Send", |ui| {
+                for d in dests {
+                    if ui.button(track_name(mixer, d)).clicked() {
+                        out.actions.push(MixerAction::AddSend { from: t.id, to: d });
+                        ui.close();
+                    }
+                }
+            });
+        }
+    }
 }
 
 fn insert_ui(
@@ -227,24 +355,37 @@ fn insert_ui(
     mixer: &Mixer,
     t: &MixerTrack,
     ins: &Insert,
+    index: usize,
     out: &mut MixerOutput,
 ) {
-    let Effect::Compressor(p) = &ins.effect;
-    let header = egui::CollapsingHeader::new("Parameters")
-        .id_salt(("insert", ins.id.0))
-        .default_open(false);
     ui.horizontal(|ui| {
         ui.label(RichText::new(ins.effect.name()).strong());
         let mut on = !ins.bypass;
         if ui
             .toggle_value(&mut on, "On")
-            .on_hover_text("Bypass keeps the effect's latency")
+            .on_hover_text("Bypass crossfades to dry; the effect's tail is dropped")
             .changed()
         {
             out.edits.push((Edit::SetInsertBypass(ins.id, !on), false));
         }
         if ins.sidechain.is_some() {
             ui.colored_label(Color32::from_rgb(120, 170, 235), "SC");
+        }
+        if index > 0
+            && ui
+                .small_button("Up")
+                .on_hover_text("Move earlier in the chain")
+                .clicked()
+        {
+            out.edits.push((Edit::MoveInsert(ins.id, index - 1), false));
+        }
+        if index + 1 < t.inserts.len()
+            && ui
+                .small_button("Dn")
+                .on_hover_text("Move later in the chain")
+                .clicked()
+        {
+            out.edits.push((Edit::MoveInsert(ins.id, index + 1), false));
         }
         if ui
             .small_button("x")
@@ -254,126 +395,173 @@ fn insert_ui(
             out.edits.push((Edit::RemoveInsert(ins.id), false));
         }
     });
-    header.show(ui, |ui| {
-        let mut q = *p;
-        let mut changed = false;
-        let mut stopped = false;
-        let mut field = |ui: &mut egui::Ui,
-                         label: &str,
-                         v: &mut f32,
-                         range: (f32, f32),
-                         suffix: &str,
-                         speed: f64| {
-            ui.horizontal(|ui| {
-                ui.label(label);
-                let r = ui.add(
-                    egui::DragValue::new(v)
-                        .range(range.0..=range.1)
-                        .speed(speed)
-                        .suffix(suffix),
-                );
-                changed |= r.changed();
-                stopped |= r.drag_stopped() || r.lost_focus();
-            });
-        };
-        field(
-            ui,
-            "Threshold",
-            &mut q.threshold_db,
-            CompressorParams::THRESHOLD_DB,
-            " dB",
-            0.2,
-        );
-        field(
-            ui,
-            "Ratio",
-            &mut q.ratio,
-            CompressorParams::RATIO,
-            ":1",
-            0.05,
-        );
-        field(
-            ui,
-            "Attack",
-            &mut q.attack_ms,
-            CompressorParams::ATTACK_MS,
-            " ms",
-            0.2,
-        );
-        field(
-            ui,
-            "Release",
-            &mut q.release_ms,
-            CompressorParams::RELEASE_MS,
-            " ms",
-            1.0,
-        );
-        field(
-            ui,
-            "Makeup",
-            &mut q.makeup_db,
-            CompressorParams::MAKEUP_DB,
-            " dB",
-            0.1,
-        );
-        field(
-            ui,
-            "Lookahead",
-            &mut q.lookahead_ms,
-            CompressorParams::LOOKAHEAD_MS,
-            " ms",
-            0.05,
-        );
-        if changed && q != *p {
-            out.edits
-                .push((Edit::SetInsertEffect(ins.id, Effect::Compressor(q)), true));
-        }
-        out.end_gesture |= stopped;
-
-        ui.horizontal(|ui| {
-            ui.label("Sidechain");
-            let current = ins.sidechain.map(|s| s.source);
-            let label = current.map_or("None".to_owned(), |s| track_name(mixer, s));
-            egui::ComboBox::from_id_salt(("sc", ins.id.0))
-                .width(90.0)
-                .selected_text(label)
-                .show_ui(ui, |ui| {
-                    if ui.selectable_label(current.is_none(), "None").clicked() && current.is_some()
-                    {
-                        out.edits
-                            .push((Edit::SetInsertSidechain(ins.id, None), false));
-                    }
-                    for s in mixer.valid_sidechain_sources(t.id) {
-                        if ui
-                            .selectable_label(current == Some(s), track_name(mixer, s))
-                            .clicked()
-                            && current != Some(s)
-                        {
-                            let tap = ins.sidechain.map_or(Tap::PreFader, |sc| sc.tap);
-                            out.edits.push((
-                                Edit::SetInsertSidechain(
-                                    ins.id,
-                                    Some(Sidechain { source: s, tap }),
-                                ),
-                                false,
-                            ));
-                        }
-                    }
-                });
-        });
-        if let Some(sc) = ins.sidechain {
-            let mut post = sc.tap == Tap::PostFader;
-            if ui
-                .checkbox(&mut post, "Post-fader tap")
-                .on_hover_text("Take the source after its fader instead of before")
-                .changed()
-            {
-                let tap = if post { Tap::PostFader } else { Tap::PreFader };
-                out.edits.push((
-                    Edit::SetInsertSidechain(ins.id, Some(Sidechain { tap, ..sc })),
-                    false,
-                ));
+    egui::CollapsingHeader::new("Parameters")
+        .id_salt(("insert", ins.id.0))
+        .default_open(false)
+        .show(ui, |ui| {
+            if ins.effect.kind == EffectKind::ParametricEq {
+                eq_graph(ui, &ins.effect);
             }
-        }
+            params_ui(ui, ins, out);
+            if ins.effect.accepts_sidechain() {
+                sidechain_ui(ui, mixer, t, ins, out);
+            }
+        });
+}
+
+fn params_ui(ui: &mut egui::Ui, ins: &Insert, out: &mut MixerOutput) {
+    let effect = &ins.effect;
+    let mut edited: Option<Effect> = None;
+    let mut stopped = false;
+    egui::Grid::new(("params", ins.id.0))
+        .num_columns(2)
+        .show(ui, |ui| {
+            for spec in effect.kind.params() {
+                let current = effect.get(spec.id);
+                ui.label(spec.name);
+                let mut v = current;
+                let suffix = match spec.unit {
+                    ParamUnit::Decibels => " dB",
+                    ParamUnit::Hertz => " Hz",
+                    ParamUnit::Milliseconds => " ms",
+                    ParamUnit::Seconds => " s",
+                    ParamUnit::Ratio => ":1",
+                    ParamUnit::Fraction | ParamUnit::Q | ParamUnit::Toggle | ParamUnit::Choice => {
+                        ""
+                    }
+                };
+                let r = match spec.mapping {
+                    Mapping::Toggle => {
+                        let mut b = v >= 0.5;
+                        let r = ui.checkbox(&mut b, "");
+                        v = if b { 1.0 } else { 0.0 };
+                        r
+                    }
+                    Mapping::Choice(labels) => {
+                        let mut idx = v as usize;
+                        let r = egui::ComboBox::from_id_salt(("choice", ins.id.0, spec.id))
+                            .selected_text(labels.get(idx).copied().unwrap_or("?"))
+                            .show_ui(ui, |ui| {
+                                for (i, label) in labels.iter().enumerate() {
+                                    ui.selectable_value(&mut idx, i, *label);
+                                }
+                            })
+                            .response;
+                        v = idx as f32;
+                        r
+                    }
+                    Mapping::Log | Mapping::Linear => {
+                        let fraction = spec.unit == ParamUnit::Fraction;
+                        let mut slider = egui::Slider::new(&mut v, spec.min..=spec.max)
+                            .logarithmic(spec.mapping == Mapping::Log)
+                            .suffix(suffix);
+                        if fraction {
+                            slider = slider.custom_formatter(|x, _| format!("{:.0}%", x * 100.0));
+                        }
+                        ui.add(slider)
+                    }
+                };
+                stopped |= r.drag_stopped() || r.lost_focus();
+                if v != current {
+                    edited = Some(
+                        edited
+                            .take()
+                            .unwrap_or_else(|| effect.clone())
+                            .with(spec.id, v),
+                    );
+                }
+                ui.end_row();
+            }
+        });
+    if let Some(e) = edited {
+        out.edits.push((Edit::SetInsertEffect(ins.id, e), true));
+    }
+    out.end_gesture |= stopped;
+}
+
+fn sidechain_ui(
+    ui: &mut egui::Ui,
+    mixer: &Mixer,
+    t: &MixerTrack,
+    ins: &Insert,
+    out: &mut MixerOutput,
+) {
+    ui.horizontal(|ui| {
+        ui.label("Sidechain");
+        let current = ins.sidechain.map(|s| s.source);
+        let label = current.map_or("None".to_owned(), |s| track_name(mixer, s));
+        egui::ComboBox::from_id_salt(("sc", ins.id.0))
+            .width(90.0)
+            .selected_text(label)
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(current.is_none(), "None").clicked() && current.is_some() {
+                    out.edits
+                        .push((Edit::SetInsertSidechain(ins.id, None), false));
+                }
+                for s in mixer.valid_sidechain_sources(t.id) {
+                    if ui
+                        .selectable_label(current == Some(s), track_name(mixer, s))
+                        .clicked()
+                        && current != Some(s)
+                    {
+                        let tap = ins.sidechain.map_or(Tap::PreFader, |sc| sc.tap);
+                        out.edits.push((
+                            Edit::SetInsertSidechain(ins.id, Some(Sidechain { source: s, tap })),
+                            false,
+                        ));
+                    }
+                }
+            });
     });
+    if let Some(sc) = ins.sidechain {
+        let mut post = sc.tap == Tap::PostFader;
+        if ui
+            .checkbox(&mut post, "Post-fader tap")
+            .on_hover_text("Take the source after its fader instead of before")
+            .changed()
+        {
+            let tap = if post { Tap::PostFader } else { Tap::PreFader };
+            out.edits.push((
+                Edit::SetInsertSidechain(ins.id, Some(Sidechain { tap, ..sc })),
+                false,
+            ));
+        }
+    }
+}
+
+/// Frequency response of the EQ settings, 20 Hz–20 kHz, ±24 dB.
+fn eq_graph(ui: &mut egui::Ui, effect: &Effect) {
+    const SR: u32 = 48_000;
+    let mut eq = jdance_dsp::ParametricEq::new();
+    for (i, spec) in EffectKind::ParametricEq.params().iter().enumerate() {
+        eq.set_param(i, effect.get(spec.id));
+    }
+    eq.prepare(SR, 64);
+    eq.settle();
+    let (rect, _) = ui.allocate_exact_size(vec2(STRIP_WIDTH - 10.0, 70.0), Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, CornerRadius::same(3), ui.visuals().extreme_bg_color);
+    let to_y = |db: f64| rect.center().y - (db / 24.0) as f32 * (rect.height() / 2.0 - 2.0);
+    painter.line_segment(
+        [pos2(rect.left(), to_y(0.0)), pos2(rect.right(), to_y(0.0))],
+        Stroke::new(1.0, ui.visuals().weak_text_color()),
+    );
+    let points: Vec<egui::Pos2> = (0..=100)
+        .map(|i| {
+            let t = i as f64 / 100.0;
+            let f = 20.0 * 1000f64.powf(t);
+            let db = eq.response_db(f).clamp(-24.0, 24.0);
+            pos2(rect.left() + t as f32 * rect.width(), to_y(db))
+        })
+        .collect();
+    painter.add(egui::Shape::line(
+        points,
+        Stroke::new(1.5, Color32::from_rgb(235, 120, 60)),
+    ));
+    painter.rect_stroke(
+        rect,
+        CornerRadius::same(3),
+        ui.visuals().widgets.noninteractive.bg_stroke,
+        StrokeKind::Inside,
+    );
 }

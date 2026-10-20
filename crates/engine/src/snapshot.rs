@@ -8,12 +8,10 @@
 //! previous snapshot by object ID without allocating, so edits do not
 //! cause clicks or reset delay lines.
 
-use jdance_domain::{
-    ChannelId, Effect, InsertId, MAX_CHANNELS, MixerTrack, Project, SampleRef, SendId, Tap, TrackId,
-};
+use crate::effect_rt::{EffectRt, InsertRt, SidechainRt};
+use jdance_domain::{ChannelId, MAX_CHANNELS, MixerTrack, Project, SampleRef, SendId, TrackId};
 use jdance_dsp::{
-    Compressor, CompressorSettings, DelayLine, SampleBuffer, Smoothed, StereoGain, balance_gains,
-    pan_gains,
+    DelayLine, SafetyLimiter, SampleBuffer, Smoothed, StereoGain, balance_gains, pan_gains,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -41,6 +39,9 @@ pub struct PlaybackSnapshot {
     pub latency: u32,
     /// Some edge needed more than [`MAX_PDC_SAMPLES`] of compensation.
     pub pdc_clamped: bool,
+    pub tempo_bpm: f64,
+    /// Master safety limiter stage; `None` when disabled.
+    pub limiter: Option<SafetyLimiter>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -63,6 +64,7 @@ pub struct ChannelRt {
     pub gain: StereoGain,
     /// Delay compensation on the channel → track edge.
     pub delay: DelayLine,
+    pub muted: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -78,25 +80,9 @@ pub struct TrackRt {
     pub main_out: Option<(usize, DelayLine)>,
     /// Latency of the signal leaving this track, relative to the timeline.
     pub latency: u32,
-}
-
-#[derive(Debug, Clone)]
-pub struct InsertRt {
-    pub id: InsertId,
-    pub bypass: bool,
-    /// Delays the main signal before the effect when its sidechain
-    /// arrives later than the main signal (MIX-030).
-    pub pre_delay: DelayLine,
-    pub effect: EffectRt,
-    pub sidechain: Option<SidechainRt>,
-}
-
-#[derive(Debug, Clone)]
-pub struct SidechainRt {
-    /// Index of the source track (always earlier in processing order).
-    pub source: usize,
-    pub tap: Tap,
-    pub delay: DelayLine,
+    /// Fade applied after the inserts around structural edits (insert
+    /// added, removed or reordered), so effect changes do not click.
+    pub struct_fade: Smoothed,
 }
 
 #[derive(Debug, Clone)]
@@ -108,45 +94,70 @@ pub struct SendRt {
     pub delay: DelayLine,
 }
 
-#[derive(Debug, Clone)]
-pub enum EffectRt {
-    Compressor(Compressor),
-}
-
-impl EffectRt {
-    fn new(effect: &Effect, sample_rate: u32) -> Self {
-        match effect {
-            Effect::Compressor(p) => EffectRt::Compressor(Compressor::new(
-                &CompressorSettings {
-                    threshold_db: p.threshold_db,
-                    ratio: p.ratio,
-                    attack_ms: p.attack_ms,
-                    release_ms: p.release_ms,
-                    makeup_db: p.makeup_db,
-                    lookahead_ms: p.lookahead_ms,
-                },
-                sample_rate,
-            )),
-        }
-    }
-
-    pub fn latency(&self) -> u32 {
-        match self {
-            EffectRt::Compressor(c) => c.latency() as u32,
-        }
-    }
-
-    fn take_state(&mut self, old: &mut EffectRt) {
-        match (self, old) {
-            (EffectRt::Compressor(new), EffectRt::Compressor(old)) => new.take_state(old),
-        }
-    }
-}
-
 impl PlaybackSnapshot {
     /// A snapshot that plays nothing and outputs silence.
     pub fn empty(sample_rate: u32) -> Self {
         compile(&Project::new(), sample_rate, |_| None)
+    }
+
+    /// Whether `self` and `new` differ in insert structure (an insert
+    /// added, removed or moved) on some track. Realtime-safe.
+    pub fn insert_structure_differs(&self, new: &PlaybackSnapshot) -> bool {
+        self.tracks.iter().any(|t| {
+            let Some(n) = new.tracks.iter().find(|n| n.id == t.id) else {
+                return false;
+            };
+            t.inserts.len() != n.inserts.len()
+                || t.inserts.iter().zip(&n.inserts).any(|(a, b)| a.id != b.id)
+        })
+    }
+
+    /// Starts the structural fade-out on tracks whose inserts differ in
+    /// `new`, and marks the same tracks in `new` to fade in after the
+    /// swap. Returns whether any track fades. Realtime-safe.
+    pub fn begin_structural_fade(&mut self, new: &mut PlaybackSnapshot) -> bool {
+        let mut any = false;
+        for t in &mut self.tracks {
+            let Some(n) = new.tracks.iter_mut().find(|n| n.id == t.id) else {
+                continue;
+            };
+            let differs = t.inserts.len() != n.inserts.len()
+                || t.inserts.iter().zip(&n.inserts).any(|(a, b)| a.id != b.id);
+            if differs {
+                t.struct_fade.set_target(0.0);
+                n.struct_fade.reset(0.0);
+                n.struct_fade.set_target(1.0);
+                any = true;
+            }
+        }
+        any
+    }
+
+    /// Whether every structural fade-out has reached silence.
+    pub fn structural_fade_done(&self) -> bool {
+        self.tracks
+            .iter()
+            .all(|t| t.struct_fade.target() != 0.0 || !t.struct_fade.is_ramping())
+    }
+
+    /// Estimated effect tail at the master in seconds: the longest chain
+    /// of insert tails along any track plus the master chain. An estimate
+    /// for export warnings, not a guarantee.
+    pub fn tail_seconds(&self) -> f32 {
+        let chain = |t: &TrackRt| {
+            t.inserts
+                .iter()
+                .map(|i| i.effect.tail().seconds())
+                .sum::<f32>()
+        };
+        let master = self.tracks.last().map_or(0.0, chain);
+        let longest = self
+            .tracks
+            .iter()
+            .take(self.tracks.len().saturating_sub(1))
+            .map(chain)
+            .fold(0.0, f32::max);
+        longest + master
     }
 
     /// Latency of each track's output, by ID (for the UI, MIX-034).
@@ -158,6 +169,9 @@ impl PlaybackSnapshot {
     /// from `old` into `self` for objects present in both. No allocation:
     /// buffers are swapped, so `old` ends up holding `self`'s fresh ones.
     pub fn take_state_from(&mut self, old: &mut PlaybackSnapshot) {
+        if let (Some(l), Some(ol)) = (&mut self.limiter, &old.limiter) {
+            l.take_state(ol);
+        }
         for ch in &mut self.channels {
             if let Some(o) = old.channels.iter_mut().find(|o| o.id == ch.id) {
                 ch.gain.continue_from(&o.gain);
@@ -170,6 +184,7 @@ impl PlaybackSnapshot {
             };
             t.fader.continue_from(&o.fader);
             t.mute.continue_from(&o.mute);
+            t.struct_fade.continue_from(&o.struct_fade);
             if let (Some((_, d)), Some((_, od))) = (&mut t.main_out, &mut o.main_out) {
                 d.take_state(od);
             }
@@ -180,13 +195,8 @@ impl PlaybackSnapshot {
                 }
             }
             for i in &mut t.inserts {
-                let Some(oi) = o.inserts.iter_mut().find(|oi| oi.id == i.id) else {
-                    continue;
-                };
-                i.pre_delay.take_state(&mut oi.pre_delay);
-                i.effect.take_state(&mut oi.effect);
-                if let (Some(sc), Some(osc)) = (&mut i.sidechain, &mut oi.sidechain) {
-                    sc.delay.take_state(&mut osc.delay);
+                if let Some(oi) = o.inserts.iter_mut().find(|oi| oi.id == i.id) {
+                    i.take_state(oi);
                 }
             }
         }
@@ -256,7 +266,7 @@ pub fn compile(
         let mut acc = in_lat[ti];
         let mut inserts = Vec::with_capacity(t.inserts.len());
         for ins in &t.inserts {
-            let effect = EffectRt::new(&ins.effect, sample_rate);
+            let effect = EffectRt::new(&ins.effect, sample_rate, project.tempo_bpm);
             let sidechain_src = ins
                 .sidechain
                 .filter(|sc| index.contains_key(&sc.source))
@@ -276,13 +286,10 @@ pub fn compile(
                 delay: pdc.line(acc - sc_lat),
             });
             acc += effect.latency();
-            inserts.push(InsertRt {
-                id: ins.id,
-                bypass: ins.bypass,
-                pre_delay: pdc.line(pre),
-                effect,
-                sidechain,
-            });
+            let mut slot = InsertRt::new(ins.id, effect, ins.bypass, sample_rate);
+            slot.pre_delay = pdc.line(pre);
+            slot.sidechain = sidechain;
+            inserts.push(slot);
         }
         out_lat[ti] = acc;
         // Propagate to destinations, which come later in `order`.
@@ -309,6 +316,7 @@ pub fn compile(
             sends: Vec::new(),
             main_out: None,
             latency: acc,
+            struct_fade: Smoothed::new(1.0, (sample_rate / 200).max(1)),
         });
     }
 
@@ -353,6 +361,7 @@ pub fn compile(
                 track,
                 gain: StereoGain::new((l * g, r * g), ramp),
                 delay: pdc.line(in_lat[track]),
+                muted: c.muted,
             }
         })
         .collect();
@@ -366,6 +375,14 @@ pub fn compile(
         tracks,
         latency,
         pdc_clamped: pdc.clamped,
+        tempo_bpm: project.tempo_bpm,
+        limiter: mixer.limiter.enabled.then(|| {
+            SafetyLimiter::new(
+                mixer.limiter.ceiling_db,
+                mixer.limiter.release_ms,
+                sample_rate,
+            )
+        }),
     };
 
     let Some(pattern) = project.active_pattern() else {
@@ -410,7 +427,8 @@ pub fn compile(
 mod tests {
     use super::*;
     use jdance_domain::{
-        Channel, ChannelSource, CompressorParams, Insert, MixerTrack, Send, Sidechain,
+        Channel, ChannelSource, Effect, EffectKind, Insert, InsertId, MixerTrack, Send, Sidechain,
+        Tap,
     };
 
     #[test]
@@ -458,11 +476,9 @@ mod tests {
     }
 
     fn lookahead(ms: f32) -> Effect {
-        Effect::Compressor(CompressorParams {
-            ratio: 1.0,
-            lookahead_ms: ms,
-            ..Default::default()
-        })
+        Effect::new(EffectKind::Compressor)
+            .with("ratio", 1.0)
+            .with("lookahead", ms)
     }
 
     #[test]

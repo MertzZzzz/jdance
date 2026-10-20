@@ -1246,6 +1246,10 @@ dependencies = [
 [[package]]
 name = "jdance-dsp"
 version = "0.1.0"
+dependencies = [
+ "jdance-domain",
+ "proptest",
+]
 
 [[package]]
 name = "jdance-engine"
@@ -1301,6 +1305,7 @@ dependencies = [
  "jdance-audio-api",
  "jdance-commands",
  "jdance-domain",
+ "jdance-dsp",
  "rfd",
 ]
 

@@ -21,6 +21,35 @@ pub struct TransportStatus {
     pub dropped_commands: u64,
 }
 
+/// Meter levels for display (linear peak, already with UI fall-off).
+#[derive(Debug, Clone, PartialEq)]
+pub struct MeterReadings {
+    pub buses: Vec<(TrackId, f32, f32)>,
+    /// Master output after the limiter.
+    pub output: (f32, f32),
+    /// Current limiter gain (1.0 = no reduction).
+    pub limiter_gain: f32,
+}
+
+impl Default for MeterReadings {
+    fn default() -> Self {
+        Self {
+            buses: Vec::new(),
+            output: (0.0, 0.0),
+            limiter_gain: 1.0,
+        }
+    }
+}
+
+impl MeterReadings {
+    pub fn bus(&self, id: TrackId) -> (f32, f32) {
+        self.buses
+            .iter()
+            .find(|(t, _, _)| *t == id)
+            .map_or((0.0, 0.0), |(_, l, r)| (*l, *r))
+    }
+}
+
 /// Delay compensation figures from the last compiled snapshot (MIX-034).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LatencyInfo {
@@ -108,6 +137,7 @@ pub trait Host {
     fn stop(&mut self);
     fn transport(&self) -> TransportStatus;
     fn latency(&self) -> LatencyInfo;
+    fn meters(&self) -> MeterReadings;
     fn stream(&self) -> Option<StreamStatus>;
     fn sample_status(&self, sample: &SampleRef, project_dir: Option<&Path>)
     -> Option<SampleStatus>;

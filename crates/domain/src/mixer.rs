@@ -5,7 +5,7 @@
 //! three edge kinds: a track's main out, its sends, and sidechain feeds
 //! into insert effects. The graph must be acyclic (MIX-002).
 
-use crate::{InsertId, SendId, TrackId};
+use crate::{Effect, InsertId, LimiterSettings, SendId, TrackId};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -13,7 +13,7 @@ use std::fmt;
 /// Mixer tracks besides the master (MIX-003).
 pub const MAX_TRACKS: usize = 128;
 pub const MAX_SENDS_PER_TRACK: usize = 16;
-pub const MAX_INSERTS_PER_TRACK: usize = 10;
+pub const MAX_INSERTS_PER_TRACK: usize = 8;
 /// Linear send gain limit, ≈ +6 dB (MIX-011).
 pub const MAX_SEND_LEVEL: f32 = 2.0;
 
@@ -21,6 +21,8 @@ pub const MAX_SEND_LEVEL: f32 = 2.0;
 pub struct Mixer {
     pub master: MixerTrack,
     pub tracks: Vec<MixerTrack>,
+    /// Optional safety limiter after the master gain.
+    pub limiter: LimiterSettings,
 }
 
 impl Default for Mixer {
@@ -28,6 +30,7 @@ impl Default for Mixer {
         Self {
             master: MixerTrack::new(TrackId::MASTER, "Master"),
             tracks: Vec::new(),
+            limiter: LimiterSettings::default(),
         }
     }
 }
@@ -99,84 +102,6 @@ pub struct Sidechain {
     pub tap: Tap,
 }
 
-/// Built-in effects. VST3 inserts are added in Milestone P1.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Effect {
-    Compressor(CompressorParams),
-}
-
-impl Effect {
-    pub fn name(&self) -> &'static str {
-        match self {
-            Effect::Compressor(_) => "Compressor",
-        }
-    }
-
-    pub fn accepts_sidechain(&self) -> bool {
-        match self {
-            Effect::Compressor(_) => true,
-        }
-    }
-
-    pub fn validate(&self) -> Result<(), String> {
-        match self {
-            Effect::Compressor(p) => p.validate(),
-        }
-    }
-}
-
-/// Feed-forward compressor with optional sidechain and lookahead (MIX-040).
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct CompressorParams {
-    pub threshold_db: f32,
-    pub ratio: f32,
-    pub attack_ms: f32,
-    pub release_ms: f32,
-    pub makeup_db: f32,
-    /// Introduces latency reported for delay compensation.
-    pub lookahead_ms: f32,
-}
-
-impl Default for CompressorParams {
-    fn default() -> Self {
-        Self {
-            threshold_db: -18.0,
-            ratio: 4.0,
-            attack_ms: 5.0,
-            release_ms: 120.0,
-            makeup_db: 0.0,
-            lookahead_ms: 0.0,
-        }
-    }
-}
-
-impl CompressorParams {
-    pub const THRESHOLD_DB: (f32, f32) = (-60.0, 0.0);
-    pub const RATIO: (f32, f32) = (1.0, 20.0);
-    pub const ATTACK_MS: (f32, f32) = (0.0, 200.0);
-    pub const RELEASE_MS: (f32, f32) = (1.0, 2000.0);
-    pub const MAKEUP_DB: (f32, f32) = (0.0, 24.0);
-    pub const LOOKAHEAD_MS: (f32, f32) = (0.0, 20.0);
-
-    pub fn validate(&self) -> Result<(), String> {
-        let fields = [
-            ("threshold", self.threshold_db, Self::THRESHOLD_DB),
-            ("ratio", self.ratio, Self::RATIO),
-            ("attack", self.attack_ms, Self::ATTACK_MS),
-            ("release", self.release_ms, Self::RELEASE_MS),
-            ("makeup", self.makeup_db, Self::MAKEUP_DB),
-            ("lookahead", self.lookahead_ms, Self::LOOKAHEAD_MS),
-        ];
-        for (name, v, (lo, hi)) in fields {
-            if !(v.is_finite() && (lo..=hi).contains(&v)) {
-                return Err(format!("compressor {name} {v} outside {lo}..={hi}"));
-            }
-        }
-        Ok(())
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RoutingError {
     UnknownTrack(TrackId),
@@ -198,7 +123,7 @@ impl fmt::Display for RoutingError {
                 write!(
                     f,
                     "routing would create a feedback loop through tracks {}",
-                    names.join(" → ")
+                    names.join(" -> ")
                 )
             }
             RoutingError::SelfRoute(t) => write!(f, "track {} cannot route to itself", t.0),
@@ -358,6 +283,9 @@ impl Mixer {
         if self.tracks.len() > MAX_TRACKS {
             return Err(RoutingError::TooMany("mixer tracks"));
         }
+        self.limiter
+            .validate()
+            .map_err(RoutingError::InvalidValue)?;
         let mut ids = BTreeSet::new();
         for t in self.all_tracks() {
             let dup = |id: u64, ids: &mut BTreeSet<u64>| {
@@ -563,7 +491,7 @@ mod tests {
         m.tracks[0].inserts.push(Insert {
             id: InsertId(50),
             bypass: false,
-            effect: Effect::Compressor(CompressorParams::default()),
+            effect: Effect::new(crate::EffectKind::Compressor),
             sidechain: Some(Sidechain {
                 source: TrackId(2),
                 tap: Tap::PreFader,
@@ -584,7 +512,7 @@ mod tests {
         m.tracks[0].inserts.push(Insert {
             id: InsertId(50),
             bypass: false,
-            effect: Effect::Compressor(CompressorParams::default()),
+            effect: Effect::new(crate::EffectKind::Compressor),
             sidechain: Some(Sidechain {
                 source: TrackId::MASTER,
                 tap: Tap::PostFader,

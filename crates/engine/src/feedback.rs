@@ -6,8 +6,77 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
 
+/// Peak meter for one bus: written by the audio thread with `fetch_max`
+/// on the `f32` bits (monotonic for non-negative values), read and reset
+/// by the UI.
+#[derive(Debug, Default)]
+pub struct MeterSlot {
+    /// Track ID the slot currently reports; `u64::MAX` when unused.
+    id: AtomicU64,
+    peak_l: AtomicU32,
+    peak_r: AtomicU32,
+}
+
+impl MeterSlot {
+    #[inline]
+    pub(crate) fn publish(&self, id: u64, peak_l: f32, peak_r: f32) {
+        self.id.store(id, Relaxed);
+        self.peak_l.fetch_max(peak_l.max(0.0).to_bits(), Relaxed);
+        self.peak_r.fetch_max(peak_r.max(0.0).to_bits(), Relaxed);
+    }
+
+    /// `(track id, peak left, peak right)` since the last read.
+    pub fn take(&self) -> (u64, f32, f32) {
+        (
+            self.id.load(Relaxed),
+            f32::from_bits(self.peak_l.swap(0, Relaxed)),
+            f32::from_bits(self.peak_r.swap(0, Relaxed)),
+        )
+    }
+}
+
+/// Bus meters (one per track incl. master, post mute) plus the master
+/// output after the limiter and the limiter's gain reduction.
+#[derive(Debug)]
+pub struct Meters {
+    pub buses: Box<[MeterSlot]>,
+    pub output: MeterSlot,
+    /// Lowest limiter gain since the last read, as `f32` bits (1.0 = none).
+    limiter_gain: AtomicU32,
+}
+
+impl Default for Meters {
+    fn default() -> Self {
+        Self {
+            buses: (0..jdance_domain::MAX_TRACKS + 1)
+                .map(|_| MeterSlot {
+                    id: AtomicU64::new(u64::MAX),
+                    ..Default::default()
+                })
+                .collect(),
+            output: MeterSlot::default(),
+            limiter_gain: AtomicU32::new(1.0f32.to_bits()),
+        }
+    }
+}
+
+impl Meters {
+    #[inline]
+    pub(crate) fn publish_limiter(&self, min_gain: f32) {
+        // Lower gain = more reduction: keep the minimum.
+        self.limiter_gain
+            .fetch_min(min_gain.clamp(0.0, 1.0).to_bits(), Relaxed);
+    }
+
+    /// Lowest limiter gain since the last read (1.0 = no reduction).
+    pub fn take_limiter_gain(&self) -> f32 {
+        f32::from_bits(self.limiter_gain.swap(1.0f32.to_bits(), Relaxed))
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct EngineFeedback {
+    pub meters: Meters,
     playing: AtomicBool,
     position: AtomicU64,
     loop_len: AtomicU64,

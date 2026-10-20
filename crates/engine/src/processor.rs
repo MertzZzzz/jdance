@@ -4,24 +4,30 @@
 //! `render` obeys RT rules (section 8): no allocation or deallocation, no
 //! locks, no I/O, bounded work. All buffers are allocated in `new`.
 //!
-//! Signal flow per block (MIX-010):
-//! voices → channel buffers → channel gain → PDC delay → track inputs;
-//! then each track in processing order: inserts → pre-fader tap → fader
-//! → post-fader tap → sends / mute → main out.
+//! Signal flow per block (spec "Mixer signal flow", MIX-010):
+//! voices → channel buffers → channel gain → PDC delay → bus input sum;
+//! each bus in processing order: inserts → structural fade → pre-fader
+//! tap → gain/balance → post-fader tap → mute/solo → bus meter → main out
+//! (and sends); the master additionally: safety limiter → output meter.
 
-use crate::snapshot::{EffectRt, TrackRt};
+use crate::snapshot::TrackRt;
 use crate::{
     Command, EngineFeedback, Garbage, MAX_BLOCK, MAX_COMMANDS_PER_RENDER, MAX_VOICES,
     PlaybackSnapshot,
 };
 use jdance_domain::{ChannelId, MAX_CHANNELS, MAX_TRACKS, Tap};
-use jdance_dsp::SamplerVoice;
+use jdance_dsp::{SamplerVoice, Smoothed};
 use rtrb::{Consumer, Producer};
 use std::sync::Arc;
 use std::time::Instant;
 
 /// Tracks including the master.
 const MAX_BUSES: usize = MAX_TRACKS + 1;
+
+/// Short release for voices on Stop, seek, mute and loop wrap, ≈ 5 ms.
+fn release_len(sample_rate: u32) -> u32 {
+    (sample_rate / 200).max(1)
+}
 
 #[derive(Debug, Clone, Copy)]
 struct Voice {
@@ -90,6 +96,11 @@ fn copy_into(dst: (&mut [f32], &mut [f32]), src: (&[f32], &[f32])) {
     dst.1.copy_from_slice(src.1);
 }
 
+#[inline]
+fn peak(x: &[f32]) -> f32 {
+    x.iter().fold(0.0f32, |m, v| m.max(v.abs()))
+}
+
 /// Owned by the audio callback (or by an offline renderer).
 #[derive(Debug)]
 pub struct EngineProcessor {
@@ -98,6 +109,8 @@ pub struct EngineProcessor {
     garbage: Producer<Garbage>,
     feedback: Arc<EngineFeedback>,
     snapshot: Option<Box<PlaybackSnapshot>>,
+    /// New snapshot waiting for structural fades to finish.
+    pending: Option<Box<PlaybackSnapshot>>,
     voices: Box<[Voice]>,
     channels: Buses,
     inputs: Buses,
@@ -105,7 +118,12 @@ pub struct EngineProcessor {
     post_taps: Buses,
     /// [0] send/main-out scratch, [1] sidechain, [2] block output.
     scratch: Buses,
-    mute_env: Box<[f32]>,
+    dry: Buses,
+    env: Box<[f32]>,
+    /// Output fade used by Stop.
+    out_fade: Smoothed,
+    stopping: bool,
+    play_after_stop: bool,
     playing: bool,
     /// Position inside the loop, in samples.
     pos: u64,
@@ -125,13 +143,18 @@ impl EngineProcessor {
             garbage,
             feedback,
             snapshot: None,
+            pending: None,
             voices: vec![Voice::default(); MAX_VOICES].into_boxed_slice(),
             channels: Buses::new(MAX_CHANNELS),
             inputs: Buses::new(MAX_BUSES),
             pre_taps: Buses::new(MAX_BUSES),
             post_taps: Buses::new(MAX_BUSES),
             scratch: Buses::new(3),
-            mute_env: vec![0.0; MAX_BLOCK].into_boxed_slice(),
+            dry: Buses::new(1),
+            env: vec![0.0; MAX_BLOCK].into_boxed_slice(),
+            out_fade: Smoothed::new(1.0, release_len(sample_rate)),
+            stopping: false,
+            play_after_stop: false,
             playing: false,
             pos: 0,
             voice_serial: 0,
@@ -151,6 +174,7 @@ impl EngineProcessor {
 
         let mut done = 0;
         while done < frames {
+            self.block_boundary();
             let n = (frames - done).min(MAX_BLOCK);
             self.render_block(n);
             let (ol, or) = self.scratch.get(2, n);
@@ -173,30 +197,120 @@ impl EngineProcessor {
         }
     }
 
+    /// Work done between blocks: completing a pending structural swap and
+    /// a pending Stop.
+    fn block_boundary(&mut self) {
+        if self.pending.is_some()
+            && self
+                .snapshot
+                .as_ref()
+                .is_none_or(|s| s.structural_fade_done())
+            && self.garbage.slots() > 0
+        {
+            let new = self.pending.take().expect("checked");
+            self.swap_snapshot(new);
+        }
+        if self.stopping && !self.out_fade.is_ramping() {
+            self.finish_stop();
+        }
+    }
+
+    fn release_voices(&mut self) {
+        let len = release_len(self.sample_rate);
+        for v in self.voices.iter_mut() {
+            v.inner.release(len);
+        }
+    }
+
+    fn finish_stop(&mut self) {
+        self.stopping = false;
+        for v in self.voices.iter_mut() {
+            v.inner.stop();
+        }
+        self.playing = self.play_after_stop;
+        self.play_after_stop = false;
+        self.pos = 0;
+        if let Some(s) = &mut self.snapshot {
+            for t in &mut s.tracks {
+                for i in &mut t.inserts {
+                    i.force_reset = true;
+                }
+            }
+            if let Some(l) = &mut s.limiter {
+                l.reset();
+            }
+        }
+        // The output is silent now; fade back in for the next playback.
+        self.out_fade.set_target(1.0);
+    }
+
     fn drain_commands(&mut self) {
         for _ in 0..MAX_COMMANDS_PER_RENDER {
             let Ok(next) = self.commands.peek() else {
                 break;
             };
-            if matches!(next, Command::SetSnapshot(_)) && self.garbage.slots() == 0 {
-                // Never drop a snapshot here: wait until the UI side has
-                // collected garbage.
+            if matches!(next, Command::SetSnapshot(_))
+                && (self.garbage.slots() == 0 || self.pending.is_some())
+            {
+                // Never drop a snapshot here, and finish a pending
+                // structural swap first.
                 self.feedback.note_deferred_snapshot();
                 break;
             }
             let Ok(cmd) = self.commands.pop() else { break };
             match cmd {
-                Command::Play => self.playing = true,
+                Command::Play => {
+                    if self.stopping {
+                        self.play_after_stop = true;
+                    } else {
+                        self.playing = true;
+                    }
+                }
                 Command::Stop => {
-                    self.playing = false;
-                    self.pos = 0;
+                    self.stopping = true;
+                    self.play_after_stop = false;
+                    self.out_fade.set_target(0.0);
                 }
                 Command::Panic => {
                     for v in self.voices.iter_mut() {
                         v.inner.stop();
                     }
                 }
-                Command::SetSnapshot(new) => self.swap_snapshot(new),
+                Command::Seek(p) => {
+                    self.release_voices();
+                    let len = self.snapshot.as_ref().map_or(0, |s| s.loop_len);
+                    self.pos = if len > 0 { p % len } else { 0 };
+                }
+                Command::SetParam {
+                    insert,
+                    index,
+                    value,
+                } => {
+                    for s in [&mut self.snapshot, &mut self.pending]
+                        .into_iter()
+                        .flatten()
+                    {
+                        if let Some(i) = s
+                            .tracks
+                            .iter_mut()
+                            .flat_map(|t| t.inserts.iter_mut())
+                            .find(|i| i.id == insert)
+                        {
+                            i.effect.processor().set_param(usize::from(index), value);
+                        }
+                    }
+                }
+                Command::SetSnapshot(mut new) => {
+                    let fade = match &mut self.snapshot {
+                        Some(old) => old.begin_structural_fade(&mut new),
+                        None => false,
+                    };
+                    if fade {
+                        self.pending = Some(new);
+                    } else {
+                        self.swap_snapshot(new);
+                    }
+                }
             }
         }
     }
@@ -213,8 +327,9 @@ impl EngineProcessor {
         if new.loop_len == 0 || self.pos >= new.loop_len {
             self.pos = 0;
         }
-        // Re-target voices: channels may have moved, been removed or
-        // changed sample.
+        // Re-target voices: channels may have moved, been removed, muted
+        // or changed sample.
+        let release = release_len(self.sample_rate);
         for v in self.voices.iter_mut().filter(|v| v.inner.is_active()) {
             let old_sample = self
                 .snapshot
@@ -231,17 +346,21 @@ impl EngineProcessor {
                     if c.sample.as_ref().is_some_and(|s| Arc::ptr_eq(s, old)) =>
                 {
                     v.inner.slot = i;
+                    if c.muted {
+                        v.inner.release(release);
+                    }
                 }
                 _ => v.inner.stop(),
             }
         }
         if let Some(old) = self.snapshot.replace(new) {
-            // Space was checked in `drain_commands`.
+            // Space was checked by the caller.
             let _ = self.garbage.push(Garbage::Snapshot(old));
         }
     }
 
     fn render_block(&mut self, n: usize) {
+        let release = release_len(self.sample_rate);
         let Self {
             snapshot,
             voices,
@@ -250,11 +369,14 @@ impl EngineProcessor {
             pre_taps,
             post_taps,
             scratch,
-            mute_env,
+            dry,
+            env,
+            out_fade,
             playing,
             pos,
             voice_serial,
             feedback,
+            stopping,
             ..
         } = self;
         {
@@ -270,9 +392,10 @@ impl EngineProcessor {
         channels.zero(n_ch, n);
         inputs.zero(n_tr, n);
 
-        // 1. Sequencer events and voices into per-channel buffers.
+        // 1. Sequencer events and voices into per-channel buffers. No new
+        //    events while stopping.
         let mut cursor = 0;
-        if *playing && snap.loop_len > 0 {
+        if *playing && !*stopping && snap.loop_len > 0 {
             let mut done = 0;
             let mut p = *pos;
             while done < n {
@@ -287,13 +410,24 @@ impl EngineProcessor {
                     k += 1;
                 }
                 done += (seg_end - p) as usize;
-                p = if seg_end == snap.loop_len { 0 } else { seg_end };
+                if seg_end == snap.loop_len {
+                    // Loop wrap: instrument voices end with a short
+                    // release; effect tails continue.
+                    render_voices(snap, voices, channels, cursor, done);
+                    cursor = done;
+                    for v in voices.iter_mut() {
+                        v.inner.release(release);
+                    }
+                    p = 0;
+                } else {
+                    p = seg_end;
+                }
             }
             *pos = p;
         }
         render_voices(snap, voices, channels, cursor, n);
 
-        // 2. Channel gain and compensation, summed into track inputs.
+        // 2. Channel gain and compensation, summed into bus inputs.
         for (ci, ch) in snap.channels.iter_mut().enumerate() {
             {
                 let (l, r) = channels.get_mut(ci, n);
@@ -303,16 +437,28 @@ impl EngineProcessor {
             add_into(inputs.get_mut(ch.track, n), channels.get(ci, n));
         }
 
-        // 3. Tracks in processing order; destinations always come later.
+        // 3. Buses in processing order; destinations always come later.
+        let tempo = snap.tempo_bpm;
+        let meters = &feedback.meters;
         for (ti, track) in snap.tracks.iter_mut().enumerate() {
-            process_inserts(track, ti, inputs, pre_taps, post_taps, scratch, n);
+            process_inserts(
+                track, ti, inputs, pre_taps, post_taps, scratch, dry, tempo, n,
+            );
+            if track.struct_fade.is_ramping() || track.struct_fade.current() != 1.0 {
+                track.struct_fade.fill(&mut env[..n]);
+                let (l, r) = inputs.get_mut(ti, n);
+                for i in 0..n {
+                    l[i] *= env[i];
+                    r[i] *= env[i];
+                }
+            }
             copy_into(pre_taps.get_mut(ti, n), inputs.get(ti, n));
             {
                 let (l, r) = inputs.get_mut(ti, n);
                 track.fader.apply(l, r);
             }
             copy_into(post_taps.get_mut(ti, n), inputs.get(ti, n));
-            track.mute.fill(&mut mute_env[..n]);
+            track.mute.fill(&mut env[..n]);
 
             for send in &mut track.sends {
                 let (src_l, src_r) = if send.pre_fader {
@@ -324,7 +470,7 @@ impl EngineProcessor {
                     let (tl, tr) = scratch.get_mut(0, n);
                     for i in 0..n {
                         let g = send.gain.next_value();
-                        let m = if send.pre_fader { 1.0 } else { mute_env[i] };
+                        let m = if send.pre_fader { 1.0 } else { env[i] };
                         tl[i] = src_l[i] * g * m;
                         tr[i] = src_r[i] * g * m;
                     }
@@ -334,32 +480,44 @@ impl EngineProcessor {
             }
 
             let (src_l, src_r) = post_taps.get(ti, n);
-            match &mut track.main_out {
-                Some((dest, delay)) => {
-                    {
-                        let (tl, tr) = scratch.get_mut(0, n);
-                        for i in 0..n {
-                            tl[i] = src_l[i] * mute_env[i];
-                            tr[i] = src_r[i] * mute_env[i];
-                        }
-                        delay.process(tl, tr);
-                    }
-                    add_into(inputs.get_mut(*dest, n), scratch.get(0, n));
+            let out_index = if track.main_out.is_some() { 0 } else { 2 };
+            {
+                let (tl, tr) = scratch.get_mut(out_index, n);
+                for i in 0..n {
+                    tl[i] = src_l[i] * env[i];
+                    tr[i] = src_r[i] * env[i];
                 }
-                None => {
-                    // The master writes the block output.
-                    let (ol, or) = scratch.get_mut(2, n);
-                    for i in 0..n {
-                        ol[i] = src_l[i] * mute_env[i];
-                        or[i] = src_r[i] * mute_env[i];
-                    }
+                // Bus meter: after mute/solo, before compensation delay.
+                if let Some(slot) = meters.buses.get(ti) {
+                    slot.publish(track.id.0, peak(tl), peak(tr));
                 }
             }
+            if let Some((dest, delay)) = &mut track.main_out {
+                let (tl, tr) = scratch.get_mut(0, n);
+                delay.process(tl, tr);
+                add_into(inputs.get_mut(*dest, n), scratch.get(0, n));
+            }
         }
+
+        // 4. Master output stage: Stop fade, safety limiter, output meter.
+        let (ol, or) = scratch.get_mut(2, n);
+        if out_fade.is_ramping() || out_fade.current() != 1.0 {
+            out_fade.fill(&mut env[..n]);
+            for i in 0..n {
+                ol[i] *= env[i];
+                or[i] *= env[i];
+            }
+        }
+        if let Some(limiter) = &mut snap.limiter {
+            limiter.process(ol, or);
+            meters.publish_limiter(limiter.take_min_gain());
+        }
+        meters.output.publish(u64::MAX, peak(ol), peak(or));
     }
 }
 
-/// Runs the insert chain of track `ti` in place on its input buffer.
+/// Runs the insert chain of bus `ti` in place on its input buffer.
+#[allow(clippy::too_many_arguments)]
 fn process_inserts(
     track: &mut TrackRt,
     ti: usize,
@@ -367,6 +525,8 @@ fn process_inserts(
     pre_taps: &Buses,
     post_taps: &Buses,
     scratch: &mut Buses,
+    dry: &mut Buses,
+    tempo_bpm: f64,
     n: usize,
 ) {
     for ins in &mut track.inserts {
@@ -385,11 +545,8 @@ fn process_inserts(
             None => false,
         };
         let (l, r) = inputs.get_mut(ti, n);
-        ins.pre_delay.process(l, r);
         let sidechain = has_sidechain.then(|| scratch.get(1, n));
-        match &mut ins.effect {
-            EffectRt::Compressor(c) => c.process(l, r, sidechain, ins.bypass),
-        }
+        ins.process(l, r, dry.get_mut(0, n), sidechain, tempo_bpm);
     }
 }
 

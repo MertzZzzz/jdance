@@ -69,6 +69,10 @@ pub struct SamplerVoice {
     gain_l: f32,
     gain_r: f32,
     active: bool,
+    /// Release envelope: current level and per-sample decrement; `step`
+    /// is 0 while not releasing.
+    env: f32,
+    step: f32,
 }
 
 impl SamplerVoice {
@@ -80,7 +84,21 @@ impl SamplerVoice {
             gain_l,
             gain_r,
             active: true,
+            env: 1.0,
+            step: 0.0,
         };
+    }
+
+    /// Fades the voice out linearly over `samples` and then stops it (a
+    /// short release for Stop, seek, mute or loop wrap).
+    pub fn release(&mut self, samples: u32) {
+        if self.active && self.step == 0.0 {
+            self.step = self.env / samples.max(1) as f32;
+        }
+    }
+
+    pub fn is_releasing(&self) -> bool {
+        self.step > 0.0
     }
 
     pub fn stop(&mut self) {
@@ -108,9 +126,21 @@ impl SamplerVoice {
         let count = n.min(available);
         let src_l = &sample.left[self.pos..self.pos + count];
         let src_r = &sample.right[self.pos..self.pos + count];
-        for i in 0..count {
-            out_l[i] += src_l[i] * self.gain_l;
-            out_r[i] += src_r[i] * self.gain_r;
+        if self.step == 0.0 {
+            for i in 0..count {
+                out_l[i] += src_l[i] * self.gain_l;
+                out_r[i] += src_r[i] * self.gain_r;
+            }
+        } else {
+            for i in 0..count {
+                self.env -= self.step;
+                if self.env <= 0.0 {
+                    self.active = false;
+                    return;
+                }
+                out_l[i] += src_l[i] * self.gain_l * self.env;
+                out_r[i] += src_r[i] * self.gain_r * self.env;
+            }
         }
         self.pos += count;
         if self.pos >= sample.len() {
@@ -122,6 +152,18 @@ impl SamplerVoice {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn release_fades_and_stops() {
+        let s = SampleBuffer::from_interleaved(48_000, 1, &[1.0; 100]);
+        let mut v = SamplerVoice::default();
+        v.start(0, 0, 1.0, 1.0);
+        v.release(4);
+        let (mut l, mut r) = ([0.0; 8], [0.0; 8]);
+        v.render_add(&s, &mut l, &mut r);
+        assert_eq!(l, [0.75, 0.5, 0.25, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        assert!(!v.is_active());
+    }
 
     #[test]
     fn mono_is_duplicated() {
