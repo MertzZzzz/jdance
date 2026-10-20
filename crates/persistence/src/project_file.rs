@@ -2,7 +2,7 @@
 //! Project file format (PER-001): a single JSON file.
 //!
 //! ```json
-//! { "format": "jdance-project", "format_version": 1, "project": { … } }
+//! { "format": "jdance-project", "format_version": 2, "project": { … } }
 //! ```
 //!
 //! Any schema change increments `format_version` and adds a migration step
@@ -14,7 +14,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 pub const FORMAT_TAG: &str = "jdance-project";
-pub const CURRENT_FORMAT_VERSION: u32 = 1;
+pub const CURRENT_FORMAT_VERSION: u32 = 2;
 pub const PROJECT_EXTENSION: &str = "jdance";
 
 /// Saves `project` to `path` atomically. Sample paths inside the project
@@ -91,11 +91,45 @@ fn parse_project(bytes: &[u8]) -> Result<Project, PersistError> {
 }
 
 /// Upgrades the `project` object from `version` to the current version.
-fn migrate(version: u32, project: Value) -> Result<Value, PersistError> {
-    match version {
+fn migrate(version: u32, mut project: Value) -> Result<Value, PersistError> {
+    let mut v = version;
+    if v == 1 {
+        project = v1_to_v2(project)?;
+        v = 2;
+    }
+    match v {
         CURRENT_FORMAT_VERSION => Ok(project),
         v => Err(PersistError::Corrupt(format!("unknown format_version {v}"))),
     }
+}
+
+/// v2 added mixer tracks (MIX-001): every channel plays into a track, and
+/// tracks have a main out, sends and inserts. v1 projects route all
+/// channels to the master, which is what v1 played.
+fn v1_to_v2(mut project: Value) -> Result<Value, PersistError> {
+    let corrupt = |m: &str| PersistError::Corrupt(format!("v1 project: {m}"));
+    let obj = project
+        .as_object_mut()
+        .ok_or_else(|| corrupt("not an object"))?;
+    if let Some(channels) = obj.get_mut("channels").and_then(Value::as_array_mut) {
+        for c in channels {
+            let c = c.as_object_mut().ok_or_else(|| corrupt("bad channel"))?;
+            c.insert("track".into(), Value::from(0));
+        }
+    }
+    let mixer = obj
+        .get_mut("mixer")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| corrupt("missing mixer"))?;
+    mixer.insert("tracks".into(), Value::Array(Vec::new()));
+    let master = mixer
+        .get_mut("master")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| corrupt("missing master"))?;
+    master.insert("main_out".into(), Value::from(0));
+    master.insert("sends".into(), Value::Array(Vec::new()));
+    master.insert("inserts".into(), Value::Array(Vec::new()));
+    Ok(project)
 }
 
 /// Semantic checks serde cannot express. Damaged files produce an error,
@@ -107,6 +141,13 @@ fn validate(p: &Project) -> Result<(), PersistError> {
     }
     let mut ids: Vec<u64> = p.channels.iter().map(|c| c.id.0).collect();
     ids.extend(p.patterns.iter().map(|x| x.id.0));
+    for t in &p.mixer.tracks {
+        ids.push(t.id.0);
+    }
+    for t in p.mixer.all_tracks() {
+        ids.extend(t.sends.iter().map(|s| s.id.0));
+        ids.extend(t.inserts.iter().map(|i| i.id.0));
+    }
     let n = ids.len();
     ids.sort_unstable();
     ids.dedup();
@@ -123,6 +164,12 @@ fn validate(p: &Project) -> Result<(), PersistError> {
         {
             return bad(format!("channel {:?} has invalid volume/pan", c.id));
         }
+    }
+    if p.channels.len() > jdance_domain::MAX_CHANNELS {
+        return bad("too many channels".into());
+    }
+    if let Err(e) = p.validate_routing() {
+        return bad(format!("mixer routing: {e}"));
     }
     for pat in &p.patterns {
         if pat.length_steps == 0 || pat.length_steps > 1024 {
@@ -208,25 +255,68 @@ mod tests {
     #[test]
     fn rejects_semantically_broken_projects() {
         let p = sample_project("a.wav");
-        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 1, "project": p});
+        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 2, "project": p});
         v["project"]["channels"][0]["volume"] = serde_json::json!(50.0);
         assert!(matches!(
             parse_project(v.to_string().as_bytes()),
             Err(PersistError::Corrupt(_))
         ));
-        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 1, "project": p});
+        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 2, "project": p});
         v["project"]["patterns"][0]["rows"][0]["steps"] = serde_json::json!([]);
         assert!(parse_project(v.to_string().as_bytes()).is_err());
-        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 1, "project": p});
+        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 2, "project": p});
         v["project"]["ids"]["next"] = serde_json::json!(1);
         assert!(parse_project(v.to_string().as_bytes()).is_err());
+    }
+
+    #[test]
+    fn migrates_v1_projects() {
+        // A project as written by format version 1 (before mixer tracks).
+        let v1 = br#"{
+          "format": "jdance-project",
+          "format_version": 1,
+          "project": {
+            "tempo_bpm": 128.0,
+            "channels": [{"id": 2, "name": "Kick",
+                          "source": {"kind": "sampler", "sample": {"path": "k.wav"}},
+                          "volume": 0.8, "pan": 0.0, "muted": false}],
+            "patterns": [{"id": 1, "name": "Pattern 1", "length_steps": 16, "rows": []}],
+            "mixer": {"master": {"id": 0, "name": "Master", "volume": 1.0, "pan": 0.0, "muted": false}},
+            "ids": {"next": 3}
+          }
+        }"#;
+        let p = parse_project(v1).unwrap();
+        assert_eq!(p.tempo_bpm, 128.0);
+        assert_eq!(p.channels[0].track, jdance_domain::TrackId::MASTER);
+        assert!(p.mixer.tracks.is_empty());
+        assert!(p.mixer.master.sends.is_empty());
+    }
+
+    #[test]
+    fn rejects_cyclic_routing() {
+        use jdance_domain::{MixerTrack, Send, SendId, TrackId};
+        let mut p = sample_project("a.wav");
+        let mut a = MixerTrack::new(TrackId(p.ids.next()), "A");
+        let b_id = TrackId(p.ids.next());
+        a.main_out = b_id;
+        let mut b = MixerTrack::new(b_id, "B");
+        b.sends.push(Send {
+            id: SendId(p.ids.next()),
+            dest: a.id,
+            level: 1.0,
+            pre_fader: false,
+        });
+        p.mixer.tracks = vec![a, b];
+        let v = serde_json::json!({"format": FORMAT_TAG, "format_version": 2, "project": p});
+        let err = parse_project(v.to_string().as_bytes()).unwrap_err();
+        assert!(err.to_string().contains("feedback loop"), "{err}");
     }
 
     #[test]
     fn truncated_files_never_panic() {
         let p = sample_project("a.wav");
         let full = serde_json::to_vec(&serde_json::json!({
-            "format": FORMAT_TAG, "format_version": 1, "project": p
+            "format": FORMAT_TAG, "format_version": 2, "project": p
         }))
         .unwrap();
         for n in 0..full.len() {

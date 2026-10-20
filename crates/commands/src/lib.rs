@@ -5,9 +5,14 @@
 //! inverse and redo applies the inverse of the inverse. Dirty state is
 //! tracked by revision IDs so that undoing back to the saved state clears it.
 
+mod mixer;
+
+pub use mixer::{add_insert, add_send, add_track};
+
 use jdance_domain::{
-    Channel, ChannelId, MAX_TEMPO_BPM, MAX_VOLUME, MIN_TEMPO_BPM, PatternId, Project, SampleRef,
-    Step, StepRow,
+    Channel, ChannelId, Effect, InsertId, MAX_CHANNELS, MAX_TEMPO_BPM, MAX_VOLUME, MIN_TEMPO_BPM,
+    Mixer, MixerTrack, PatternId, Project, RoutingError, SampleRef, SendId, Sidechain, Step,
+    StepRow, TrackId,
 };
 use thiserror::Error;
 
@@ -23,6 +28,12 @@ pub enum EditError {
     DuplicateChannel(ChannelId),
     #[error("value {0} is out of range")]
     OutOfRange(f64),
+    #[error("too many channels (limit {MAX_CHANNELS})")]
+    TooManyChannels,
+    #[error("{0}")]
+    Routing(RoutingError),
+    #[error("mixer object {0} does not exist")]
+    NoSuchMixerObject(u64),
 }
 
 /// A reversible change to a [`Project`].
@@ -48,6 +59,43 @@ pub enum Edit {
     RenameChannel(ChannelId, String),
     SetChannelSample(ChannelId, Option<SampleRef>),
     SetMasterVolume(f32),
+    SetChannelTrack(ChannelId, TrackId),
+
+    // Mixer parameters (cheap inverses, mergeable).
+    SetTrackVolume(TrackId, f32),
+    SetTrackPan(TrackId, f32),
+    SetTrackMuted(TrackId, bool),
+    RenameTrack(TrackId, String),
+    SetSendLevel(SendId, f32),
+    SetInsertBypass(InsertId, bool),
+    SetInsertEffect(InsertId, Effect),
+
+    // Mixer structure: validated against the whole routing graph; the
+    // inverse is a [`Edit::RestoreMixer`] snapshot.
+    AddTrack {
+        track: MixerTrack,
+        index: usize,
+    },
+    RemoveTrack(TrackId),
+    SetTrackMainOut(TrackId, TrackId),
+    AddSend {
+        track: TrackId,
+        send: jdance_domain::Send,
+    },
+    RemoveSend(SendId),
+    SetSendPreFader(SendId, bool),
+    AddInsert {
+        track: TrackId,
+        insert: jdance_domain::Insert,
+        index: usize,
+    },
+    RemoveInsert(InsertId),
+    SetInsertSidechain(InsertId, Option<Sidechain>),
+    /// Restores the mixer and the channel → track assignments.
+    RestoreMixer {
+        mixer: Box<Mixer>,
+        channel_tracks: Vec<(ChannelId, TrackId)>,
+    },
 }
 
 /// Edits with equal merge keys executed back-to-back inside one gesture
@@ -58,6 +106,10 @@ pub enum MergeKey {
     ChannelVolume(ChannelId),
     ChannelPan(ChannelId),
     MasterVolume,
+    TrackVolume(TrackId),
+    TrackPan(TrackId),
+    SendLevel(SendId),
+    InsertEffect(InsertId),
 }
 
 impl Edit {
@@ -73,6 +125,24 @@ impl Edit {
             Edit::RenameChannel(..) => "Rename channel",
             Edit::SetChannelSample(..) => "Change sample",
             Edit::SetMasterVolume(_) => "Change master volume",
+            Edit::SetChannelTrack(..) => "Route channel",
+            Edit::SetTrackVolume(..) => "Change track volume",
+            Edit::SetTrackPan(..) => "Change track pan",
+            Edit::SetTrackMuted(..) => "Mute track",
+            Edit::RenameTrack(..) => "Rename track",
+            Edit::SetSendLevel(..) => "Change send level",
+            Edit::SetInsertBypass(..) => "Bypass effect",
+            Edit::SetInsertEffect(..) => "Change effect",
+            Edit::AddTrack { .. } => "Add mixer track",
+            Edit::RemoveTrack(_) => "Remove mixer track",
+            Edit::SetTrackMainOut(..) => "Route track",
+            Edit::AddSend { .. } => "Add send",
+            Edit::RemoveSend(_) => "Remove send",
+            Edit::SetSendPreFader(..) => "Change send mode",
+            Edit::AddInsert { .. } => "Add effect",
+            Edit::RemoveInsert(_) => "Remove effect",
+            Edit::SetInsertSidechain(..) => "Change sidechain",
+            Edit::RestoreMixer { .. } => "Change mixer",
         }
     }
 
@@ -82,6 +152,10 @@ impl Edit {
             Edit::SetChannelVolume(id, _) => Some(MergeKey::ChannelVolume(*id)),
             Edit::SetChannelPan(id, _) => Some(MergeKey::ChannelPan(*id)),
             Edit::SetMasterVolume(_) => Some(MergeKey::MasterVolume),
+            Edit::SetTrackVolume(id, _) => Some(MergeKey::TrackVolume(*id)),
+            Edit::SetTrackPan(id, _) => Some(MergeKey::TrackPan(*id)),
+            Edit::SetSendLevel(id, _) => Some(MergeKey::SendLevel(*id)),
+            Edit::SetInsertEffect(id, _) => Some(MergeKey::InsertEffect(*id)),
             _ => None,
         }
     }
@@ -131,6 +205,14 @@ impl Edit {
             } => {
                 if p.channel(channel.id).is_some() {
                     return Err(EditError::DuplicateChannel(channel.id));
+                }
+                if p.channels.len() >= MAX_CHANNELS {
+                    return Err(EditError::TooManyChannels);
+                }
+                if !p.mixer.has_track(channel.track) {
+                    return Err(EditError::Routing(RoutingError::UnknownTrack(
+                        channel.track,
+                    )));
                 }
                 for (pid, _) in rows {
                     if p.pattern(*pid).is_none() {
@@ -203,11 +285,12 @@ impl Edit {
                     v,
                 )))
             }
+            other => mixer::apply(other, p),
         }
     }
 }
 
-fn check_range(v: f32, min: f32, max: f32) -> Result<f32, EditError> {
+pub(crate) fn check_range(v: f32, min: f32, max: f32) -> Result<f32, EditError> {
     if v.is_finite() && (min..=max).contains(&v) {
         Ok(v)
     } else {

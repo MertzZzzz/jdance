@@ -2,6 +2,10 @@
 //! RT-001: the render path performs no heap operations, including command
 //! handling and snapshot swaps.
 
+use jdance_domain::{
+    CompressorParams, Effect, Insert, InsertId, MixerTrack, Project, Send, SendId, Sidechain, Tap,
+    TrackId,
+};
 use jdance_engine::{compile, create_engine};
 use jdance_rt_check::{GuardedAllocator, reset_violations, rt_section, violations};
 use jdance_test_support::{click, step_project};
@@ -17,12 +21,13 @@ fn render_does_not_allocate() {
     let all: Vec<u32> = (0..16).collect();
     let busy: Vec<&[u32]> = vec![&all; 12];
     let sparse: Vec<&[u32]> = vec![&[0, 8]; 3];
-    let fast = compile(&step_project(140.0, &busy), sr, |_| {
+    let fast = compile(&with_mixer(step_project(140.0, &busy), 1.0), sr, |_| {
         Some(Arc::clone(&sample))
     });
-    let slow = compile(&step_project(90.0, &sparse), sr, |_| {
+    let slow = compile(&with_mixer(step_project(90.0, &sparse), 0.3), sr, |_| {
         Some(Arc::clone(&sample))
     });
+    assert!(fast.latency > 0, "graph exercises delay compensation");
 
     let (mut handle, mut processor) = create_engine(sr);
     let mut l = vec![0.0f32; 4096];
@@ -47,4 +52,45 @@ fn render_does_not_allocate() {
     }
     assert_eq!(violations(), 0, "heap operations inside render");
     assert!(handle.feedback().read().renders >= 400);
+}
+
+/// Routes channels through tracks with sends, a lookahead compressor and a
+/// sidechain, so swaps exercise every state-transfer path.
+fn with_mixer(mut p: Project, volume: f32) -> Project {
+    let comp = |lookahead_ms| {
+        Effect::Compressor(CompressorParams {
+            lookahead_ms,
+            ..Default::default()
+        })
+    };
+    let mut drums = MixerTrack::new(TrackId(9001), "Drums");
+    drums.volume = volume;
+    drums.inserts.push(Insert {
+        id: InsertId(9010),
+        bypass: false,
+        effect: comp(1.0),
+        sidechain: None,
+    });
+    drums.sends.push(Send {
+        id: SendId(9020),
+        dest: TrackId(9003),
+        level: 0.4,
+        pre_fader: false,
+    });
+    let mut bass = MixerTrack::new(TrackId(9002), "Bass");
+    bass.inserts.push(Insert {
+        id: InsertId(9011),
+        bypass: false,
+        effect: comp(0.0),
+        sidechain: Some(Sidechain {
+            source: TrackId(9001),
+            tap: Tap::PreFader,
+        }),
+    });
+    let ret = MixerTrack::new(TrackId(9003), "Return");
+    p.mixer.tracks = vec![drums, bass, ret];
+    for (i, c) in p.channels.iter_mut().enumerate() {
+        c.track = [TrackId(9001), TrackId(9002), TrackId::MASTER][i % 3];
+    }
+    p
 }

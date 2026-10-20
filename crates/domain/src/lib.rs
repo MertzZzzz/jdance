@@ -6,8 +6,13 @@
 //! it exclusively through `jdance-commands`.
 
 mod ids;
+mod mixer;
 
-pub use ids::{ChannelId, IdAllocator, PatternId, TrackId};
+pub use ids::{ChannelId, IdAllocator, InsertId, PatternId, SendId, TrackId};
+pub use mixer::{
+    CompressorParams, Effect, Insert, MAX_INSERTS_PER_TRACK, MAX_SEND_LEVEL, MAX_SENDS_PER_TRACK,
+    MAX_TRACKS, Mixer, MixerTrack, RoutingError, Send, Sidechain, Tap,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -22,6 +27,8 @@ pub const MIN_TEMPO_BPM: f64 = 20.0;
 pub const MAX_TEMPO_BPM: f64 = 999.0;
 /// Upper bound for channel/track volume (linear gain).
 pub const MAX_VOLUME: f32 = 1.25;
+/// Channel Rack limit (RT-011: the engine preallocates per-channel buffers).
+pub const MAX_CHANNELS: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Project {
@@ -70,6 +77,17 @@ impl Project {
     pub fn active_pattern(&self) -> Option<&Pattern> {
         self.patterns.first()
     }
+
+    /// Checks references from channels into the mixer and the routing
+    /// graph (MIX-002).
+    pub fn validate_routing(&self) -> Result<(), RoutingError> {
+        for c in &self.channels {
+            if !self.mixer.has_track(c.track) {
+                return Err(RoutingError::UnknownTrack(c.track));
+            }
+        }
+        self.mixer.validate()
+    }
 }
 
 impl Default for Project {
@@ -88,6 +106,8 @@ pub struct Channel {
     /// `-1.0` (left) ..= `1.0` (right).
     pub pan: f32,
     pub muted: bool,
+    /// Mixer track this channel plays into (MIX-001).
+    pub track: TrackId,
 }
 
 impl Channel {
@@ -99,6 +119,7 @@ impl Channel {
             volume: 0.8,
             pan: 0.0,
             muted: false,
+            track: TrackId::MASTER,
         }
     }
 
@@ -194,34 +215,6 @@ impl Default for Step {
             velocity: 0.8,
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Mixer {
-    pub master: MixerTrack,
-}
-
-impl Default for Mixer {
-    fn default() -> Self {
-        Self {
-            master: MixerTrack {
-                id: TrackId::MASTER,
-                name: "Master".to_owned(),
-                volume: 1.0,
-                pan: 0.0,
-                muted: false,
-            },
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct MixerTrack {
-    pub id: TrackId,
-    pub name: String,
-    pub volume: f32,
-    pub pan: f32,
-    pub muted: bool,
 }
 
 #[cfg(test)]

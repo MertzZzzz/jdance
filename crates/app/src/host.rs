@@ -12,7 +12,7 @@ use jdance_audio_cpal::CpalBackend;
 use jdance_domain::{Project, SampleRef};
 use jdance_engine::{EngineHandle, EngineProcessor, FeedbackReading, compile, create_engine};
 use jdance_persistence::{WavExportFormat, resolve_sample_path};
-use jdance_ui::{Host, Notice, SampleStatus, StreamStatus, TransportStatus};
+use jdance_ui::{Host, LatencyInfo, Notice, SampleStatus, StreamStatus, TransportStatus};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, channel};
 
@@ -39,6 +39,7 @@ pub struct AudioHost {
     backends: Vec<CpalBackend>,
     active: Option<Active>,
     reading: FeedbackReading,
+    latency: LatencyInfo,
     project: Project,
     project_dir: Option<PathBuf>,
     needs_compile: bool,
@@ -73,6 +74,7 @@ impl AudioHost {
             backends,
             active: None,
             reading: FeedbackReading::default(),
+            latency: LatencyInfo::default(),
             project: Project::new(),
             project_dir: None,
             needs_compile: true,
@@ -175,14 +177,23 @@ impl AudioHost {
     }
 
     fn recompile(&mut self) {
-        let Some(active) = &mut self.active else {
-            return;
-        };
         let dir = self.project_dir.as_deref();
         let samples = &self.samples;
-        let snapshot = compile(&self.project, active.engine.sample_rate(), |s| {
+        let rate = self.engine_rate();
+        let snapshot = compile(&self.project, rate, |s| {
             samples.converted(&resolve_sample_path(dir, s))
         });
+        self.latency = LatencyInfo {
+            sample_rate: rate,
+            total: snapshot.latency,
+            per_track: snapshot.track_latencies(),
+            clamped: snapshot.pdc_clamped,
+        };
+        let Some(active) = &mut self.active else {
+            // Nothing plays; the compile above still feeds the latency display.
+            self.needs_compile = false;
+            return;
+        };
         match active.engine.set_snapshot(snapshot) {
             Ok(()) => self.needs_compile = false,
             // Queue full: retry on the next poll.
@@ -273,6 +284,10 @@ impl Host for AudioHost {
             voices: r.active_voices,
             dropped_commands: r.dropped_commands,
         }
+    }
+
+    fn latency(&self) -> LatencyInfo {
+        self.latency.clone()
     }
 
     fn stream(&self) -> Option<StreamStatus> {

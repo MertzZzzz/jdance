@@ -1,10 +1,10 @@
 {
   "format": "jdance-project",
-  "format_version": 1,
+  "format_version": 2,
   "project": {
     "channels": [
       {
-        "id": 2,
+        "id": 5,
         "muted": false,
         "name": "Kick",
         "pan": 0.0,
@@ -14,10 +14,11 @@
             "path": "samples/kick.wav"
           }
         },
+        "track": 2,
         "volume": 0.800000011920929
       },
       {
-        "id": 3,
+        "id": 6,
         "muted": false,
         "name": "Snare",
         "pan": 0.05000000074505806,
@@ -27,10 +28,11 @@
             "path": "samples/snare.wav"
           }
         },
+        "track": 3,
         "volume": 0.800000011920929
       },
       {
-        "id": 4,
+        "id": 7,
         "muted": false,
         "name": "Hat",
         "pan": -0.20000000298023224,
@@ -40,20 +42,64 @@
             "path": "samples/hat.wav"
           }
         },
+        "track": 3,
         "volume": 0.800000011920929
       }
     ],
     "ids": {
-      "next": 5
+      "next": 8
     },
     "mixer": {
       "master": {
         "id": 0,
+        "inserts": [],
+        "main_out": 0,
         "muted": false,
         "name": "Master",
         "pan": 0.0,
+        "sends": [],
         "volume": 1.0
-      }
+      },
+      "tracks": [
+        {
+          "id": 2,
+          "inserts": [],
+          "main_out": 0,
+          "muted": false,
+          "name": "Kick",
+          "pan": 0.0,
+          "sends": [],
+          "volume": 1.0
+        },
+        {
+          "id": 3,
+          "inserts": [
+            {
+              "bypass": false,
+              "effect": {
+                "attack_ms": 1.0,
+                "kind": "compressor",
+                "lookahead_ms": 0.0,
+                "makeup_db": 0.0,
+                "ratio": 6.0,
+                "release_ms": 150.0,
+                "threshold_db": -30.0
+              },
+              "id": 4,
+              "sidechain": {
+                "source": 2,
+                "tap": "pre_fader"
+              }
+            }
+          ],
+          "main_out": 0,
+          "muted": false,
+          "name": "Perc",
+          "pan": 0.0,
+          "sends": [],
+          "volume": 1.0
+        }
+      ]
     },
     "patterns": [
       {
@@ -62,7 +108,7 @@
         "name": "Pattern 1",
         "rows": [
           {
-            "channel": 2,
+            "channel": 5,
             "steps": [
               {
                 "on": true,
@@ -131,7 +177,7 @@
             ]
           },
           {
-            "channel": 3,
+            "channel": 6,
             "steps": [
               {
                 "on": false,
@@ -200,7 +246,7 @@
             ]
           },
           {
-            "channel": 4,
+            "channel": 7,
             "steps": [
               {
                 "on": false,

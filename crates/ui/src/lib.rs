@@ -5,14 +5,19 @@
 //! through `jdance-commands`, and tells the [`Host`] when it changed.
 
 mod host;
+mod mixer;
 mod rack;
 mod settings;
 
-pub use host::{Host, Notice, NoticeLevel, SampleStatus, StreamStatus, TransportStatus};
+pub use host::{
+    Host, LatencyInfo, Notice, NoticeLevel, SampleStatus, StreamStatus, TransportStatus,
+};
 
 use egui::{Key, KeyboardShortcut, Modifiers};
-use jdance_commands::{Edit, History, add_sampler_channel};
-use jdance_domain::{MAX_TEMPO_BPM, MAX_VOLUME, MIN_TEMPO_BPM, Project};
+use jdance_commands::{Edit, History, add_insert, add_sampler_channel, add_send, add_track};
+use jdance_domain::{
+    ChannelId, CompressorParams, Effect, MAX_TEMPO_BPM, MAX_VOLUME, MIN_TEMPO_BPM, Project, TrackId,
+};
 use settings::SettingsWindow;
 use std::path::{Path, PathBuf};
 
@@ -25,6 +30,18 @@ const NOTICE_SECONDS: f64 = 8.0;
 pub trait ProjectStore {
     fn load(&self, path: &Path) -> Result<Project, String>;
     fn save(&self, path: &Path, project: &Project) -> Result<(), String>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RenameTarget {
+    Channel(ChannelId),
+    Track(TrackId),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct RenameDialog {
+    target: RenameTarget,
+    text: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +58,8 @@ pub struct JdanceApp<H: Host, S: ProjectStore> {
     history: History,
     path: Option<PathBuf>,
     settings: Option<SettingsWindow>,
+    rename: Option<RenameDialog>,
+    show_mixer: bool,
     notices: Vec<(Notice, f64)>,
     pending: Option<Pending>,
     allow_close: bool,
@@ -73,6 +92,8 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             history: History::default(),
             path,
             settings,
+            rename: None,
+            show_mixer: true,
             notices: Vec::new(),
             pending: None,
             allow_close: false,
@@ -332,6 +353,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                     self.redo(now);
                 }
             });
+            ui.toggle_value(&mut self.show_mixer, "Mixer");
             if ui.button("Audio settings").clicked() {
                 self.settings = Some(SettingsWindow::new(&self.host));
             }
@@ -407,6 +429,78 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 );
             }
         });
+    }
+
+    fn start_rename(&mut self, target: RenameTarget) {
+        let text = match target {
+            RenameTarget::Channel(id) => self.project.channel(id).map(|c| c.name.clone()),
+            RenameTarget::Track(id) => self.project.mixer.track(id).map(|t| t.name.clone()),
+        };
+        if let Some(text) = text {
+            self.rename = Some(RenameDialog { target, text });
+        }
+    }
+
+    fn mixer_action(&mut self, action: mixer::MixerAction, now: f64) {
+        let result = match action {
+            mixer::MixerAction::AddTrack => {
+                let name = format!("Track {}", self.project.mixer.tracks.len() + 1);
+                add_track(&mut self.history, &mut self.project, name).map(|_| ())
+            }
+            mixer::MixerAction::AddSend { from, to } => {
+                add_send(&mut self.history, &mut self.project, from, to).map(|_| ())
+            }
+            mixer::MixerAction::AddCompressor(track) => add_insert(
+                &mut self.history,
+                &mut self.project,
+                track,
+                Effect::Compressor(CompressorParams::default()),
+            )
+            .map(|_| ()),
+            mixer::MixerAction::Rename(id) => {
+                self.start_rename(RenameTarget::Track(id));
+                Ok(())
+            }
+        };
+        match result {
+            Ok(()) => self.sync_needed = true,
+            Err(e) => self.notify(Notice::error(e.to_string()), now),
+        }
+    }
+
+    fn rename_dialog(&mut self, ctx: &egui::Context, now: f64) {
+        let Some(dialog) = &mut self.rename else {
+            return;
+        };
+        let mut commit = false;
+        let mut cancel = false;
+        egui::Modal::new(egui::Id::unique("rename")).show(ctx, |ui| {
+            ui.heading("Rename");
+            let r = ui.text_edit_singleline(&mut dialog.text);
+            r.request_focus();
+            if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                commit = true;
+            }
+            ui.horizontal(|ui| {
+                commit |= ui.button("OK").clicked();
+                cancel |= ui.button("Cancel").clicked();
+            });
+            cancel |= ui.input(|i| i.key_pressed(Key::Escape));
+        });
+        if commit {
+            let name = dialog.text.trim().to_owned();
+            let target = dialog.target;
+            self.rename = None;
+            if !name.is_empty() {
+                let edit = match target {
+                    RenameTarget::Channel(id) => Edit::RenameChannel(id, name),
+                    RenameTarget::Track(id) => Edit::RenameTrack(id, name),
+                };
+                self.apply(edit, false, now);
+            }
+        } else if cancel {
+            self.rename = None;
+        }
     }
 
     fn handle_close_request(&mut self, ctx: &egui::Context) {
@@ -495,15 +589,34 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
 
         egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui, now));
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
+        let mut mix = mixer::MixerOutput::default();
+        if self.show_mixer {
+            let latency = self.host.latency();
+            egui::Panel::bottom("mixer")
+                .resizable(true)
+                .default_size(330.0)
+                .min_size(120.0)
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        mix = mixer::show(ui, &self.project.mixer, &latency);
+                    });
+                });
+        }
         let mut out = rack::RackOutput::default();
         egui::CentralPanel::default().show(ui, |ui| {
             out = rack::show(ui, &self.project, &self.host, self.project_dir());
         });
-        for (edit, merging) in out.edits {
+        for (edit, merging) in out.edits.into_iter().chain(mix.edits) {
             self.apply(edit, merging, now);
         }
-        if out.end_gesture {
+        if out.end_gesture || mix.end_gesture {
             self.history.end_gesture();
+        }
+        if let Some(target) = out.rename {
+            self.start_rename(target);
+        }
+        for action in mix.actions {
+            self.mixer_action(action, now);
         }
         for (name, sample) in out.new_channels {
             match add_sampler_channel(&mut self.history, &mut self.project, name) {
@@ -522,6 +635,7 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
         {
             self.settings = Some(w);
         }
+        self.rename_dialog(&ctx, now);
         self.confirm_dialog(&ctx, now);
         self.show_notices(&ctx, now);
 

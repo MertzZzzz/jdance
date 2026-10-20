@@ -8,7 +8,7 @@ use jdance_audio_api::{
     ActiveStreamInfo, AudioError, BackendId, DeviceCapabilities, DeviceInfo, DeviceKey,
     DeviceSettings, StatsReading, StreamState,
 };
-use jdance_domain::{Project, SampleRef};
+use jdance_domain::{Project, SampleRef, TrackId};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -19,6 +19,34 @@ pub struct TransportStatus {
     pub peak_load: f32,
     pub voices: u32,
     pub dropped_commands: u64,
+}
+
+/// Delay compensation figures from the last compiled snapshot (MIX-034).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LatencyInfo {
+    pub sample_rate: u32,
+    /// Output latency at the master, in samples.
+    pub total: u32,
+    pub per_track: Vec<(TrackId, u32)>,
+    /// Some edge needed more compensation than the engine supports.
+    pub clamped: bool,
+}
+
+impl LatencyInfo {
+    pub fn track(&self, id: TrackId) -> Option<u32> {
+        self.per_track
+            .iter()
+            .find(|(t, _)| *t == id)
+            .map(|(_, l)| *l)
+    }
+
+    pub fn format(&self, samples: u32) -> String {
+        if self.sample_rate == 0 {
+            return format!("{samples} smp");
+        }
+        let ms = f64::from(samples) * 1000.0 / f64::from(self.sample_rate);
+        format!("{samples} smp ({ms:.1} ms)")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -79,6 +107,7 @@ pub trait Host {
     fn play(&mut self);
     fn stop(&mut self);
     fn transport(&self) -> TransportStatus;
+    fn latency(&self) -> LatencyInfo;
     fn stream(&self) -> Option<StreamStatus>;
     fn sample_status(&self, sample: &SampleRef, project_dir: Option<&Path>)
     -> Option<SampleStatus>;

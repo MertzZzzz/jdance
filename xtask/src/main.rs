@@ -4,7 +4,10 @@
 //! - `check`: dependency-graph rules (ARCH-001) and SPDX headers (LIC-001);
 //! - `gen-demo`: regenerates `assets/demo` (synthesized samples, CR-006).
 
-use jdance_domain::{Channel, ChannelId, ChannelSource, Project, SampleRef};
+use jdance_domain::{
+    Channel, ChannelId, ChannelSource, CompressorParams, Effect, Insert, InsertId, MixerTrack,
+    Project, SampleRef, Sidechain, Tap, TrackId,
+};
 use jdance_persistence::{WavExportFormat, save_project, write_wav};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -300,6 +303,28 @@ fn gen_demo() -> Result<(), String> {
     std::fs::create_dir_all(dir.join("samples")).map_err(|e| e.to_string())?;
     let mut project = Project::new();
     project.tempo_bpm = 124.0;
+    // Mixer: Kick on its own track; Snare and Hat on a Perc track whose
+    // compressor is sidechained from the kick.
+    let kick_track = TrackId(project.ids.next());
+    let perc_track = TrackId(project.ids.next());
+    let mut perc = MixerTrack::new(perc_track, "Perc");
+    perc.inserts.push(Insert {
+        id: InsertId(project.ids.next()),
+        bypass: false,
+        effect: Effect::Compressor(CompressorParams {
+            threshold_db: -30.0,
+            ratio: 6.0,
+            attack_ms: 1.0,
+            release_ms: 150.0,
+            makeup_db: 0.0,
+            lookahead_ms: 0.0,
+        }),
+        sidechain: Some(Sidechain {
+            source: kick_track,
+            tap: Tap::PreFader,
+        }),
+    });
+    project.mixer.tracks = vec![MixerTrack::new(kick_track, "Kick"), perc];
     let parts: [(&str, Vec<f32>, &[u32], f32); 3] = [
         ("Kick", kick(), &[0, 4, 8, 12], 0.0),
         ("Snare", snare(), &[4, 12], 0.05),
@@ -321,6 +346,11 @@ fn gen_demo() -> Result<(), String> {
             sample: Some(SampleRef { path: file }),
         };
         ch.pan = pan;
+        ch.track = if name == "Kick" {
+            kick_track
+        } else {
+            perc_track
+        };
         project.channels.push(ch);
         let row = project.patterns[0].row_mut(id);
         for s in steps {

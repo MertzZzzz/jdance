@@ -19,6 +19,7 @@ pub(crate) struct RackOutput {
     pub end_gesture: bool,
     /// New channels to create: name and optional sample.
     pub new_channels: Vec<(String, Option<SampleRef>)>,
+    pub rename: Option<crate::RenameTarget>,
 }
 
 pub(crate) fn show(
@@ -80,8 +81,15 @@ pub(crate) fn show(
                     (Some(s), Some(SampleStatus::Failed(e))) => format!("{}\nFailed: {e}", s.path),
                     (Some(s), _) => format!("{}\nLoading…", s.path),
                 };
+                if name.double_clicked() {
+                    out.rename = Some(crate::RenameTarget::Channel(ch.id));
+                }
                 name.clone().on_hover_text(hover);
                 name.context_menu(|ui| {
+                    if ui.button("Rename…").clicked() {
+                        out.rename = Some(crate::RenameTarget::Channel(ch.id));
+                        ui.close();
+                    }
                     if ui.button("Load sample…").clicked() {
                         if let Some(p) = pick_wav() {
                             out.edits
@@ -137,6 +145,25 @@ pub(crate) fn show(
                     out.edits.push((Edit::SetChannelPan(ch.id, 0.0), false));
                 }
                 out.end_gesture |= r.drag_stopped();
+
+                let track_label = project
+                    .mixer
+                    .track(ch.track)
+                    .map_or("?".to_owned(), |t| t.name.clone());
+                egui::ComboBox::from_id_salt(("route", ch.id.0))
+                    .width(80.0)
+                    .selected_text(track_label)
+                    .show_ui(ui, |ui| {
+                        for t in project.mixer.all_tracks() {
+                            if ui.selectable_label(t.id == ch.track, &t.name).clicked()
+                                && t.id != ch.track
+                            {
+                                out.edits.push((Edit::SetChannelTrack(ch.id, t.id), false));
+                            }
+                        }
+                    })
+                    .response
+                    .on_hover_text("Mixer track");
 
                 ui.add_space(6.0);
                 for i in 0..pattern.length_steps {

@@ -12,6 +12,8 @@
 | `StreamStats` | RT → UI, атомики | `audio-api` | да | да | да | O(1) |
 | `StreamStats::error` | backend error callback → UI, `Mutex` | `audio-api` | нет | нет | нет | **не** вызывается в render callback |
 | Голоса `Voice` | только RT | `engine` | да (128 слотов при создании) | — | — | O(voices) на блок |
+| Буферы каналов и шин | только RT | `engine` | да (256 каналов, 129 шин × вход/pre/post, по 1024 фрейма; ~5 МБ) | — | — | O(каналы + шины) на блок |
+| Состояние в snapshot (гейны, delay lines, компрессор) | UI → RT вместе со snapshot | `engine` | да: перенос обменом буферов (`take_state_from`) | — | — | O(n²) по объектам при замене, n ≤ сотни |
 | Scratch-буферы | только RT | `engine`, `audio-cpal` | да (1024 и 8192 фреймов) | — | — | — |
 
 ## Инварианты
@@ -32,7 +34,9 @@
 
 - `engine/tests/rt_alloc.rs`: 400 вызовов `render` с заменой snapshot,
   stop/play/panic и разными размерами блоков под guard-аллокатором
-  (`rt-check`) дают 0 heap-операций (RT-001).
+  (`rt-check`) дают 0 heap-операций (RT-001). Граф включает треки,
+  send, sidechain и компрессор с lookahead, так что проверен и перенос
+  состояния при замене snapshot.
 - `engine/tests/render.rs`: одинаковый результат бит в бит при случайных
   размерах блоков от 1 до 2048 (RT-022).
 
