@@ -11,6 +11,9 @@ const FILE_NAME: &str = "settings.json";
 pub struct UserSettings {
     #[serde(default)]
     pub audio: UserAudioSettings,
+    /// Extra VST3 folders (PLG-020); never stored in projects.
+    #[serde(default)]
+    pub plugin_paths: Vec<PathBuf>,
 }
 
 /// `JDANCE_CONFIG_DIR` overrides the platform location (used by tests/CI).

@@ -10,9 +10,9 @@ use jdance_plugin_vst3::{
     instantiate, run_scanner, scan_in_process, scan_out_of_process,
 };
 use jdance_rt_check::{GuardedAllocator, reset_violations, rt_section, violations};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 #[global_allocator]
@@ -20,35 +20,8 @@ static ALLOC: GuardedAllocator = GuardedAllocator;
 
 const LATENCY: usize = 64;
 
-/// Builds the test plugin and lays it out as a bundle once per process.
 fn bundle() -> &'static Path {
-    static DIR: OnceLock<(tempfile::TempDir, PathBuf)> = OnceLock::new();
-    &DIR.get_or_init(|| {
-        let mut build = Command::new(env!("CARGO"));
-        build.args(["build", "-p", "jdance-test-fx"]);
-        if !cfg!(debug_assertions) {
-            build.arg("--release");
-        }
-        let status = build.status().expect("cargo build");
-        assert!(status.success(), "building the test plugin failed");
-        // target/<profile>/deps/<test> → target/<profile>
-        let exe = std::env::current_exe().unwrap();
-        let profile_dir = exe.parent().unwrap().parent().unwrap();
-        let lib = if cfg!(windows) {
-            "jdance_test_fx.dll"
-        } else if cfg!(target_os = "macos") {
-            "libjdance_test_fx.dylib"
-        } else {
-            "libjdance_test_fx.so"
-        };
-        let dir = tempfile::tempdir().unwrap();
-        let bundle = dir.path().join("plugins").join("JdanceTestFx.vst3");
-        let bin = bundle.join(bundle_binary("JdanceTestFx").unwrap());
-        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
-        std::fs::copy(profile_dir.join(lib), &bin).unwrap();
-        (dir, bundle)
-    })
-    .1
+    jdance_test_support::test_plugin_bundle(bundle_binary)
 }
 
 fn module() -> Arc<Vst3Module> {

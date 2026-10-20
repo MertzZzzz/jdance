@@ -2,7 +2,7 @@
 
 Статусы по разделу 0.2 Amendment 02. `PASS` только с артефактом:
 тест в репозитории, лог CI или acceptance-отчёт.
-Последнее обновление: 2026-10-20 (VST3 hosting, часть 1).
+Последнее обновление: 2026-10-20 (VST3-эффекты в микшере).
 
 ## Milestone 0
 
@@ -109,7 +109,7 @@
 | Формат проекта v5 (миграция v4→v5: дефолтные lanes) | PASS | `persistence` тесты |
 | UI: canvas, zoom, drag/resize, ruler loop/seek, переименование lane/pattern | PASS (ручная проверка на Xvfb) | скриншот демо-проекта |
 
-## Milestone P1 (VST3 effects) — часть 1: хостинг без UI
+## Milestone P1 (VST3 effects)
 
 | Пункт | Статус | Артефакт / комментарий |
 |---|---|---|
@@ -125,8 +125,23 @@
 | Load/process/unload 1000 раз (PLG-081) | PASS | `load_process_unload_repeatedly`; проверка утечек памяти NOT RUN |
 | Scanner out-of-process, таймаут, crash → причина (PLG-022) | PASS | `out_of_process_scan_and_blocklist_reasons`, `scanner_crash_and_hang_are_contained` |
 | Пути поиска по ОС (PLG-020) | PASS (код) | `default_search_paths`; кеш и blocklist в настройках — часть 3 |
-| Плагины как insert-эффекты в mixer, PDC, render, persistence, placeholder | NOT RUN | часть 2 |
-| Plugin browser, generic editor, окно GUI плагина | NOT RUN | часть 3 |
+| Плагин как insert-эффект: экземпляр создаётся один раз и передаётся из снапшота в снапшот, освобождается вне audio thread | PASS | `engine/tests/plugins.rs` (fake processor) |
+| PDC с плагинами по всему графу, включая sidechain (PLG-050, MIX-030) | PASS | `plugin_latency_is_compensated_on_parallel_paths`; ручная проверка в UI: latency 64 на треке и компенсация sidechain-трека |
+| Transport для плагина: playing, tempo, позиция в сэмплах и PPQ, cycle (PLG-034) | PASS | `plugin_sees_transport_at_block_start`; переход через loop внутри блока не сообщается (NOT RUN) |
+| RT-001 с плагинами (код хоста) | PASS | `rendering_with_plugins_does_not_allocate`, `host_side_processing_does_not_allocate` |
+| Persistence: slot плагина, state в base64, формат v6; round-trip отсутствующего плагина без потерь (PLG-070/072/074) | PASS | `plugin_state_round_trips_unchanged`; вынос больших state в asset-файлы (PLG-071) NOT RUN |
+| Отсутствующий плагин: placeholder пропускает звук, уведомление при открытии, причина в слоте (PLG-072) | PASS | тесты engine и render, ручная проверка в UI |
+| Смена sample rate / нового движка: пересоздание экземпляров с текущим state (PLG-044) | PASS (код) | `PluginHost::sync`; интеграционного теста с устройством нет |
+| `kLatencyChanged`/`kIoChanged`: пересоздание с текущим state и пересчёт PDC (PLG-035/051) | PASS (код) | тестовый плагин пока не меняет latency на лету — NOT RUN |
+| Export с плагинами: отдельные offline-экземпляры из текущего state (PLG-045, spec Export) | PASS | `export_renders_plugins_with_compensated_latency`, `export_restores_plugin_state` |
+| State захватывается перед сохранением и экспортом | PASS (код) | `capture_plugin_states` |
+| Каталог: кеш по (path, size, mtime, arch), blocklist с причиной, инкрементальный scan при старте, full rescan (PLG-022..024) | PASS | `scan_plugin_prints_descriptors_or_fails_cleanly`; ручная проверка: тестовый плагин найден при старте |
+| Пользовательские папки плагинов в настройках (PLG-020) | PASS (ручная) | окно Plugins |
+| Добавление плагина из меню «+ Effect → VST3» | PASS (ручная) | скриншот на Xvfb |
+| Generic editor: все параметры, текст значения от плагина, дискретные и read-only (PLG-064) | PASS (ручная) | ввод значения текстом NOT RUN |
+| Окно GUI плагина (PLG-060..063), ADR-010 | NOT RUN | следующий шаг |
+| Защита от crash-loop при открытии проекта (PLG-025), autosave (PLG-075) | NOT RUN | |
+| Undo для изменений параметров плагина | NOT RUN | изменения в generic editor сейчас без undo |
 
 ## Milestone 1A / 1B
 
@@ -140,5 +155,5 @@
 ## Известные ограничения текущей реализации
 
 - Ресемплинг сэмплов без anti-aliasing (BLD-041, ADR-012).
-- Piano roll и автоматизация не начаты; плагины — только хостинг без UI
-  (Milestone P1, часть 1).
+- Piano roll и автоматизация не начаты; у VST3-эффектов нет окна GUI
+  плагина (только generic editor).

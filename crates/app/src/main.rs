@@ -9,6 +9,7 @@
 
 mod config;
 mod host;
+mod plugins;
 mod render;
 mod samples;
 
@@ -36,6 +37,8 @@ fn main() -> ExitCode {
     let result = match args.first().map(String::as_str) {
         Some("render") => cmd_render(&args[1..]),
         Some("devices") => cmd_devices(),
+        // Internal: the out-of-process plugin scanner (PLG-012).
+        Some("scan-plugin") => cmd_scan_plugin(&args[1..]),
         Some("--version" | "-V") => {
             println!("jdance {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -149,12 +152,16 @@ fn cmd_render(args: &[String]) -> Result<(), String> {
         Path::new(out),
         rate,
         &options,
+        Some(&render::ExportPlugins {
+            catalog: &plugins::Catalog::load_cached(),
+            modules: &plugins::ModuleCache::default(),
+        }),
     )?;
     if let Some(w) = &outcome.tail_warning {
         eprintln!("warning: {w}");
     }
     for w in &outcome.warnings {
-        eprintln!("warning: missing sample {w}");
+        eprintln!("warning: {w}");
     }
     let peak = outcome
         .audio
@@ -167,6 +174,17 @@ fn cmd_render(args: &[String]) -> Result<(), String> {
         outcome.audio.left.len(),
         jdance_dsp::gain_to_db(peak)
     );
+    Ok(())
+}
+
+/// Loads one plugin module and prints its classes as JSON. Run as a
+/// child process by the plugin scan so a crash only blocklists the module.
+fn cmd_scan_plugin(args: &[String]) -> Result<(), String> {
+    let [path] = args else {
+        return Err("scan-plugin needs MODULE.vst3".into());
+    };
+    let d = jdance_plugin_vst3::scan_in_process(Path::new(path))?;
+    println!("{}", serde_json::to_string(&d).map_err(|e| e.to_string())?);
     Ok(())
 }
 
@@ -233,6 +251,8 @@ fn cmd_gui(args: &[String]) -> Result<(), String> {
 
     let mut audio = host::AudioHost::new(jdance_audio_cpal::backends());
     audio.open_initial();
+    // On start only changed modules are scanned (PLG-023).
+    jdance_ui::Host::rescan_plugins(&mut audio, false);
     if args.iter().any(|a| a == "--autoplay") {
         // Load the project first so Play does not start on an empty song.
         let dir = path.as_deref().and_then(std::path::Path::parent);

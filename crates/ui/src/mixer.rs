@@ -7,7 +7,7 @@
 //! parameter schema. Drawing only collects edits; routing menus offer
 //! only destinations that keep the graph acyclic (MIX-021).
 
-use crate::{LatencyInfo, MeterReadings};
+use crate::{Host, LatencyInfo, MeterReadings, PluginParamView};
 use egui::{Color32, CornerRadius, Rect, RichText, Sense, Stroke, StrokeKind, pos2, vec2};
 use jdance_commands::Edit;
 use jdance_domain::{
@@ -16,6 +16,7 @@ use jdance_domain::{
     Tap, TrackId,
 };
 use jdance_dsp::Processor;
+use jdance_plugin_api::PluginDescriptor;
 
 const STRIP_WIDTH: f32 = 190.0;
 const FADER_HEIGHT: f32 = 110.0;
@@ -26,6 +27,7 @@ pub(crate) enum MixerAction {
     AddTrack,
     AddSend { from: TrackId, to: TrackId },
     AddEffect(TrackId, EffectKind),
+    AddPlugin(TrackId, PluginDescriptor),
     Rename(TrackId),
 }
 
@@ -88,8 +90,10 @@ pub(crate) fn show(
     mixer: &Mixer,
     latency: &LatencyInfo,
     meters: &MeterReadings,
+    host: &mut dyn Host,
 ) -> MixerOutput {
     let mut out = MixerOutput::default();
+    let plugins = host.plugin_effects();
     ui.horizontal(|ui| {
         ui.strong("Mixer");
         ui.label(format!(
@@ -106,7 +110,7 @@ pub(crate) fn show(
     egui::ScrollArea::horizontal().show(ui, |ui| {
         ui.horizontal_top(|ui| {
             for track in mixer.all_tracks() {
-                strip(ui, mixer, track, latency, meters, &mut out);
+                strip(ui, mixer, track, latency, meters, &plugins, host, &mut out);
                 ui.separator();
             }
             if mixer.tracks.len() < MAX_TRACKS && ui.button("+ Track").clicked() {
@@ -117,12 +121,15 @@ pub(crate) fn show(
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn strip(
     ui: &mut egui::Ui,
     mixer: &Mixer,
     t: &MixerTrack,
     latency: &LatencyInfo,
     meters: &MeterReadings,
+    plugins: &[PluginDescriptor],
+    host: &mut dyn Host,
     out: &mut MixerOutput,
 ) {
     ui.vertical(|ui| {
@@ -168,7 +175,7 @@ fn strip(
 
         // Inserts come first in the signal flow.
         for (index, ins) in t.inserts.iter().enumerate() {
-            insert_ui(ui, mixer, t, ins, index, out);
+            insert_ui(ui, mixer, t, ins, index, host, out);
         }
         if t.inserts.len() < MAX_INSERTS_PER_TRACK {
             ui.menu_button(
@@ -180,6 +187,23 @@ fn strip(
                             ui.close();
                         }
                     }
+                    ui.separator();
+                    ui.menu_button("VST3", |ui| {
+                        if plugins.is_empty() {
+                            ui.label("No plugins found. See Plugins.");
+                        }
+                        egui::ScrollArea::vertical()
+                            .max_height(320.0)
+                            .show(ui, |ui| {
+                                for d in plugins {
+                                    let label = format!("{} ({})", d.plugin.name, d.plugin.vendor);
+                                    if ui.button(label).clicked() {
+                                        out.actions.push(MixerAction::AddPlugin(t.id, d.clone()));
+                                        ui.close();
+                                    }
+                                }
+                            });
+                    });
                 },
             );
         }
@@ -356,6 +380,7 @@ fn insert_ui(
     t: &MixerTrack,
     ins: &Insert,
     index: usize,
+    host: &mut dyn Host,
     out: &mut MixerOutput,
 ) {
     ui.horizontal(|ui| {
@@ -402,11 +427,85 @@ fn insert_ui(
             if ins.effect.kind == EffectKind::ParametricEq {
                 eq_graph(ui, &ins.effect);
             }
-            params_ui(ui, ins, out);
+            if ins.effect.kind == EffectKind::Plugin {
+                plugin_params_ui(ui, ins, host);
+            } else {
+                params_ui(ui, ins, out);
+            }
             if ins.effect.accepts_sidechain() {
                 sidechain_ui(ui, mixer, t, ins, out);
             }
         });
+}
+
+/// Generic editor for a plugin (PLG-064): every parameter with the
+/// plugin's own value text. Read only while the plugin is not loaded.
+fn plugin_params_ui(ui: &mut egui::Ui, ins: &Insert, host: &mut dyn Host) {
+    if let Some(slot) = &ins.effect.plugin {
+        ui.small(format!("{} {} · VST3", slot.vendor, slot.version));
+    }
+    let Some(params) = host.plugin_params(ins.id) else {
+        let why = host
+            .plugin_problem(ins.id)
+            .unwrap_or_else(|| "not loaded".into());
+        ui.colored_label(
+            ui.visuals().warn_fg_color,
+            format!("{why}. Audio passes through; the saved state is kept."),
+        );
+        return;
+    };
+    if params.is_empty() {
+        ui.label("No parameters.");
+        return;
+    }
+    egui::ScrollArea::vertical()
+        .id_salt(("plugin_params", ins.id.0))
+        .max_height(240.0)
+        .show(ui, |ui| {
+            egui::Grid::new(("plugin_grid", ins.id.0))
+                .num_columns(2)
+                .show(ui, |ui| {
+                    for p in &params {
+                        plugin_param_row(ui, ins, p, host);
+                        ui.end_row();
+                    }
+                });
+        });
+}
+
+fn plugin_param_row(ui: &mut egui::Ui, ins: &Insert, p: &PluginParamView, host: &mut dyn Host) {
+    let name = if p.info.units.is_empty() {
+        p.info.name.clone()
+    } else {
+        format!("{} ({})", p.info.name, p.info.units)
+    };
+    ui.label(name);
+    if p.info.flags.read_only {
+        ui.label(&p.text);
+        return;
+    }
+    ui.horizontal(|ui| {
+        let steps = p.info.step_count;
+        let mut v = p.value;
+        let changed = if steps == 1 {
+            let mut on = v >= 0.5;
+            let r = ui.checkbox(&mut on, "");
+            v = if on { 1.0 } else { 0.0 };
+            r.changed()
+        } else if steps > 1 {
+            let mut k = (v * f64::from(steps)).round() as u32;
+            let r = ui.add(egui::Slider::new(&mut k, 0..=steps).show_value(false));
+            v = f64::from(k) / f64::from(steps);
+            r.changed()
+        } else {
+            ui.add(egui::Slider::new(&mut v, 0.0..=1.0).show_value(false))
+                .changed()
+        };
+        ui.label(&p.text);
+        if changed {
+            host.set_plugin_param(ins.id, p.info.id, v);
+        }
+    });
 }
 
 fn params_ui(ui: &mut egui::Ui, ins: &Insert, out: &mut MixerOutput) {

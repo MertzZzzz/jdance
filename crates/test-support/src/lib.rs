@@ -127,3 +127,39 @@ pub fn check_golden(name: &str, sample_rate: u32, left: &[f32], right: &[f32], t
         );
     }
 }
+
+/// Builds `test-plugins/jdance-test-fx` and lays it out as
+/// `<tmp>/plugins/JdanceTestFx.vst3` once per test process. `binary` maps
+/// the bundle stem to the binary path inside the bundle for this OS (the
+/// host's own layout function, so tests and host agree).
+pub fn test_plugin_bundle(binary: fn(&str) -> Option<PathBuf>) -> &'static Path {
+    use std::sync::OnceLock;
+    static DIR: OnceLock<(PathBuf, PathBuf)> = OnceLock::new();
+    &DIR.get_or_init(|| {
+        let mut build = std::process::Command::new(env!("CARGO"));
+        build.args(["build", "-p", "jdance-test-fx"]);
+        if !cfg!(debug_assertions) {
+            build.arg("--release");
+        }
+        let status = build.status().expect("cargo build");
+        assert!(status.success(), "building the test plugin failed");
+        // target/<profile>/deps/<test> → target/<profile>
+        let exe = std::env::current_exe().unwrap();
+        let profile_dir = exe.parent().unwrap().parent().unwrap();
+        let lib = if cfg!(windows) {
+            "jdance_test_fx.dll"
+        } else if cfg!(target_os = "macos") {
+            "libjdance_test_fx.dylib"
+        } else {
+            "libjdance_test_fx.so"
+        };
+        // Per-process directory: test binaries run in parallel.
+        let dir = std::env::temp_dir().join(format!("jdance-test-fx-{}", std::process::id()));
+        let bundle = dir.join("plugins").join("JdanceTestFx.vst3");
+        let bin = bundle.join(binary("JdanceTestFx").expect("supported platform"));
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        std::fs::copy(profile_dir.join(lib), &bin).unwrap();
+        (dir, bundle)
+    })
+    .1
+}

@@ -8,8 +8,19 @@ use jdance_audio_api::{
     ActiveStreamInfo, AudioError, BackendId, DeviceCapabilities, DeviceInfo, DeviceKey,
     DeviceSettings, StatsReading, StreamState,
 };
-use jdance_domain::{ExportOptions, PatternId, Project, SampleRef, TrackId};
+use jdance_domain::{ExportOptions, InsertId, PatternId, Project, SampleRef, TrackId};
+use jdance_plugin_api::{ParamInfo, PluginDescriptor};
 use std::path::{Path, PathBuf};
+
+/// One parameter of a live plugin for the generic editor (PLG-064).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PluginParamView {
+    pub info: ParamInfo,
+    /// Normalized `0.0..=1.0`.
+    pub value: f64,
+    /// The plugin's own text for `value`.
+    pub text: String,
+}
 
 /// What Play plays.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,5 +187,37 @@ pub trait Host {
     /// How long the project's effects are expected to ring after the last
     /// note, for the export tail warning.
     fn estimated_tail_seconds(&mut self, project: &Project) -> f32;
+    /// Writes the live plugin states into `project` before it is saved
+    /// (PLG-070).
+    fn capture_plugin_states(&mut self, _project: &mut Project) {}
+
+    /// Effect plugins from the last scan.
+    fn plugin_effects(&self) -> Vec<PluginDescriptor> {
+        Vec::new()
+    }
+    /// Parameters of the live instance in `insert`; `None` if the plugin
+    /// is not loaded.
+    fn plugin_params(&mut self, _insert: InsertId) -> Option<Vec<PluginParamView>> {
+        None
+    }
+    fn set_plugin_param(&mut self, _insert: InsertId, _id: u32, _value: f64) {}
+    /// Why the plugin in `insert` is not loaded, if it is not.
+    fn plugin_problem(&self, _insert: InsertId) -> Option<String> {
+        None
+    }
+    /// Blocklisted modules with reasons (PLG-024).
+    fn blocked_plugins(&self) -> Vec<(PathBuf, String)> {
+        Vec::new()
+    }
+    fn plugin_scan_running(&self) -> bool {
+        false
+    }
+    /// `full` scans every module again, blocklisted ones included.
+    fn rescan_plugins(&mut self, _full: bool) {}
+    /// The user's extra plugin folders (stored in user settings).
+    fn plugin_paths(&self) -> Vec<PathBuf> {
+        Vec::new()
+    }
+    fn set_plugin_paths(&mut self, _paths: Vec<PathBuf>) {}
     fn take_notices(&mut self) -> Vec<Notice>;
 }

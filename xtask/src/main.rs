@@ -57,6 +57,7 @@ const ALLOWED: &[(&str, &[&str])] = &[
             "jdance-audio-cpal",
             "jdance-persistence",
             "jdance-plugin-api",
+            "jdance-plugin-vst3",
             "jdance-ui",
         ],
     ),

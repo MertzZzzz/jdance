@@ -1210,6 +1210,8 @@ dependencies = [
  "jdance-dsp",
  "jdance-engine",
  "jdance-persistence",
+ "jdance-plugin-api",
+ "jdance-plugin-vst3",
  "jdance-test-support",
  "jdance-ui",
  "serde",
@@ -1296,10 +1298,10 @@ version = "0.1.0"
 dependencies = [
  "jdance-plugin-api",
  "jdance-rt-check",
+ "jdance-test-support",
  "libloading 0.8.9",
  "rtrb",
  "serde_json",
- "tempfile",
  "vst3",
 ]
 
@@ -1333,6 +1335,7 @@ dependencies = [
  "jdance-commands",
  "jdance-domain",
  "jdance-dsp",
+ "jdance-plugin-api",
  "rfd",
 ]
 

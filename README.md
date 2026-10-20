@@ -19,13 +19,15 @@ piano roll, playlist, mixer). Код FL Studio не используется и 
 - mixer: треки, mute/solo, sends pre/post, до 8 эффектов на трек
   (Parametric EQ, Tempo Delay, Reverb, компрессор с sidechain), safety
   limiter на master, компенсация задержки по всему графу;
+- VST3-эффекты как insert'ы: scan в отдельном процессе с blocklist,
+  generic editor, state в проекте, отсутствующий плагин пропускает звук;
 - воспроизведение через CPAL (WASAPI / CoreAudio / ALSA / JACK);
 - audio settings, построенные на capabilities устройства;
 - undo/redo, dirty state, safe save проекта;
 - экспорт в WAV (song или pattern, хвост эффектов 5 с по умолчанию) из
   меню и без аудиоустройства (`jdance render`).
 
-Ещё нет: ASIO-host, VST3, piano roll,
+Ещё нет: ASIO-host, окно GUI VST3-плагина, VST3-инструменты, piano roll,
 автоматизация (см. план в [спецификации](docs/spec/)).
 
 ## Сборка

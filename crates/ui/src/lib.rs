@@ -7,12 +7,13 @@
 mod host;
 mod mixer;
 mod playlist;
+mod plugins;
 mod rack;
 mod settings;
 
 pub use host::{
-    Host, LatencyInfo, MeterReadings, Notice, NoticeLevel, SampleStatus, StreamStatus,
-    TransportMode, TransportStatus,
+    Host, LatencyInfo, MeterReadings, Notice, NoticeLevel, PluginParamView, SampleStatus,
+    StreamStatus, TransportMode, TransportStatus,
 };
 
 use egui::{Key, KeyboardShortcut, Modifiers};
@@ -22,8 +23,8 @@ use jdance_commands::{
 };
 use jdance_domain::{
     ChannelId, DEFAULT_EXPORT_TAIL_SECONDS, Effect, ExportFormat, ExportOptions, ExportRange,
-    LaneId, MAX_EXPORT_TAIL_SECONDS, MAX_TEMPO_BPM, MAX_VOLUME, MIN_TEMPO_BPM, PatternId, Project,
-    TrackId,
+    LaneId, MAX_EXPORT_TAIL_SECONDS, MAX_TEMPO_BPM, MAX_VOLUME, MIN_TEMPO_BPM, PatternId,
+    PluginSlot, Project, TrackId,
 };
 use settings::SettingsWindow;
 use std::path::{Path, PathBuf};
@@ -69,6 +70,7 @@ pub struct JdanceApp<H: Host, S: ProjectStore> {
     settings: Option<SettingsWindow>,
     rename: Option<RenameDialog>,
     show_mixer: bool,
+    show_plugins: bool,
     /// Pattern edited in the rack and used for new clips.
     current_pattern: PatternId,
     song_mode: bool,
@@ -116,6 +118,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             settings,
             rename: None,
             show_mixer: true,
+            show_plugins: false,
             current_pattern,
             song_mode,
             mode_sent: None,
@@ -247,6 +250,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 p
             }
         };
+        self.host.capture_plugin_states(&mut self.project);
         match self.store.save(&path, &self.project) {
             Ok(()) => {
                 self.history.mark_saved();
@@ -504,6 +508,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             if ui.button("Audio settings").clicked() {
                 self.settings = Some(SettingsWindow::new(&self.host));
             }
+            ui.toggle_value(&mut self.show_plugins, "Plugins");
             ui.separator();
 
             let playing = self.host.transport().playing;
@@ -740,6 +745,22 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 Effect::new(kind),
             )
             .map(|_| ()),
+            mixer::MixerAction::AddPlugin(track, d) => add_insert(
+                &mut self.history,
+                &mut self.project,
+                track,
+                Effect::plugin(PluginSlot {
+                    format: "vst3".into(),
+                    class_id: d.plugin.class_id,
+                    name: d.plugin.name,
+                    vendor: d.plugin.vendor,
+                    version: d.plugin.version,
+                    category: d.category,
+                    component_state: Vec::new(),
+                    controller_state: Vec::new(),
+                }),
+            )
+            .map(|_| ()),
             mixer::MixerAction::Rename(id) => {
                 self.start_rename(RenameTarget::Track(id));
                 Ok(())
@@ -884,7 +905,8 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
                 .min_size(120.0)
                 .show(ui, |ui| {
                     egui::ScrollArea::vertical().show(ui, |ui| {
-                        mix = mixer::show(ui, &self.project.mixer, &latency, &meters);
+                        mix =
+                            mixer::show(ui, &self.project.mixer, &latency, &meters, &mut self.host);
                     });
                 });
         }
@@ -947,6 +969,9 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
             && w.show(&ctx, &mut self.host)
         {
             self.settings = Some(w);
+        }
+        if self.show_plugins {
+            self.show_plugins = plugins::window(&ctx, &mut self.host);
         }
         self.rename_dialog(&ctx, now);
         self.length_dialog(&ctx, now);

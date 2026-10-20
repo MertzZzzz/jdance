@@ -2,12 +2,14 @@
 //! Offline rendering of a project to WAV, independent of audio devices
 //! (ARCH-002). Used by `jdance render` and by File → Export WAV.
 
+use crate::plugins::{Catalog, ModuleCache, create_instance};
 use jdance_domain::{
     ClipId, ExportOptions, ExportRange, MAX_REPEAT, PatternClip, Playlist, Project,
 };
 use jdance_dsp::SampleBuffer;
-use jdance_engine::{OfflineRender, PlayMode, compile_with, render_offline};
+use jdance_engine::{OfflineRender, PlayMode, PluginRt, compile_full, render_offline};
 use jdance_persistence::{read_wav, resolve_sample_path, write_wav};
+use jdance_plugin_api::ProcessSetupInfo;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -27,7 +29,8 @@ pub fn load_sample(path: &Path, sample_rate: u32) -> Result<(SampleBuffer, Sampl
 #[derive(Debug)]
 pub struct RenderOutcome {
     pub audio: OfflineRender,
-    /// Samples that could not be loaded (rendered as silence).
+    /// Samples that could not be loaded (rendered as silence) and plugins
+    /// that could not be created (rendered as bypass).
     pub warnings: Vec<String>,
     /// Set when effects are expected to ring longer than the chosen tail.
     pub tail_warning: Option<String>,
@@ -65,20 +68,52 @@ fn export_project(project: &Project, range: ExportRange) -> Result<Project, Stri
 
 /// Estimated effect tail of the project, for the export dialog warning.
 pub fn estimated_tail_seconds(project: &Project, sample_rate: u32) -> f32 {
-    compile_with(project, sample_rate, PlayMode::Song, |_| None).tail_seconds()
+    jdance_engine::compile_with(project, sample_rate, PlayMode::Song, |_| None).tail_seconds()
 }
 
 /// Renders `options.range` plus the tail through the realtime DSP code
 /// with fresh processor instances (spec "Export"). The output is aligned
 /// to the timeline: plugin delay compensation latency is trimmed.
+/// Where an export finds its plugins. Exports create their own offline
+/// instances from the saved states (PLG-045).
+#[derive(Debug, Clone, Copy)]
+pub struct ExportPlugins<'a> {
+    pub catalog: &'a Catalog,
+    pub modules: &'a ModuleCache,
+}
+
 pub fn render_project(
     project: &Project,
     project_dir: Option<&Path>,
     sample_rate: u32,
     options: &ExportOptions,
+    plugins: Option<&ExportPlugins>,
 ) -> Result<RenderOutcome, String> {
     let project = export_project(project, options.range)?;
     let mut warnings = Vec::new();
+    let setup = ProcessSetupInfo {
+        sample_rate: f64::from(sample_rate),
+        max_block: jdance_engine::MAX_BLOCK,
+        offline: true,
+    };
+    let mut instances = HashMap::new();
+    let tracks = std::iter::once(&project.mixer.master).chain(&project.mixer.tracks);
+    for ins in tracks.flat_map(|t| &t.inserts) {
+        let Some(slot) = &ins.effect.plugin else {
+            continue;
+        };
+        let created = match plugins {
+            Some(p) => create_instance(p.catalog, p.modules, slot, &setup),
+            None => Err("plugins are not available here".into()),
+        };
+        match created {
+            // The controller half is not needed offline beyond creation.
+            Ok((processor, controller)) => {
+                instances.insert(ins.id, (processor, controller));
+            }
+            Err(e) => warnings.push(format!("plugin {} rendered as bypass: {e}", slot.name)),
+        }
+    }
     let mut samples: HashMap<PathBuf, Arc<SampleBuffer>> = HashMap::new();
     for ch in &project.channels {
         let Some(s) = ch.sample() else { continue };
@@ -90,18 +125,31 @@ pub fn render_project(
             Ok((_, converted)) => {
                 samples.insert(path, Arc::new(converted));
             }
-            Err(e) => warnings.push(format!("{}: {e}", path.display())),
+            Err(e) => warnings.push(format!("missing sample {}: {e}", path.display())),
         }
     }
-    let snapshot = compile_with(&project, sample_rate, PlayMode::Song, |s| {
-        samples.get(&resolve_sample_path(project_dir, s)).cloned()
-    });
+    let mut controllers = Vec::new();
+    let snapshot = compile_full(
+        &project,
+        sample_rate,
+        PlayMode::Song,
+        |s| samples.get(&resolve_sample_path(project_dir, s)).cloned(),
+        &mut |id, _| match instances.remove(&id) {
+            Some((p, c)) => {
+                controllers.push(c);
+                PluginRt::fresh(Box::new(p))
+            }
+            None => PluginRt::missing(),
+        },
+    );
     let tail_warning = options.tail_warning(snapshot.tail_seconds());
     let latency = snapshot.latency as usize;
     let tail = (f64::from(options.tail()) * f64::from(sample_rate)).round() as u64;
     let frames =
         usize::try_from(snapshot.end + tail).map_err(|_| "render is too long".to_owned())?;
     let mut audio = render_offline(snapshot, frames + latency, || 1024);
+    // Instances are released after the render, controllers last.
+    drop(controllers);
     audio.left.drain(..latency);
     audio.right.drain(..latency);
     Ok(RenderOutcome {
@@ -117,8 +165,9 @@ pub fn render_to_wav(
     out: &Path,
     sample_rate: u32,
     options: &ExportOptions,
+    plugins: Option<&ExportPlugins>,
 ) -> Result<RenderOutcome, String> {
-    let outcome = render_project(project, project_dir, sample_rate, options)?;
+    let outcome = render_project(project, project_dir, sample_rate, options, plugins)?;
     write_wav(
         out,
         sample_rate,
@@ -207,7 +256,14 @@ mod tests {
         add_clip(&mut p, 0, 2);
         p.playlist.loop_range = Some((0, 1920));
         p.playlist.loop_enabled = true;
-        let o = render_project(&p, Some(dir.path()), RATE, &opts(ExportRange::Song, 1.0)).unwrap();
+        let o = render_project(
+            &p,
+            Some(dir.path()),
+            RATE,
+            &opts(ExportRange::Song, 1.0),
+            None,
+        )
+        .unwrap();
         assert_eq!(o.audio.left.len(), 2 * BAR + RATE as usize);
         assert_eq!(onsets(&o.audio.left)[..2], [0, BAR]);
         assert!(o.warnings.is_empty() && o.tail_warning.is_none());
@@ -217,7 +273,7 @@ mod tests {
     fn default_tail_is_five_seconds() {
         let (dir, mut p) = setup(1);
         add_clip(&mut p, 0, 1);
-        let o = render_project(&p, Some(dir.path()), RATE, &ExportOptions::song()).unwrap();
+        let o = render_project(&p, Some(dir.path()), RATE, &ExportOptions::song(), None).unwrap();
         assert_eq!(DEFAULT_EXPORT_TAIL_SECONDS, 5.0);
         assert_eq!(o.audio.left.len(), BAR + 5 * RATE as usize);
     }
@@ -232,7 +288,7 @@ mod tests {
             pattern: p.patterns[0].id,
             loops: 3,
         };
-        let o = render_project(&p, Some(dir.path()), RATE, &opts(range, 2.0)).unwrap();
+        let o = render_project(&p, Some(dir.path()), RATE, &opts(range, 2.0), None).unwrap();
         assert_eq!(o.audio.left.len(), 3 * BAR + 2 * RATE as usize);
         let tail = &o.audio.left[3 * BAR..];
         let peak = |s: &[f32]| s.iter().fold(0.0f32, |m, v| m.max(v.abs()));
@@ -245,13 +301,13 @@ mod tests {
             pattern: PatternId(999),
             loops: 1,
         };
-        assert!(render_project(&p, Some(dir.path()), RATE, &opts(missing, 0.0)).is_err());
+        assert!(render_project(&p, Some(dir.path()), RATE, &opts(missing, 0.0), None).is_err());
     }
 
     #[test]
     fn empty_song_is_an_error() {
         let (dir, p) = setup(1);
-        assert!(render_project(&p, Some(dir.path()), RATE, &ExportOptions::song()).is_err());
+        assert!(render_project(&p, Some(dir.path()), RATE, &ExportOptions::song(), None).is_err());
     }
 
     #[test]
@@ -262,7 +318,14 @@ mod tests {
             &mut p,
             Effect::new(EffectKind::Compressor).with("lookahead", 5.0),
         );
-        let o = render_project(&p, Some(dir.path()), RATE, &opts(ExportRange::Song, 0.0)).unwrap();
+        let o = render_project(
+            &p,
+            Some(dir.path()),
+            RATE,
+            &opts(ExportRange::Song, 0.0),
+            None,
+        )
+        .unwrap();
         assert_eq!(o.audio.left.len(), BAR);
         assert_eq!(onsets(&o.audio.left).first(), Some(&0));
     }
@@ -282,6 +345,7 @@ mod tests {
             &out,
             RATE,
             &opts(ExportRange::Song, 0.0),
+            None,
         )
         .unwrap();
         let peak = o.audio.left.iter().fold(0.0f32, |m, v| m.max(v.abs()));
@@ -298,9 +362,141 @@ mod tests {
         master_insert(&mut p, Effect::new(EffectKind::Reverb).with("decay", 10.0));
         let est = estimated_tail_seconds(&p, RATE);
         assert!(est > 5.0, "estimate {est}");
-        let short = render_project(&p, Some(dir.path()), RATE, &opts(ExportRange::Song, 1.0));
+        let short = render_project(
+            &p,
+            Some(dir.path()),
+            RATE,
+            &opts(ExportRange::Song, 1.0),
+            None,
+        );
         assert!(short.unwrap().tail_warning.is_some());
-        let long = render_project(&p, Some(dir.path()), RATE, &opts(ExportRange::Song, 30.0));
+        let long = render_project(
+            &p,
+            Some(dir.path()),
+            RATE,
+            &opts(ExportRange::Song, 30.0),
+            None,
+        );
         assert!(long.unwrap().tail_warning.is_none());
+    }
+
+    fn test_plugins() -> (Catalog, ModuleCache) {
+        use crate::plugins::{ModuleEntry, ModuleResult};
+        let bundle = jdance_test_support::test_plugin_bundle(jdance_plugin_vst3::bundle_binary);
+        let mut catalog = Catalog::default();
+        catalog.modules.insert(
+            bundle.to_path_buf(),
+            ModuleEntry {
+                key: None,
+                result: ModuleResult::Ok(jdance_plugin_vst3::scan_in_process(bundle).unwrap()),
+            },
+        );
+        (catalog, ModuleCache::default())
+    }
+
+    fn plugin_slot(catalog: &Catalog, name: &str) -> jdance_domain::PluginSlot {
+        let d = catalog.plugins().find(|d| d.plugin.name == name).unwrap();
+        jdance_domain::PluginSlot {
+            format: "vst3".into(),
+            class_id: d.plugin.class_id.clone(),
+            name: d.plugin.name.clone(),
+            vendor: d.plugin.vendor.clone(),
+            version: d.plugin.version.clone(),
+            category: d.category.clone(),
+            component_state: Vec::new(),
+            controller_state: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn export_renders_plugins_with_compensated_latency() {
+        let (dir, mut p) = setup(1);
+        add_clip(&mut p, 0, 1);
+        let (catalog, modules) = test_plugins();
+        master_insert(
+            &mut p,
+            Effect::plugin(plugin_slot(&catalog, "JD Test Latency")),
+        );
+        let plugins = ExportPlugins {
+            catalog: &catalog,
+            modules: &modules,
+        };
+        let o = render_project(
+            &p,
+            Some(dir.path()),
+            RATE,
+            &opts(ExportRange::Song, 0.0),
+            Some(&plugins),
+        )
+        .unwrap();
+        assert!(o.warnings.is_empty(), "{:?}", o.warnings);
+        let dry = render_project(
+            &p,
+            Some(dir.path()),
+            RATE,
+            &opts(ExportRange::Song, 0.0),
+            None,
+        )
+        .unwrap();
+        assert_eq!(dry.warnings.len(), 1, "missing plugin is reported");
+        // The plugin delays by 64 samples; export trims the latency, so
+        // the result lines up with the bypassed render.
+        assert_eq!(onsets(&o.audio.left).first(), Some(&0));
+        assert_eq!(o.audio.left, dry.audio.left);
+    }
+
+    #[test]
+    fn export_restores_plugin_state() {
+        use jdance_plugin_api::PluginController;
+        let (dir, mut p) = setup(1);
+        add_clip(&mut p, 0, 1);
+        let (catalog, modules) = test_plugins();
+        let mut slot = plugin_slot(&catalog, "JD Test Gain");
+        // Gain normalized 0.25 → linear 0.5, saved in the plugin state.
+        let setup_info = ProcessSetupInfo {
+            sample_rate: f64::from(RATE),
+            max_block: 512,
+            offline: true,
+        };
+        let (mut proc_, mut ctrl) =
+            create_instance(&catalog, &modules, &slot, &setup_info).unwrap();
+        ctrl.set_param_normalized(0, 0.25);
+        // The processor applies the change in its next block.
+        let mut buf = [0.0f32; 16];
+        let mut buf_r = [0.0f32; 16];
+        jdance_plugin_api::PluginProcessor::process(
+            &mut proc_,
+            &mut buf,
+            &mut buf_r,
+            None,
+            &jdance_plugin_api::Transport::default(),
+        );
+        let state = ctrl.state().unwrap();
+        slot.component_state = state.component;
+        slot.controller_state = state.controller;
+        let unity = render_project(
+            &p,
+            Some(dir.path()),
+            RATE,
+            &opts(ExportRange::Song, 0.0),
+            None,
+        )
+        .unwrap();
+        master_insert(&mut p, Effect::plugin(slot));
+        let plugins = ExportPlugins {
+            catalog: &catalog,
+            modules: &modules,
+        };
+        let o = render_project(
+            &p,
+            Some(dir.path()),
+            RATE,
+            &opts(ExportRange::Song, 0.0),
+            Some(&plugins),
+        )
+        .unwrap();
+        for (a, b) in o.audio.left.iter().zip(&unity.audio.left) {
+            assert!((a - b * 0.5).abs() < 1e-7);
+        }
     }
 }

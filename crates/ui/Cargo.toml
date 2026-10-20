@@ -12,6 +12,7 @@ jdance-audio-api.workspace = true
 jdance-commands.workspace = true
 jdance-domain.workspace = true
 jdance-dsp.workspace = true
+jdance-plugin-api.workspace = true
 eframe.workspace = true
 egui.workspace = true
 rfd.workspace = true

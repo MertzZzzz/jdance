@@ -37,6 +37,7 @@ jdance-audio-api = { path = "crates/audio-api" }
 jdance-audio-cpal = { path = "crates/audio-cpal" }
 jdance-persistence = { path = "crates/persistence" }
 jdance-plugin-api = { path = "crates/plugin-api" }
+jdance-plugin-vst3 = { path = "crates/plugin-vst3" }
 jdance-ui = { path = "crates/ui" }
 jdance-test-support = { path = "crates/test-support" }
 jdance-rt-check = { path = "crates/rt-check" }

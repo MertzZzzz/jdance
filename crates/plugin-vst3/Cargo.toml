@@ -20,7 +20,7 @@ path = "src/bin/scanner.rs"
 
 [dev-dependencies]
 jdance-rt-check.workspace = true
-tempfile.workspace = true
+jdance-test-support.workspace = true
 
 [lints]
 workspace = true

@@ -2,6 +2,7 @@
 //! Wires the UI to the engine, the audio backends and the sample cache.
 
 use crate::config::{self, UserSettings};
+use crate::plugins::{Catalog, PluginHost};
 use crate::render::{estimated_tail_seconds, render_to_wav};
 use crate::samples::SampleCache;
 use jdance_audio_api::{
@@ -9,16 +10,18 @@ use jdance_audio_api::{
     DeviceSettings, OutputStream, RenderCallback, StreamState,
 };
 use jdance_audio_cpal::CpalBackend;
+use jdance_domain::InsertId;
 use jdance_domain::TrackId;
 use jdance_domain::{ExportOptions, Project, SampleRef};
 use jdance_engine::{
-    EngineHandle, EngineProcessor, FeedbackReading, Meters, PlayMode, compile_with, create_engine,
+    EngineHandle, EngineProcessor, FeedbackReading, Meters, PlayMode, compile_full, create_engine,
     param_only_changes, samples_per_tick,
 };
 use jdance_persistence::resolve_sample_path;
+use jdance_plugin_api::{PluginController, PluginDescriptor, PluginKind};
 use jdance_ui::{
-    Host, LatencyInfo, MeterReadings, Notice, SampleStatus, StreamStatus, TransportMode,
-    TransportStatus,
+    Host, LatencyInfo, MeterReadings, Notice, PluginParamView, SampleStatus, StreamStatus,
+    TransportMode, TransportStatus,
 };
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, channel};
@@ -92,6 +95,11 @@ pub struct AudioHost {
     settings_path: Option<PathBuf>,
     notices: Vec<Notice>,
     exports: Vec<Receiver<Result<String, String>>>,
+    plugins: PluginHost,
+    /// Incremented for every new engine; instances sent to an older one
+    /// are gone.
+    engine_generation: u64,
+    scan: Option<Receiver<Catalog>>,
 }
 
 impl std::fmt::Debug for AudioHost {
@@ -129,7 +137,38 @@ impl AudioHost {
             settings_path,
             notices,
             exports: Vec::new(),
+            plugins: PluginHost::new(Catalog::load_cached()),
+            engine_generation: 0,
+            scan: None,
         }
+    }
+
+    /// Plugin folders: the standard ones plus the user's (PLG-020).
+    fn plugin_roots(&self) -> Vec<PathBuf> {
+        let mut roots = jdance_plugin_vst3::default_search_paths();
+        roots.extend(self.settings.plugin_paths.iter().cloned());
+        roots
+    }
+
+    /// Starts a background scan. Unchanged modules keep their cached
+    /// result unless `full` (PLG-023).
+    fn start_plugin_scan(&mut self, full: bool) {
+        if self.scan.is_some() {
+            return;
+        }
+        let Ok(scanner) = std::env::current_exe() else {
+            self.notices.push(Notice::warning(
+                "Cannot scan plugins: executable path unknown.",
+            ));
+            return;
+        };
+        let (tx, rx) = channel();
+        let catalog = self.plugins.catalog.clone();
+        let roots = self.plugin_roots();
+        std::thread::spawn(move || {
+            let _ = tx.send(catalog.rescan(&roots, &scanner, full));
+        });
+        self.scan = Some(rx);
     }
 
     fn backend(&self, id: &BackendId) -> Option<&CpalBackend> {
@@ -223,16 +262,35 @@ impl AudioHost {
     }
 
     fn recompile(&mut self) {
+        let rate = self.engine_rate();
+        let generation = self.engine_generation;
+        // Instances exist without a device too (the generic editor works);
+        // their processors wait for an engine.
+        for m in self.plugins.sync(&self.project, rate, generation) {
+            self.notices.push(Notice::warning(m));
+        }
         let dir = self.project_dir.as_deref();
         let samples = &self.samples;
-        let rate = self.engine_rate();
         let mode = match self.mode {
             TransportMode::Song => PlayMode::Song,
             TransportMode::Pattern(id) => PlayMode::Pattern(id),
         };
-        let snapshot = compile_with(&self.project, rate, mode, |s| {
-            samples.converted(&resolve_sample_path(dir, s))
-        });
+        let plugins = &mut self.plugins;
+        let has_engine = self.active.is_some();
+        let snapshot = compile_full(
+            &self.project,
+            rate,
+            mode,
+            |s| samples.converted(&resolve_sample_path(dir, s)),
+            &mut |id, _| {
+                if has_engine {
+                    plugins.supply(id, generation)
+                } else {
+                    // No engine: only the latency display uses this.
+                    plugins.latency_only(id)
+                }
+            },
+        );
         self.latency = LatencyInfo {
             sample_rate: rate,
             total: snapshot.latency,
@@ -245,9 +303,15 @@ impl AudioHost {
             return;
         };
         match active.engine.set_snapshot(snapshot) {
-            Ok(()) => self.needs_compile = false,
+            Ok(()) => {
+                self.plugins.delivered();
+                self.needs_compile = false;
+            }
             // Queue full: retry on the next poll.
-            Err(_) => self.needs_compile = true,
+            Err(_) => {
+                self.plugins.undelivered();
+                self.needs_compile = true;
+            }
         }
     }
 }
@@ -255,6 +319,28 @@ impl AudioHost {
 impl Host for AudioHost {
     fn poll(&mut self) {
         if self.samples.poll() {
+            self.needs_compile = true;
+        }
+        if self.plugins.poll() {
+            self.needs_compile = true;
+        }
+        if let Some(rx) = &self.scan
+            && let Ok(catalog) = rx.try_recv()
+        {
+            self.scan = None;
+            if let Err(e) = catalog.save_cached() {
+                self.notices.push(Notice::warning(format!(
+                    "Could not save the plugin list: {e}"
+                )));
+            }
+            let blocked = catalog.blocked().count();
+            if blocked > self.plugins.catalog.blocked().count() {
+                self.notices.push(Notice::warning(format!(
+                    "{blocked} plugin module(s) failed to scan and were blocklisted."
+                )));
+            }
+            self.plugins.catalog = catalog;
+            // Missing plugins may be installed now.
             self.needs_compile = true;
         }
         if self.needs_compile {
@@ -444,6 +530,7 @@ impl Host for AudioHost {
         };
         let stream =
             backend.open_output(&key.device, &request, Box::new(EngineCallback(processor)))?;
+        self.engine_generation += 1;
         self.active = Some(Active {
             key: key.clone(),
             stream,
@@ -479,19 +566,40 @@ impl Host for AudioHost {
         options: ExportOptions,
     ) {
         let (tx, rx) = channel();
-        let project = project.clone();
+        let mut project = project.clone();
+        // The export uses its own instances, restored from the current
+        // plugin states (spec "Export").
+        self.plugins.capture_states(&mut project);
+        let catalog = self.plugins.catalog.clone();
+        let modules = std::sync::Arc::clone(&self.plugins.modules);
         let dir = project_dir.map(Path::to_path_buf);
         let rate = self.engine_rate();
         std::thread::spawn(move || {
-            let result = render_to_wav(&project, dir.as_deref(), &out, rate, &options).map(|o| {
+            let plugins = crate::render::ExportPlugins {
+                catalog: &catalog,
+                modules: &modules,
+            };
+            let result = render_to_wav(
+                &project,
+                dir.as_deref(),
+                &out,
+                rate,
+                &options,
+                Some(&plugins),
+            )
+            .map(|o| {
                 let mut msg = format!(
                     "Exported {} ({} Hz, {})",
                     out.display(),
                     rate,
                     options.format.label()
                 );
-                if !o.warnings.is_empty() {
-                    msg.push_str(&format!("; {} sample(s) missing", o.warnings.len()));
+                if let Some(w) = o.warnings.first() {
+                    let more = o.warnings.len() - 1;
+                    msg.push_str(&format!("; warning: {w}"));
+                    if more > 0 {
+                        msg.push_str(&format!(" (+{more} more)"));
+                    }
                 }
                 if let Some(w) = o.tail_warning {
                     msg.push_str(&format!(". {w}"));
@@ -502,6 +610,77 @@ impl Host for AudioHost {
         });
         self.exports.push(rx);
         self.notices.push(Notice::info("Exporting…"));
+    }
+
+    fn capture_plugin_states(&mut self, project: &mut Project) {
+        self.plugins.capture_states(project);
+    }
+
+    fn plugin_effects(&self) -> Vec<PluginDescriptor> {
+        let mut v: Vec<_> = self
+            .plugins
+            .catalog
+            .plugins()
+            .filter(|d| d.kind == PluginKind::Effect)
+            .cloned()
+            .collect();
+        v.sort_by(|a, b| {
+            (&a.plugin.vendor, &a.plugin.name).cmp(&(&b.plugin.vendor, &b.plugin.name))
+        });
+        v
+    }
+
+    fn plugin_params(&mut self, insert: InsertId) -> Option<Vec<PluginParamView>> {
+        let c = self.plugins.controller(insert)?;
+        Some(
+            c.params()
+                .iter()
+                .map(|info| {
+                    let value = c.param_normalized(info.id);
+                    PluginParamView {
+                        text: c.param_text(info.id, value),
+                        info: info.clone(),
+                        value,
+                    }
+                })
+                .collect(),
+        )
+    }
+
+    fn set_plugin_param(&mut self, insert: InsertId, id: u32, value: f64) {
+        if let Some(c) = self.plugins.controller(insert) {
+            c.set_param_normalized(id, value);
+        }
+    }
+
+    fn plugin_problem(&self, insert: InsertId) -> Option<String> {
+        self.plugins.problem(insert)
+    }
+
+    fn blocked_plugins(&self) -> Vec<(PathBuf, String)> {
+        self.plugins
+            .catalog
+            .blocked()
+            .map(|(p, r)| (p.to_path_buf(), r.to_owned()))
+            .collect()
+    }
+
+    fn plugin_scan_running(&self) -> bool {
+        self.scan.is_some()
+    }
+
+    fn rescan_plugins(&mut self, full: bool) {
+        self.start_plugin_scan(full);
+    }
+
+    fn plugin_paths(&self) -> Vec<PathBuf> {
+        self.settings.plugin_paths.clone()
+    }
+
+    fn set_plugin_paths(&mut self, paths: Vec<PathBuf>) {
+        self.settings.plugin_paths = paths;
+        self.save_settings();
+        self.start_plugin_scan(false);
     }
 
     fn estimated_tail_seconds(&mut self, project: &Project) -> f32 {
