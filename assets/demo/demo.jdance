@@ -1,11 +1,11 @@
 {
   "format": "jdance-project",
-  "format_version": 4,
+  "format_version": 5,
   "project": {
     "tempo_bpm": 124.0,
     "channels": [
       {
-        "id": 10,
+        "id": 16,
         "name": "Kick",
         "source": {
           "kind": "sampler",
@@ -16,10 +16,10 @@
         "volume": 0.8,
         "pan": 0.0,
         "muted": false,
-        "track": 2
+        "track": 8
       },
       {
-        "id": 11,
+        "id": 17,
         "name": "Snare",
         "source": {
           "kind": "sampler",
@@ -30,10 +30,10 @@
         "volume": 0.8,
         "pan": 0.05,
         "muted": false,
-        "track": 3
+        "track": 9
       },
       {
-        "id": 12,
+        "id": 18,
         "name": "Hat",
         "source": {
           "kind": "sampler",
@@ -44,17 +44,17 @@
         "volume": 0.8,
         "pan": -0.2,
         "muted": false,
-        "track": 3
+        "track": 9
       }
     ],
     "patterns": [
       {
         "id": 1,
-        "name": "Pattern 1",
+        "name": "Beat",
         "length_steps": 16,
         "rows": [
           {
-            "channel": 10,
+            "channel": 16,
             "steps": [
               {
                 "on": true,
@@ -123,7 +123,7 @@
             ]
           },
           {
-            "channel": 11,
+            "channel": 17,
             "steps": [
               {
                 "on": false,
@@ -192,7 +192,7 @@
             ]
           },
           {
-            "channel": 12,
+            "channel": 18,
             "steps": [
               {
                 "on": false,
@@ -261,6 +261,82 @@
             ]
           }
         ]
+      },
+      {
+        "id": 19,
+        "name": "Break",
+        "length_steps": 16,
+        "rows": [
+          {
+            "channel": 16,
+            "steps": [
+              {
+                "on": true,
+                "velocity": 0.8
+              },
+              {
+                "on": false,
+                "velocity": 0.8
+              },
+              {
+                "on": false,
+                "velocity": 0.8
+              },
+              {
+                "on": false,
+                "velocity": 0.8
+              },
+              {
+                "on": true,
+                "velocity": 0.8
+              },
+              {
+                "on": false,
+                "velocity": 0.8
+              },
+              {
+                "on": false,
+                "velocity": 0.8
+              },
+              {
+                "on": false,
+                "velocity": 0.8
+              },
+              {
+                "on": true,
+                "velocity": 0.8
+              },
+              {
+                "on": false,
+                "velocity": 0.8
+              },
+              {
+                "on": false,
+                "velocity": 0.8
+              },
+              {
+                "on": false,
+                "velocity": 0.8
+              },
+              {
+                "on": true,
+                "velocity": 0.8
+              },
+              {
+                "on": false,
+                "velocity": 0.8
+              },
+              {
+                "on": false,
+                "velocity": 0.8
+              },
+              {
+                "on": false,
+                "velocity": 0.8
+              }
+            ]
+          }
+        ]
       }
     ],
     "mixer": {
@@ -277,7 +353,7 @@
       },
       "tracks": [
         {
-          "id": 2,
+          "id": 8,
           "name": "Kick",
           "volume": 1.0,
           "pan": 0.0,
@@ -287,7 +363,7 @@
           "sends": [],
           "inserts": [
             {
-              "id": 9,
+              "id": 15,
               "bypass": false,
               "effect": {
                 "kind": "parametric_eq",
@@ -314,7 +390,7 @@
           ]
         },
         {
-          "id": 3,
+          "id": 9,
           "name": "Perc",
           "volume": 1.0,
           "pan": 0.0,
@@ -323,15 +399,15 @@
           "main_out": 0,
           "sends": [
             {
-              "id": 7,
-              "dest": 5,
+              "id": 13,
+              "dest": 11,
               "level": 0.35,
               "pre_fader": false
             }
           ],
           "inserts": [
             {
-              "id": 4,
+              "id": 10,
               "bypass": false,
               "effect": {
                 "kind": "compressor",
@@ -346,12 +422,12 @@
                 }
               },
               "sidechain": {
-                "source": 2,
+                "source": 8,
                 "tap": "pre_fader"
               }
             },
             {
-              "id": 8,
+              "id": 14,
               "bypass": false,
               "effect": {
                 "kind": "tempo_delay",
@@ -371,7 +447,7 @@
           ]
         },
         {
-          "id": 5,
+          "id": 11,
           "name": "Reverb",
           "volume": 1.0,
           "pan": 0.0,
@@ -381,7 +457,7 @@
           "sends": [],
           "inserts": [
             {
-              "id": 6,
+              "id": 12,
               "bypass": false,
               "effect": {
                 "kind": "reverb",
@@ -405,8 +481,106 @@
         "release_ms": 80.0
       }
     },
+    "playlist": {
+      "lanes": [
+        {
+          "id": 2,
+          "name": "Beat",
+          "color": [
+            235,
+            120,
+            60
+          ],
+          "muted": false,
+          "solo": false
+        },
+        {
+          "id": 3,
+          "name": "Breaks",
+          "color": [
+            90,
+            170,
+            235
+          ],
+          "muted": false,
+          "solo": false
+        },
+        {
+          "id": 4,
+          "name": "Lane 3",
+          "color": [
+            120,
+            200,
+            110
+          ],
+          "muted": false,
+          "solo": false
+        },
+        {
+          "id": 5,
+          "name": "Lane 4",
+          "color": [
+            210,
+            110,
+            200
+          ],
+          "muted": false,
+          "solo": false
+        },
+        {
+          "id": 6,
+          "name": "Lane 5",
+          "color": [
+            230,
+            200,
+            80
+          ],
+          "muted": false,
+          "solo": false
+        },
+        {
+          "id": 7,
+          "name": "Lane 6",
+          "color": [
+            100,
+            210,
+            200
+          ],
+          "muted": false,
+          "solo": false
+        }
+      ],
+      "clips": [
+        {
+          "id": 20,
+          "lane": 2,
+          "pattern": 1,
+          "start": 0,
+          "repeat": 3,
+          "muted": false
+        },
+        {
+          "id": 21,
+          "lane": 3,
+          "pattern": 19,
+          "start": 11520,
+          "repeat": 1,
+          "muted": false
+        },
+        {
+          "id": 22,
+          "lane": 2,
+          "pattern": 1,
+          "start": 15360,
+          "repeat": 4,
+          "muted": false
+        }
+      ],
+      "loop_range": null,
+      "loop_enabled": false
+    },
     "ids": {
-      "next": 13
+      "next": 23
     }
   }
 }

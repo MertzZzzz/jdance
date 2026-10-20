@@ -397,6 +397,29 @@ fn gen_demo() -> Result<(), String> {
             row.steps[*s as usize].on = true;
         }
     }
+    // Arrangement: the beat, a kick-only break, the beat again.
+    project.patterns[0].name = "Beat".into();
+    let beat = project.patterns[0].id;
+    let mut brk = project.patterns[0].clone();
+    brk.id = jdance_domain::PatternId(project.ids.next());
+    brk.name = "Break".into();
+    let kick_channel = project.channels[0].id;
+    brk.rows.retain(|r| r.channel == kick_channel);
+    project.patterns.push(brk.clone());
+    let lanes: Vec<jdance_domain::LaneId> = project.playlist.lanes.iter().map(|l| l.id).collect();
+    for (lane, pattern, bar, repeat) in [(0, beat, 0, 3), (1, brk.id, 3, 1), (0, beat, 4, 4)] {
+        project.playlist.clips.push(jdance_domain::PatternClip {
+            id: jdance_domain::ClipId(project.ids.next()),
+            lane: lanes[lane],
+            pattern,
+            start: bar * 3_840,
+            repeat,
+            muted: false,
+        });
+    }
+    project.playlist.lanes[0].name = "Beat".into();
+    project.playlist.lanes[1].name = "Breaks".into();
+    project.validate_arrangement()?;
     save_project(&dir.join("demo.jdance"), &project).map_err(|e| e.to_string())?;
     println!("wrote {}", dir.display());
     Ok(())

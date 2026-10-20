@@ -277,9 +277,16 @@ impl EngineProcessor {
                     }
                 }
                 Command::Seek(p) => {
+                    // Notes that started before the new position are not
+                    // restored (MVP limitation); sounding voices fade.
                     self.release_voices();
-                    let len = self.snapshot.as_ref().map_or(0, |s| s.loop_len);
-                    self.pos = if len > 0 { p % len } else { 0 };
+                    self.pos = match self.snapshot.as_deref() {
+                        Some(s) => match s.loop_range {
+                            Some((0, len)) if s.end == len => p % len.max(1),
+                            _ => p.min(s.end),
+                        },
+                        None => 0,
+                    };
                 }
                 Command::SetParam {
                     insert,
@@ -317,15 +324,25 @@ impl EngineProcessor {
 
     fn swap_snapshot(&mut self, mut new: Box<PlaybackSnapshot>) {
         if let Some(old) = &mut self.snapshot {
-            // Keep the musical position when the loop length changes.
-            if old.loop_len > 0 && new.loop_len > 0 && old.loop_len != new.loop_len {
-                let p = u128::from(self.pos) * u128::from(new.loop_len) / u128::from(old.loop_len);
-                self.pos = p as u64;
+            // Keep the musical position (in ticks) when the tempo changes.
+            if old.samples_per_tick != new.samples_per_tick {
+                let ticks = self.pos as f64 / old.samples_per_tick;
+                self.pos = (ticks * new.samples_per_tick).round() as u64;
             }
             new.take_state_from(old);
         }
-        if new.loop_len == 0 || self.pos >= new.loop_len {
-            self.pos = 0;
+        match new.loop_range {
+            Some((a, b)) if new.end == b && a == 0 => {
+                // Pattern mode: stay inside the pattern.
+                if self.pos >= b {
+                    self.pos %= b.max(1);
+                }
+            }
+            _ => {
+                if self.pos > new.end + new.end_tail {
+                    self.pos = 0;
+                }
+            }
         }
         // Re-target voices: channels may have moved, been removed, muted
         // or changed sample.
@@ -395,11 +412,18 @@ impl EngineProcessor {
         // 1. Sequencer events and voices into per-channel buffers. No new
         //    events while stopping.
         let mut cursor = 0;
-        if *playing && !*stopping && snap.loop_len > 0 {
+        let mut reached_end = false;
+        if *playing && !*stopping {
             let mut done = 0;
             let mut p = *pos;
             while done < n {
-                let seg_end = snap.loop_len.min(p + (n - done) as u64);
+                let remaining = (n - done) as u64;
+                // Wrap only when approaching the loop end from inside.
+                let wrap = snap.loop_range.filter(|(_, b)| p < *b);
+                let seg_end = match wrap {
+                    Some((_, b)) => b.min(p + remaining),
+                    None => p + remaining,
+                };
                 let first = snap.events.partition_point(|e| e.pos < p);
                 let mut k = first;
                 while let Some(e) = snap.events.get(k).copied().filter(|e| e.pos < seg_end) {
@@ -410,20 +434,26 @@ impl EngineProcessor {
                     k += 1;
                 }
                 done += (seg_end - p) as usize;
-                if seg_end == snap.loop_len {
-                    // Loop wrap: instrument voices end with a short
-                    // release; effect tails continue.
-                    render_voices(snap, voices, channels, cursor, done);
-                    cursor = done;
-                    for v in voices.iter_mut() {
-                        v.inner.release(release);
+                match wrap {
+                    Some((a, b)) if seg_end == b => {
+                        // Loop wrap: instrument voices end with a short
+                        // release; effect tails continue.
+                        render_voices(snap, voices, channels, cursor, done);
+                        cursor = done;
+                        for v in voices.iter_mut() {
+                            v.inner.release(release);
+                        }
+                        p = a;
                     }
-                    p = 0;
-                } else {
-                    p = seg_end;
+                    _ => p = seg_end,
                 }
             }
             *pos = p;
+            // Arrangement end (no loop around it): after the tail, stop. An
+            // empty arrangement has no end and keeps the transport running.
+            reached_end = snap.end > 0
+                && snap.loop_range.is_none_or(|(_, b)| p > b)
+                && p >= snap.end + snap.end_tail;
         }
         render_voices(snap, voices, channels, cursor, n);
 
@@ -513,6 +543,10 @@ impl EngineProcessor {
             meters.publish_limiter(limiter.take_min_gain());
         }
         meters.output.publish(u64::MAX, peak(ol), peak(or));
+        if reached_end {
+            *playing = false;
+            *pos = 0;
+        }
     }
 }
 

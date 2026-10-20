@@ -28,9 +28,17 @@ fn ramp_len(sample_rate: u32) -> u32 {
 #[derive(Debug, Clone)]
 pub struct PlaybackSnapshot {
     pub sample_rate: u32,
-    /// Pattern loop length in samples; `0` means nothing to play.
+    /// Timeline length shown by the playhead: the pattern length in
+    /// pattern mode, the arrangement end in song mode.
     pub loop_len: u64,
-    /// Step triggers sorted by `pos`, all `< loop_len`.
+    /// Where event generation ends (no loop) — arrangement end.
+    pub end: u64,
+    /// Region `[start, end)` that playback wraps around, in samples.
+    pub loop_range: Option<(u64, u64)>,
+    /// Samples played after `end` before the transport stops.
+    pub end_tail: u64,
+    pub samples_per_tick: f64,
+    /// Triggers sorted by absolute timeline position `pos`.
     pub events: Vec<StepEvent>,
     pub channels: Vec<ChannelRt>,
     /// Mixer tracks in processing order; the master is last.
@@ -46,7 +54,7 @@ pub struct PlaybackSnapshot {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StepEvent {
-    /// Sample position inside the loop.
+    /// Absolute timeline position in samples.
     pub pos: u64,
     /// Index into [`PlaybackSnapshot::channels`].
     pub channel: usize,
@@ -206,9 +214,7 @@ impl PlaybackSnapshot {
 /// Sample position of a tick at a constant tempo. Uses absolute positions
 /// so results never depend on block boundaries (RT-022).
 pub fn tick_to_sample(tick: u64, tempo_bpm: f64, sample_rate: u32) -> u64 {
-    let samples_per_tick =
-        f64::from(sample_rate) * 60.0 / (tempo_bpm * f64::from(jdance_domain::PPQ));
-    (tick as f64 * samples_per_tick).round() as u64
+    (tick as f64 * samples_per_tick(tempo_bpm, sample_rate)).round() as u64
 }
 
 /// Tracks are stereo buses: balance, not constant-power pan (MIX-013).
@@ -239,6 +245,29 @@ impl Pdc {
 pub fn compile(
     project: &Project,
     sample_rate: u32,
+    samples: impl Fn(&SampleRef) -> Option<Arc<SampleBuffer>>,
+) -> PlaybackSnapshot {
+    let first = project
+        .patterns
+        .first()
+        .map_or(jdance_domain::PatternId(0), |p| p.id);
+    compile_with(project, sample_rate, PlayMode::Pattern(first), samples)
+}
+
+/// What the transport plays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlayMode {
+    /// Loops one pattern.
+    Pattern(jdance_domain::PatternId),
+    /// Plays the playlist arrangement.
+    Song,
+}
+
+/// Compiles `project` for `sample_rate` and `mode`.
+pub fn compile_with(
+    project: &Project,
+    sample_rate: u32,
+    mode: PlayMode,
     samples: impl Fn(&SampleRef) -> Option<Arc<SampleBuffer>>,
 ) -> PlaybackSnapshot {
     let ramp = ramp_len(sample_rate);
@@ -370,6 +399,10 @@ pub fn compile(
     let mut snapshot = PlaybackSnapshot {
         sample_rate,
         loop_len: 0,
+        end: 0,
+        loop_range: None,
+        end_tail: 0,
+        samples_per_tick: 1.0,
         events: Vec::new(),
         channels,
         tracks,
@@ -385,10 +418,79 @@ pub fn compile(
         }),
     };
 
-    let Some(pattern) = project.active_pattern() else {
-        return snapshot;
-    };
-    snapshot.loop_len = tick_to_sample(pattern.length_ticks(), project.tempo_bpm, sample_rate);
+    let spt = samples_per_tick(project.tempo_bpm, sample_rate);
+    snapshot.samples_per_tick = spt;
+    let to_sample = |tick: u64| (tick as f64 * spt).round() as u64;
+    match mode {
+        PlayMode::Pattern(id) => {
+            let Some(pattern) = project.pattern(id).or_else(|| project.patterns.first()) else {
+                return snapshot;
+            };
+            let len = to_sample(pattern.length_ticks());
+            snapshot.loop_len = len;
+            snapshot.end = len;
+            snapshot.loop_range = Some((0, len));
+            push_pattern_events(project, pattern, 0, len, &to_sample, &mut snapshot.events);
+        }
+        PlayMode::Song => {
+            let pl = &project.playlist;
+            for clip in pl.clips.iter().filter(|c| pl.admits(c)) {
+                let Some(pattern) = project.pattern(clip.pattern) else {
+                    continue;
+                };
+                let len_ticks = pattern.length_ticks();
+                for r in 0..u64::from(clip.repeat) {
+                    // Each repetition uses local pattern time.
+                    let base = clip.start + r * len_ticks;
+                    let limit = to_sample(base + len_ticks);
+                    let before = snapshot.events.len();
+                    push_pattern_events(
+                        project,
+                        pattern,
+                        base,
+                        limit,
+                        &to_sample,
+                        &mut snapshot.events,
+                    );
+                    debug_assert!(snapshot.events[before..].iter().all(|e| e.pos < limit));
+                }
+            }
+            let end = to_sample(pl.arrangement_end(&project.patterns));
+            snapshot.end = end;
+            snapshot.loop_len = end;
+            snapshot.loop_range = pl
+                .loop_range
+                .filter(|_| pl.loop_enabled)
+                .map(|(a, b)| (to_sample(a), to_sample(b)))
+                .filter(|(a, b)| a < b);
+            // After the end: let effects ring for their estimated tail
+            // (bounded), then stop the transport.
+            let tail = snapshot.tail_seconds().clamp(0.0, MAX_END_TAIL_SECONDS);
+            snapshot.end_tail = snapshot.latency as u64 + (tail * sample_rate as f32) as u64;
+        }
+    }
+    // Overlapping clips keep all events (no de-duplication).
+    snapshot.events.sort_by_key(|e| (e.pos, e.channel));
+    snapshot
+}
+
+/// Longest tail let ring after the arrangement end in realtime playback.
+pub const MAX_END_TAIL_SECONDS: f32 = 10.0;
+
+pub fn samples_per_tick(tempo_bpm: f64, sample_rate: u32) -> f64 {
+    f64::from(sample_rate) * 60.0 / (tempo_bpm * f64::from(jdance_domain::PPQ))
+}
+
+/// Adds the pattern's active steps at `base` ticks, keeping only events
+/// before `limit` samples.
+fn push_pattern_events(
+    project: &Project,
+    pattern: &jdance_domain::Pattern,
+    base: u64,
+    limit: u64,
+    to_sample: &impl Fn(u64) -> u64,
+    out: &mut Vec<StepEvent>,
+) {
     for row in &pattern.rows {
         let Some(ch_index) = project
             .channel_index(row.channel)
@@ -408,10 +510,10 @@ pub fn compile(
             if !step.on {
                 continue;
             }
-            let tick = i as u64 * u64::from(jdance_domain::TICKS_PER_STEP);
-            let pos = tick_to_sample(tick, project.tempo_bpm, sample_rate);
-            if pos < snapshot.loop_len {
-                snapshot.events.push(StepEvent {
+            let tick = base + i as u64 * u64::from(jdance_domain::TICKS_PER_STEP);
+            let pos = to_sample(tick);
+            if pos < limit {
+                out.push(StepEvent {
                     pos,
                     channel: ch_index,
                     velocity: step.velocity,
@@ -419,8 +521,6 @@ pub fn compile(
             }
         }
     }
-    snapshot.events.sort_by_key(|e| (e.pos, e.channel));
-    snapshot
 }
 
 #[cfg(test)]

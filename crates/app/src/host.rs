@@ -12,12 +12,13 @@ use jdance_audio_cpal::CpalBackend;
 use jdance_domain::TrackId;
 use jdance_domain::{Project, SampleRef};
 use jdance_engine::{
-    EngineHandle, EngineProcessor, FeedbackReading, Meters, compile, create_engine,
-    param_only_changes,
+    EngineHandle, EngineProcessor, FeedbackReading, Meters, PlayMode, compile_with, create_engine,
+    param_only_changes, samples_per_tick,
 };
 use jdance_persistence::{WavExportFormat, resolve_sample_path};
 use jdance_ui::{
-    Host, LatencyInfo, MeterReadings, Notice, SampleStatus, StreamStatus, TransportStatus,
+    Host, LatencyInfo, MeterReadings, Notice, SampleStatus, StreamStatus, TransportMode,
+    TransportStatus,
 };
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, channel};
@@ -82,6 +83,7 @@ pub struct AudioHost {
     reading: FeedbackReading,
     latency: LatencyInfo,
     meters: MeterState,
+    mode: TransportMode,
     project: Project,
     project_dir: Option<PathBuf>,
     needs_compile: bool,
@@ -118,6 +120,7 @@ impl AudioHost {
             reading: FeedbackReading::default(),
             latency: LatencyInfo::default(),
             meters: MeterState::default(),
+            mode: TransportMode::Song,
             project: Project::new(),
             project_dir: None,
             needs_compile: true,
@@ -223,7 +226,11 @@ impl AudioHost {
         let dir = self.project_dir.as_deref();
         let samples = &self.samples;
         let rate = self.engine_rate();
-        let snapshot = compile(&self.project, rate, |s| {
+        let mode = match self.mode {
+            TransportMode::Song => PlayMode::Song,
+            TransportMode::Pattern(id) => PlayMode::Pattern(id),
+        };
+        let snapshot = compile_with(&self.project, rate, mode, |s| {
             samples.converted(&resolve_sample_path(dir, s))
         });
         self.latency = LatencyInfo {
@@ -331,6 +338,21 @@ impl Host for AudioHost {
         }
     }
 
+    fn set_mode(&mut self, mode: TransportMode) {
+        if self.mode != mode {
+            self.mode = mode;
+            self.needs_compile = true;
+            self.recompile();
+        }
+    }
+
+    fn seek_ticks(&mut self, ticks: u64) {
+        let spt = samples_per_tick(self.project.tempo_bpm, self.engine_rate());
+        if let Some(a) = &mut self.active {
+            let _ = a.engine.seek((ticks as f64 * spt).round() as u64);
+        }
+    }
+
     fn stop(&mut self) {
         if let Some(a) = &mut self.active {
             let _ = a.engine.stop();
@@ -339,8 +361,13 @@ impl Host for AudioHost {
 
     fn transport(&self) -> TransportStatus {
         let r = &self.reading;
+        let spt = samples_per_tick(self.project.tempo_bpm, self.engine_rate());
         TransportStatus {
             playing: r.playing,
+            position_ticks: self
+                .active
+                .is_some()
+                .then(|| (r.position as f64 / spt).round() as u64),
             loop_pos: (r.loop_len > 0).then(|| r.position as f32 / r.loop_len as f32),
             peak_load: r.peak_load,
             voices: r.active_voices,

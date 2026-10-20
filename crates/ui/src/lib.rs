@@ -6,18 +6,23 @@
 
 mod host;
 mod mixer;
+mod playlist;
 mod rack;
 mod settings;
 
 pub use host::{
     Host, LatencyInfo, MeterReadings, Notice, NoticeLevel, SampleStatus, StreamStatus,
-    TransportStatus,
+    TransportMode, TransportStatus,
 };
 
 use egui::{Key, KeyboardShortcut, Modifiers};
-use jdance_commands::{Edit, History, add_insert, add_sampler_channel, add_send, add_track};
+use jdance_commands::{
+    Edit, History, add_clip, add_insert, add_lane, add_pattern, add_sampler_channel, add_send,
+    add_track, duplicate_clips, make_unique,
+};
 use jdance_domain::{
-    ChannelId, Effect, MAX_TEMPO_BPM, MAX_VOLUME, MIN_TEMPO_BPM, Project, TrackId,
+    ChannelId, Effect, LaneId, MAX_TEMPO_BPM, MAX_VOLUME, MIN_TEMPO_BPM, PatternId, Project,
+    TrackId,
 };
 use settings::SettingsWindow;
 use std::path::{Path, PathBuf};
@@ -37,6 +42,8 @@ pub trait ProjectStore {
 pub(crate) enum RenameTarget {
     Channel(ChannelId),
     Track(TrackId),
+    Pattern(PatternId),
+    Lane(LaneId),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -61,6 +68,13 @@ pub struct JdanceApp<H: Host, S: ProjectStore> {
     settings: Option<SettingsWindow>,
     rename: Option<RenameDialog>,
     show_mixer: bool,
+    /// Pattern edited in the rack and used for new clips.
+    current_pattern: PatternId,
+    song_mode: bool,
+    mode_sent: Option<TransportMode>,
+    playlist_view: playlist::PlaylistView,
+    /// Shortening that needs confirmation: (pattern, steps, dropped).
+    pending_length: Option<(PatternId, u32, usize)>,
     notices: Vec<(Notice, f64)>,
     pending: Option<Pending>,
     allow_close: bool,
@@ -82,6 +96,8 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
     /// If no audio device is open, the audio settings window is shown at
     /// startup so the user can pick an output (Amendment 01 §5).
     pub fn new(host: H, store: S, project: Project, path: Option<PathBuf>) -> Self {
+        let current_pattern = project.patterns.first().map_or(PatternId(0), |p| p.id);
+        let song_mode = !project.playlist.clips.is_empty();
         let settings = host
             .current_device()
             .is_none()
@@ -95,6 +111,11 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             settings,
             rename: None,
             show_mixer: true,
+            current_pattern,
+            song_mode,
+            mode_sent: None,
+            playlist_view: playlist::PlaylistView::default(),
+            pending_length: None,
             notices: Vec::new(),
             pending: None,
             allow_close: false,
@@ -155,6 +176,9 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
 
     fn replace_project(&mut self, project: Project, path: Option<PathBuf>) {
         self.host.stop();
+        self.current_pattern = project.patterns.first().map_or(PatternId(0), |p| p.id);
+        self.song_mode = !project.playlist.clips.is_empty();
+        self.playlist_view = playlist::PlaylistView::default();
         self.project = project;
         self.path = path;
         self.history.reset();
@@ -355,6 +379,12 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 }
             });
             ui.toggle_value(&mut self.show_mixer, "Mixer");
+            ui.separator();
+            ui.selectable_value(&mut self.song_mode, false, "Pattern")
+                .on_hover_text("Play loops the current pattern");
+            ui.selectable_value(&mut self.song_mode, true, "Song")
+                .on_hover_text("Play the playlist arrangement");
+            self.pattern_controls(ui, now);
             if ui.button("Audio settings").clicked() {
                 self.settings = Some(SettingsWindow::new(&self.host));
             }
@@ -432,10 +462,146 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
         });
     }
 
+    fn playlist_action(&mut self, action: playlist::PlaylistAction, now: f64) {
+        use playlist::PlaylistAction as A;
+        let result = match action {
+            A::AddClip { lane, start } => add_clip(
+                &mut self.history,
+                &mut self.project,
+                lane,
+                self.current_pattern,
+                start,
+            )
+            .map(|_| ()),
+            A::Duplicate(ids) => {
+                duplicate_clips(&mut self.history, &mut self.project, &ids).map(|_| ())
+            }
+            A::MakeUnique(id) => make_unique(&mut self.history, &mut self.project, id).map(|p| {
+                self.current_pattern = p;
+            }),
+            A::AddLane => add_lane(&mut self.history, &mut self.project).map(|_| ()),
+            A::RenameLane(id) => {
+                self.start_rename(RenameTarget::Lane(id));
+                Ok(())
+            }
+            A::Seek(ticks) => {
+                self.host.seek_ticks(ticks);
+                Ok(())
+            }
+        };
+        match result {
+            Ok(()) => self.sync_needed = true,
+            Err(e) => self.notify(Notice::error(e.to_string()), now),
+        }
+    }
+
+    /// Pattern selector, new/rename, length and loop toggle.
+    fn pattern_controls(&mut self, ui: &mut egui::Ui, now: f64) {
+        if self.project.pattern(self.current_pattern).is_none() {
+            self.current_pattern = self.project.patterns[0].id;
+        }
+        let current = self.project.pattern(self.current_pattern).expect("checked");
+        let (current_name, current_len) = (current.name.clone(), current.length_steps);
+        let mut selected = self.current_pattern;
+        egui::ComboBox::from_id_salt("pattern")
+            .width(120.0)
+            .selected_text(current_name)
+            .show_ui(ui, |ui| {
+                for p in &self.project.patterns {
+                    ui.selectable_value(&mut selected, p.id, &p.name);
+                }
+            })
+            .response
+            .on_hover_text("Pattern edited in the channel rack; new clips use it");
+        self.current_pattern = selected;
+        if ui.small_button("+").on_hover_text("New pattern").clicked() {
+            let name = format!("Pattern {}", self.project.patterns.len() + 1);
+            match add_pattern(&mut self.history, &mut self.project, name) {
+                Ok(id) => {
+                    self.current_pattern = id;
+                    self.sync_needed = true;
+                }
+                Err(e) => self.notify(Notice::error(e.to_string()), now),
+            }
+        }
+        if ui.small_button("Rename").clicked() {
+            self.start_rename(RenameTarget::Pattern(self.current_pattern));
+        }
+        let mut steps = current_len;
+        let r = ui
+            .add(
+                egui::DragValue::new(&mut steps)
+                    .range(1..=jdance_domain::MAX_PATTERN_STEPS)
+                    .suffix(" steps"),
+            )
+            .on_hover_text("Pattern length; clips keep their repeat counts");
+        if r.changed() && steps != current_len {
+            self.set_pattern_length(self.current_pattern, steps, false, now);
+        }
+        ui.separator();
+        let mut looping = self.project.playlist.loop_enabled;
+        if ui
+            .toggle_value(&mut looping, "Loop")
+            .on_hover_text("Loop the region set with Shift+drag on the playlist ruler (default: whole arrangement)")
+            .changed()
+        {
+            let end = self.project.playlist.arrangement_end(&self.project.patterns).max(3_840);
+            let range = self.project.playlist.loop_range.or(Some((0, end)));
+            self.apply(Edit::SetLoop { range, enabled: looping }, false, now);
+        }
+    }
+
+    fn set_pattern_length(&mut self, pattern: PatternId, steps: u32, truncate: bool, now: f64) {
+        let edit = Edit::SetPatternLength {
+            pattern,
+            steps,
+            truncate,
+        };
+        match self.history.execute(&mut self.project, edit) {
+            Ok(()) => self.sync_needed = true,
+            Err(jdance_commands::EditError::WouldDropSteps(n)) => {
+                self.pending_length = Some((pattern, steps, n));
+            }
+            Err(e) => self.notify(Notice::error(e.to_string()), now),
+        }
+    }
+
+    fn length_dialog(&mut self, ctx: &egui::Context, now: f64) {
+        let Some((pattern, steps, dropped)) = self.pending_length else {
+            return;
+        };
+        let mut choice = None;
+        egui::Modal::new(egui::Id::unique("shorten")).show(ctx, |ui| {
+            ui.heading("Shorten pattern?");
+            ui.label(format!(
+                "Shortening to {steps} steps removes {dropped} active step(s) beyond the new end. \
+                 Clips keep their repeat counts and may now overlap."
+            ));
+            ui.horizontal(|ui| {
+                if ui.button("Truncate").clicked() {
+                    choice = Some(true);
+                }
+                if ui.button("Cancel").clicked() {
+                    choice = Some(false);
+                }
+            });
+        });
+        match choice {
+            Some(true) => {
+                self.pending_length = None;
+                self.set_pattern_length(pattern, steps, true, now);
+            }
+            Some(false) => self.pending_length = None,
+            None => {}
+        }
+    }
+
     fn start_rename(&mut self, target: RenameTarget) {
         let text = match target {
             RenameTarget::Channel(id) => self.project.channel(id).map(|c| c.name.clone()),
             RenameTarget::Track(id) => self.project.mixer.track(id).map(|t| t.name.clone()),
+            RenameTarget::Pattern(id) => self.project.pattern(id).map(|p| p.name.clone()),
+            RenameTarget::Lane(id) => self.project.playlist.lane(id).map(|l| l.name.clone()),
         };
         if let Some(text) = text {
             self.rename = Some(RenameDialog { target, text });
@@ -496,6 +662,8 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 let edit = match target {
                     RenameTarget::Channel(id) => Edit::RenameChannel(id, name),
                     RenameTarget::Track(id) => Edit::RenameTrack(id, name),
+                    RenameTarget::Pattern(id) => Edit::RenamePattern(id, name),
+                    RenameTarget::Lane(id) => Edit::RenameLane(id, name),
                 };
                 self.apply(edit, false, now);
             }
@@ -605,9 +773,36 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
                 });
         }
         let mut out = rack::RackOutput::default();
+        egui::Panel::top("rack")
+            .resizable(true)
+            .default_size(170.0)
+            .min_size(60.0)
+            .show(ui, |ui| {
+                let pattern_mode = !self.song_mode;
+                out = rack::show(
+                    ui,
+                    &self.project,
+                    self.current_pattern,
+                    &self.host,
+                    self.project_dir(),
+                    pattern_mode,
+                );
+            });
+        let mut pl_out = playlist::PlaylistOutput::default();
         egui::CentralPanel::default().show(ui, |ui| {
-            out = rack::show(ui, &self.project, &self.host, self.project_dir());
+            let playhead = self
+                .host
+                .transport()
+                .position_ticks
+                .filter(|_| self.song_mode);
+            pl_out = self.playlist_view.show(ui, &self.project, playhead);
         });
+        for edit in pl_out.edits {
+            self.apply(edit, false, now);
+        }
+        for action in pl_out.actions {
+            self.playlist_action(action, now);
+        }
         for (edit, merging) in out.edits.into_iter().chain(mix.edits) {
             self.apply(edit, merging, now);
         }
@@ -638,6 +833,16 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
             self.settings = Some(w);
         }
         self.rename_dialog(&ctx, now);
+        self.length_dialog(&ctx, now);
+        let mode = if self.song_mode {
+            TransportMode::Song
+        } else {
+            TransportMode::Pattern(self.current_pattern)
+        };
+        if self.mode_sent != Some(mode) {
+            self.mode_sent = Some(mode);
+            self.host.set_mode(mode);
+        }
         self.confirm_dialog(&ctx, now);
         self.show_notices(&ctx, now);
 

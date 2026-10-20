@@ -7,7 +7,7 @@
 use crate::{Host, SampleStatus};
 use egui::{Color32, CornerRadius, Rect, Sense, Stroke, StrokeKind, vec2};
 use jdance_commands::Edit;
-use jdance_domain::{MAX_VOLUME, Project, SampleRef, Step};
+use jdance_domain::{MAX_VOLUME, PatternId, Project, SampleRef, Step};
 use std::path::Path;
 
 const STEP_SIZE: f32 = 22.0;
@@ -25,18 +25,24 @@ pub(crate) struct RackOutput {
 pub(crate) fn show(
     ui: &mut egui::Ui,
     project: &Project,
+    pattern: PatternId,
     host: &dyn Host,
     dir: Option<&Path>,
+    pattern_mode: bool,
 ) -> RackOutput {
     let mut out = RackOutput::default();
-    let Some(pattern) = project.active_pattern() else {
+    let Some(pattern) = project
+        .pattern(pattern)
+        .or_else(|| project.patterns.first())
+    else {
         ui.label("No pattern");
         return out;
     };
     let transport = host.transport();
+    // The step playhead is shown when this pattern is what plays.
     let current_step = transport
         .loop_pos
-        .filter(|_| transport.playing)
+        .filter(|_| transport.playing && pattern_mode)
         .map(|p| ((p * pattern.length_steps as f32) as u32).min(pattern.length_steps - 1));
 
     let dropped: Vec<std::path::PathBuf> = ui.ctx().input(|i| {
@@ -50,7 +56,7 @@ pub(crate) fn show(
     let pointer = ui.ctx().input(|i| i.pointer.hover_pos());
     let mut dropped_on_row = false;
 
-    egui::ScrollArea::vertical().show(ui, |ui| {
+    egui::ScrollArea::both().id_salt("rack").show(ui, |ui| {
         for ch in &project.channels {
             let row = ui.horizontal(|ui| {
                 let mut muted = ch.muted;

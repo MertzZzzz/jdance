@@ -13,15 +13,18 @@ piano roll, playlist, mixer). Код FL Studio не используется и 
 Что сделано и что проверено — в [docs/status.md](docs/status.md).
 
 Работает сейчас:
-- channel rack с 16-step sequencer, WAV-сэмплы (drag-and-drop или меню);
-- mixer: треки, mute/solo, sends pre/post, компрессор с sidechain и lookahead,
-  компенсация задержки по всему графу, плавная смена громкости;
+- channel rack со step sequencer, несколько паттернов, WAV-сэмплы
+  (drag-and-drop или меню);
+- playlist: lanes, клипы паттернов с повторами, Pattern/Song режимы, loop;
+- mixer: треки, mute/solo, sends pre/post, до 8 эффектов на трек
+  (Parametric EQ, Tempo Delay, Reverb, компрессор с sidechain), safety
+  limiter на master, компенсация задержки по всему графу;
 - воспроизведение через CPAL (WASAPI / CoreAudio / ALSA / JACK);
 - audio settings, построенные на capabilities устройства;
 - undo/redo, dirty state, safe save проекта;
 - offline render в WAV без аудиоустройства (`jdance render`).
 
-Ещё нет: ASIO-host, VST3, piano roll, playlist,
+Ещё нет: ASIO-host, VST3, piano roll,
 автоматизация (см. план в [спецификации](docs/spec/)).
 
 ## Сборка

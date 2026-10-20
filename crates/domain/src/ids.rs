@@ -37,6 +37,15 @@ id_type!(
     InsertId
 );
 
+id_type!(
+    /// Playlist lane.
+    LaneId
+);
+id_type!(
+    /// Pattern clip in the playlist.
+    ClipId
+);
+
 impl TrackId {
     /// The master track always has ID 0; allocated IDs start at 1.
     pub const MASTER: TrackId = TrackId(0);

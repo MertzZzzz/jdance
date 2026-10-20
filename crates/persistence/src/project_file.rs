@@ -2,7 +2,7 @@
 //! Project file format (PER-001): a single JSON file.
 //!
 //! ```json
-//! { "format": "jdance-project", "format_version": 4, "project": { … } }
+//! { "format": "jdance-project", "format_version": 5, "project": { … } }
 //! ```
 //!
 //! Any schema change increments `format_version` and adds a migration step
@@ -14,7 +14,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 pub const FORMAT_TAG: &str = "jdance-project";
-pub const CURRENT_FORMAT_VERSION: u32 = 4;
+pub const CURRENT_FORMAT_VERSION: u32 = 5;
 pub const PROJECT_EXTENSION: &str = "jdance";
 
 /// Saves `project` to `path` atomically. Sample paths inside the project
@@ -118,10 +118,49 @@ fn migrate(version: u32, mut project: Value) -> Result<Value, PersistError> {
         project = v3_to_v4(project)?;
         v = 4;
     }
+    if v == 4 {
+        project = v4_to_v5(project)?;
+        v = 5;
+    }
     match v {
         CURRENT_FORMAT_VERSION => Ok(project),
         v => Err(PersistError::Corrupt(format!("unknown format_version {v}"))),
     }
+}
+
+/// v5 added the playlist (lanes, pattern clips, loop). Older projects get
+/// the default lanes, with IDs taken from the project's ID counter.
+fn v4_to_v5(mut project: Value) -> Result<Value, PersistError> {
+    let corrupt = |m: &str| PersistError::Corrupt(format!("v4 project: {m}"));
+    let obj = project
+        .as_object_mut()
+        .ok_or_else(|| corrupt("not an object"))?;
+    let next = obj
+        .get("ids")
+        .and_then(|i| i.get("next"))
+        .and_then(Value::as_u64)
+        .ok_or_else(|| corrupt("missing ID counter"))?;
+    let lanes: Vec<Value> = (0..jdance_domain::DEFAULT_LANES)
+        .map(|i| {
+            let c = jdance_domain::LANE_COLORS[i % jdance_domain::LANE_COLORS.len()];
+            serde_json::json!({
+                "id": next + i as u64,
+                "name": format!("Lane {}", i + 1),
+                "color": c,
+                "muted": false,
+                "solo": false,
+            })
+        })
+        .collect();
+    obj.insert(
+        "playlist".into(),
+        serde_json::json!({"lanes": lanes, "clips": [], "loop_range": null, "loop_enabled": false}),
+    );
+    obj.insert(
+        "ids".into(),
+        serde_json::json!({"next": next + jdance_domain::DEFAULT_LANES as u64}),
+    );
+    Ok(project)
 }
 
 /// v4 stores effects as `{kind, schema, params{id: value}}` with named
@@ -252,6 +291,8 @@ fn validate(p: &Project) -> Result<(), PersistError> {
         ids.extend(t.sends.iter().map(|s| s.id.0));
         ids.extend(t.inserts.iter().map(|i| i.id.0));
     }
+    ids.extend(p.playlist.lanes.iter().map(|l| l.id.0));
+    ids.extend(p.playlist.clips.iter().map(|c| c.id.0));
     let n = ids.len();
     ids.sort_unstable();
     ids.dedup();
@@ -275,15 +316,8 @@ fn validate(p: &Project) -> Result<(), PersistError> {
     if let Err(e) = p.validate_routing() {
         return bad(format!("mixer routing: {e}"));
     }
-    for pat in &p.patterns {
-        if pat.length_steps == 0 || pat.length_steps > 1024 {
-            return bad(format!("pattern {:?} has invalid length", pat.id));
-        }
-        for row in &pat.rows {
-            if row.steps.len() != pat.length_steps as usize {
-                return bad(format!("pattern {:?} row length mismatch", pat.id));
-            }
-        }
+    if let Err(e) = p.validate_arrangement() {
+        return bad(format!("arrangement: {e}"));
     }
     Ok(())
 }
@@ -359,16 +393,16 @@ mod tests {
     #[test]
     fn rejects_semantically_broken_projects() {
         let p = sample_project("a.wav");
-        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 4, "project": p});
+        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 5, "project": p});
         v["project"]["channels"][0]["volume"] = serde_json::json!(50.0);
         assert!(matches!(
             parse_project(v.to_string().as_bytes()),
             Err(PersistError::Corrupt(_))
         ));
-        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 4, "project": p});
+        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 5, "project": p});
         v["project"]["patterns"][0]["rows"][0]["steps"] = serde_json::json!([]);
         assert!(parse_project(v.to_string().as_bytes()).is_err());
-        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 4, "project": p});
+        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 5, "project": p});
         v["project"]["ids"]["next"] = serde_json::json!(1);
         assert!(parse_project(v.to_string().as_bytes()).is_err());
     }
@@ -391,6 +425,11 @@ mod tests {
         }"#;
         let p = parse_project(v1).unwrap();
         assert_eq!(p.tempo_bpm, 128.0);
+        assert_eq!(p.playlist.lanes.len(), jdance_domain::DEFAULT_LANES);
+        assert!(
+            p.playlist.lanes.iter().all(|l| l.id.0 >= 3),
+            "lane IDs after existing IDs"
+        );
         assert_eq!(p.channels[0].track, jdance_domain::TrackId::MASTER);
         assert!(p.mixer.tracks.is_empty());
         assert!(p.mixer.master.sends.is_empty());
@@ -463,7 +502,7 @@ mod tests {
             pre_fader: false,
         });
         p.mixer.tracks = vec![a, b];
-        let v = serde_json::json!({"format": FORMAT_TAG, "format_version": 4, "project": p});
+        let v = serde_json::json!({"format": FORMAT_TAG, "format_version": 5, "project": p});
         let err = parse_project(v.to_string().as_bytes()).unwrap_err();
         assert!(err.to_string().contains("feedback loop"), "{err}");
     }
@@ -472,7 +511,7 @@ mod tests {
     fn truncated_files_never_panic() {
         let p = sample_project("a.wav");
         let full = serde_json::to_vec(&serde_json::json!({
-            "format": FORMAT_TAG, "format_version": 4, "project": p
+            "format": FORMAT_TAG, "format_version": 5, "project": p
         }))
         .unwrap();
         for n in 0..full.len() {

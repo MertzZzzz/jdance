@@ -8,12 +8,23 @@ use jdance_audio_api::{
     ActiveStreamInfo, AudioError, BackendId, DeviceCapabilities, DeviceInfo, DeviceKey,
     DeviceSettings, StatsReading, StreamState,
 };
-use jdance_domain::{Project, SampleRef, TrackId};
+use jdance_domain::{PatternId, Project, SampleRef, TrackId};
 use std::path::{Path, PathBuf};
+
+/// What Play plays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportMode {
+    /// Loops one pattern.
+    Pattern(PatternId),
+    /// Plays the playlist arrangement.
+    Song,
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct TransportStatus {
     pub playing: bool,
+    /// Playhead in ticks (timeline position); `None` if unknown.
+    pub position_ticks: Option<u64>,
     /// Playhead inside the pattern loop, `0.0..1.0`; `None` if unknown.
     pub loop_pos: Option<f32>,
     pub peak_load: f32,
@@ -135,6 +146,9 @@ pub trait Host {
     fn set_project(&mut self, project: &Project, project_dir: Option<&Path>);
     fn play(&mut self);
     fn stop(&mut self);
+    fn set_mode(&mut self, mode: TransportMode);
+    /// Moves the playhead (song mode).
+    fn seek_ticks(&mut self, ticks: u64);
     fn transport(&self) -> TransportStatus;
     fn latency(&self) -> LatencyInfo;
     fn meters(&self) -> MeterReadings;

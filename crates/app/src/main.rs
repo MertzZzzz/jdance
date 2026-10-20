@@ -190,6 +190,9 @@ fn cmd_gui(args: &[String]) -> Result<(), String> {
     let mut audio = host::AudioHost::new(jdance_audio_cpal::backends());
     audio.open_initial();
     if args.iter().any(|a| a == "--autoplay") {
+        // Load the project first so Play does not start on an empty song.
+        let dir = path.as_deref().and_then(std::path::Path::parent);
+        jdance_ui::Host::set_project(&mut audio, &project, dir);
         jdance_ui::Host::play(&mut audio);
     }
 

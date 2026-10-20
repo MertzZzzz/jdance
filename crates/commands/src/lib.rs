@@ -6,13 +6,15 @@
 //! tracked by revision IDs so that undoing back to the saved state clears it.
 
 mod mixer;
+mod playlist;
 
 pub use mixer::{add_insert, add_send, add_track};
+pub use playlist::{add_clip, add_lane, add_pattern, duplicate_clips, make_unique, steps_beyond};
 
 use jdance_domain::{
-    Channel, ChannelId, Effect, InsertId, LimiterSettings, MAX_CHANNELS, MAX_TEMPO_BPM, MAX_VOLUME,
-    MIN_TEMPO_BPM, Mixer, MixerTrack, PatternId, Project, RoutingError, SampleRef, SendId,
-    Sidechain, Step, StepRow, TrackId,
+    Channel, ChannelId, ClipId, Effect, InsertId, Lane, LaneId, LimiterSettings, MAX_CHANNELS,
+    MAX_TEMPO_BPM, MAX_VOLUME, MIN_TEMPO_BPM, Mixer, MixerTrack, Pattern, PatternClip, PatternId,
+    Playlist, Project, RoutingError, SampleRef, SendId, Sidechain, Step, StepRow, TrackId,
 };
 use thiserror::Error;
 
@@ -34,6 +36,12 @@ pub enum EditError {
     Routing(RoutingError),
     #[error("mixer object {0} does not exist")]
     NoSuchMixerObject(u64),
+    #[error("{0}")]
+    Arrangement(String),
+    /// Shortening a pattern would remove active steps; retry with
+    /// `truncate: true` after the user confirms.
+    #[error("shortening the pattern would remove {0} active step(s)")]
+    WouldDropSteps(usize),
 }
 
 /// A reversible change to a [`Project`].
@@ -97,6 +105,57 @@ pub enum Edit {
     SetLimiter(LimiterSettings),
     /// Several edits applied as one undo step, in order; all or nothing.
     Batch(Vec<Edit>),
+
+    // Patterns and playlist.
+    RenamePattern(PatternId, String),
+    /// Replaces a pattern (same ID) wholesale; inverse of length changes.
+    ReplacePattern(Pattern),
+    /// Keeps clips' repeat counts. Shortening with active steps beyond
+    /// the new length fails unless `truncate` (spec: no silent deletion).
+    SetPatternLength {
+        pattern: PatternId,
+        steps: u32,
+        truncate: bool,
+    },
+    AddPattern {
+        pattern: Pattern,
+        index: usize,
+    },
+    /// Also removes the pattern's clips.
+    RemovePattern(PatternId),
+    AddLane {
+        lane: Lane,
+        index: usize,
+    },
+    /// Also removes the lane's clips.
+    RemoveLane(LaneId),
+    RenameLane(LaneId, String),
+    SetLaneColor(LaneId, [u8; 3]),
+    SetLaneMuted(LaneId, bool),
+    SetLaneSolo(LaneId, bool),
+    AddClip(PatternClip),
+    RemoveClip(ClipId),
+    MoveClip {
+        id: ClipId,
+        start: u64,
+        lane: LaneId,
+    },
+    SetClipRepeat(ClipId, u32),
+    SetClipMuted(ClipId, bool),
+    /// Inserts `pattern` (a copy with a new ID) and points `clip` at it.
+    MakeUnique {
+        clip: ClipId,
+        pattern: Pattern,
+    },
+    SetLoop {
+        range: Option<(u64, u64)>,
+        enabled: bool,
+    },
+    /// Restores patterns and playlist (inverse of structural edits).
+    RestoreArrangement {
+        patterns: Vec<Pattern>,
+        playlist: Box<Playlist>,
+    },
     /// Restores the mixer and the channel → track assignments.
     RestoreMixer {
         mixer: Box<Mixer>,
@@ -152,6 +211,24 @@ impl Edit {
             Edit::MoveInsert(..) => "Reorder effects",
             Edit::SetLimiter(_) => "Change limiter",
             Edit::Batch(_) => "Edit",
+            Edit::RenamePattern(..) => "Rename pattern",
+            Edit::ReplacePattern(_) | Edit::SetPatternLength { .. } => "Change pattern length",
+            Edit::AddPattern { .. } => "Add pattern",
+            Edit::RemovePattern(_) => "Remove pattern",
+            Edit::AddLane { .. } => "Add lane",
+            Edit::RemoveLane(_) => "Remove lane",
+            Edit::RenameLane(..) => "Rename lane",
+            Edit::SetLaneColor(..) => "Change lane color",
+            Edit::SetLaneMuted(..) => "Mute lane",
+            Edit::SetLaneSolo(..) => "Solo lane",
+            Edit::AddClip(_) => "Add clip",
+            Edit::RemoveClip(_) => "Delete clip",
+            Edit::MoveClip { .. } => "Move clip",
+            Edit::SetClipRepeat(..) => "Resize clip",
+            Edit::SetClipMuted(..) => "Mute clip",
+            Edit::MakeUnique { .. } => "Make unique",
+            Edit::SetLoop { .. } => "Change loop",
+            Edit::RestoreArrangement { .. } => "Change arrangement",
             Edit::SetInsertSidechain(..) => "Change sidechain",
             Edit::RestoreMixer { .. } => "Change mixer",
         }
@@ -314,6 +391,25 @@ impl Edit {
                 inverses.reverse();
                 Ok(Edit::Batch(inverses))
             }
+            Edit::RenamePattern(..)
+            | Edit::ReplacePattern(_)
+            | Edit::SetPatternLength { .. }
+            | Edit::AddPattern { .. }
+            | Edit::RemovePattern(_)
+            | Edit::AddLane { .. }
+            | Edit::RemoveLane(_)
+            | Edit::RenameLane(..)
+            | Edit::SetLaneColor(..)
+            | Edit::SetLaneMuted(..)
+            | Edit::SetLaneSolo(..)
+            | Edit::AddClip(_)
+            | Edit::RemoveClip(_)
+            | Edit::MoveClip { .. }
+            | Edit::SetClipRepeat(..)
+            | Edit::SetClipMuted(..)
+            | Edit::MakeUnique { .. }
+            | Edit::SetLoop { .. }
+            | Edit::RestoreArrangement { .. } => playlist::apply(self, p),
             other => mixer::apply(other, p),
         }
     }

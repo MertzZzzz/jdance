@@ -8,16 +8,18 @@
 mod effects;
 mod ids;
 mod mixer;
+mod playlist;
 
 pub use effects::{
     DELAY_DIVISIONS, EQ_MAX_FREQ, Effect, EffectKind, LimiterSettings, Mapping, ParamSpec,
     ParamUnit, Smoothing,
 };
-pub use ids::{ChannelId, IdAllocator, InsertId, PatternId, SendId, TrackId};
+pub use ids::{ChannelId, ClipId, IdAllocator, InsertId, LaneId, PatternId, SendId, TrackId};
 pub use mixer::{
     Insert, MAX_INSERTS_PER_TRACK, MAX_SEND_LEVEL, MAX_SENDS_PER_TRACK, MAX_TRACKS, Mixer,
     MixerTrack, RoutingError, Send, Sidechain, Tap,
 };
+pub use playlist::{LANE_COLORS, Lane, MAX_REPEAT, MAX_START_TICKS, PatternClip, Playlist};
 
 use serde::{Deserialize, Serialize};
 
@@ -25,8 +27,12 @@ use serde::{Deserialize, Serialize};
 pub const PPQ: u32 = 960;
 /// Ticks in one sixteenth-note step.
 pub const TICKS_PER_STEP: u32 = PPQ / 4;
-/// Default and, for now, only supported pattern length in steps.
+/// Default pattern length in steps (one 4/4 bar of sixteenths).
 pub const DEFAULT_PATTERN_STEPS: u32 = 16;
+/// Pattern length limit in steps (16 bars).
+pub const MAX_PATTERN_STEPS: u32 = 256;
+/// Lanes in a new project.
+pub const DEFAULT_LANES: usize = 6;
 
 pub const MIN_TEMPO_BPM: f64 = 20.0;
 pub const MAX_TEMPO_BPM: f64 = 999.0;
@@ -41,6 +47,7 @@ pub struct Project {
     pub channels: Vec<Channel>,
     pub patterns: Vec<Pattern>,
     pub mixer: Mixer,
+    pub playlist: Playlist,
     pub ids: IdAllocator,
 }
 
@@ -49,11 +56,13 @@ impl Project {
     pub fn new() -> Self {
         let mut ids = IdAllocator::default();
         let pattern = Pattern::new(PatternId(ids.next()), "Pattern 1");
+        let playlist = Playlist::with_lanes(DEFAULT_LANES, || ids.next());
         Self {
             tempo_bpm: 130.0,
             channels: Vec::new(),
             patterns: vec![pattern],
             mixer: Mixer::default(),
+            playlist,
             ids,
         }
     }
@@ -81,6 +90,24 @@ impl Project {
     /// The pattern played by the step-sequencer loop.
     pub fn active_pattern(&self) -> Option<&Pattern> {
         self.patterns.first()
+    }
+
+    /// Checks patterns and the playlist (references, ranges, IDs).
+    pub fn validate_arrangement(&self) -> Result<(), String> {
+        if self.patterns.is_empty() {
+            return Err("a project needs at least one pattern".into());
+        }
+        for pat in &self.patterns {
+            if pat.length_steps == 0 || pat.length_steps > MAX_PATTERN_STEPS {
+                return Err(format!("pattern {:?} has invalid length", pat.id));
+            }
+            for row in &pat.rows {
+                if row.steps.len() != pat.length_steps as usize {
+                    return Err(format!("pattern {:?} row length mismatch", pat.id));
+                }
+            }
+        }
+        self.playlist.validate(&self.patterns)
     }
 
     /// Checks references from channels into the mixer and the routing

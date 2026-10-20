@@ -87,6 +87,23 @@
 | Нет аллокаций в render (RT-001) со всеми эффектами, SetParam, Stop | PASS | `engine/tests/rt_alloc.rs` |
 | Export tail 5 с, настраиваемый, предупреждение | NOT RUN | следующий шаг |
 
+## Playlist (spec-mixer-playlist-effects, раздел Playlist)
+
+| Пункт | Статус | Артефакт / комментарий |
+|---|---|---|
+| Lanes (имя, цвет, mute/solo), без маршрутизации | PASS | `domain/src/playlist.rs` |
+| PatternClip: start, repeat ≥ 1, длительность = длина паттерна · repeat | PASS | `duration_and_end_follow_pattern_length` |
+| Приоритеты mute/solo: clip mute → lane mute → lane solo | PASS | `admission_priorities`, `engine/tests/song.rs` |
+| Наложение клипов без дедупликации | PASS | `overlapping_clips_both_play_without_deduplication` |
+| Редактирование: add/remove/move/repeat/mute, multi-select, drag = один undo | PASS | `commands/src/playlist.rs` тесты, `Edit::Batch` |
+| Duplicate (после конца выделения), Make unique | PASS | `commands` тесты |
+| Изменение длины паттерна: явный truncate, repeats сохраняются, end сдвигается | PASS | `WouldDropSteps`, модальный диалог в UI, `pattern_length_change_keeps_repeats_and_moves_end` |
+| Pattern / Song режимы, loop range с release голосов, seek без восстановления нот | PASS | `engine/tests/song.rs` |
+| Arrangement end + tail → stop; пустой arrangement не останавливает transport | PASS | `transport_stops_after_arrangement_end_and_tail`, `empty_arrangement_keeps_transport_running` |
+| Блочная независимость song-воспроизведения | PASS | property-тест `song_is_block_size_independent` |
+| Формат проекта v5 (миграция v4→v5: дефолтные lanes) | PASS | `persistence` тесты |
+| UI: canvas, zoom, drag/resize, ruler loop/seek, переименование lane/pattern | PASS (ручная проверка на Xvfb) | скриншот демо-проекта |
+
 ## Milestone 1A / 1B
 
 | Пункт | Статус |
@@ -99,4 +116,4 @@
 ## Известные ограничения текущей реализации
 
 - Ресемплинг сэмплов без anti-aliasing (BLD-041, ADR-012).
-- Один паттерн; piano roll, playlist, автоматизация, плагины — не начаты.
+- Piano roll, автоматизация, плагины — не начаты.
