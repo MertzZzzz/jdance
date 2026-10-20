@@ -324,6 +324,7 @@ impl Host for AudioHost {
         if self.plugins.poll() {
             self.needs_compile = true;
         }
+        self.plugins.poll_editors();
         if let Some(rx) = &self.scan
             && let Ok(catalog) = rx.try_recv()
         {
@@ -651,6 +652,21 @@ impl Host for AudioHost {
         if let Some(c) = self.plugins.controller(insert) {
             c.set_param_normalized(id, value);
         }
+    }
+
+    fn toggle_plugin_editor(&mut self, insert: InsertId, title: &str) {
+        if let Err(e) = self.plugins.toggle_editor(insert, title) {
+            self.notices
+                .push(Notice::warning(format!("Cannot open the editor: {e}")));
+        }
+    }
+
+    fn plugin_editor_open(&self, insert: InsertId) -> bool {
+        self.plugins.editor_open(insert)
+    }
+
+    fn any_plugin_editor_open(&self) -> bool {
+        self.plugins.any_editor_open()
     }
 
     fn plugin_problem(&self, insert: InsertId) -> Option<String> {

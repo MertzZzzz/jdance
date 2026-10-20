@@ -66,6 +66,10 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Unit and integration tests
         run: cargo test --workspace --locked
+      # The plugin editor test needs an X server on Linux (PLG-060).
+      - name: Plugin editor window test (Linux, Xvfb)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a cargo test --locked -p jdance-plugin-vst3 --test editor
       - name: Release build
         run: cargo build --release --locked -p jdance-app
       - name: Headless offline render (ARCH-002)

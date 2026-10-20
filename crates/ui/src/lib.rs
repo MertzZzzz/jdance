@@ -994,7 +994,8 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
             self.host.set_project(&self.project, dir.as_deref());
         }
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.title()));
-        if self.host.transport().playing {
+        // Plugin editors need their events and timers run (PLG-062).
+        if self.host.transport().playing || self.host.any_plugin_editor_open() {
             ctx.request_repaint();
         } else {
             ctx.request_repaint_after(std::time::Duration::from_millis(250));

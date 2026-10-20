@@ -22,7 +22,7 @@
 | ADR-006 ASIO через CPAL или свой адаптер | OPEN | |
 | ADR-008 VST3 bindings | ACCEPTED | `docs/adr/008-vst3-bindings.md` (`vst3` 0.3.0, SDK 3.8) |
 | ADR-009 модель процессов плагинов | ACCEPTED | `docs/adr/009-plugin-process-model.md` |
-| ADR-010 X11/Wayland для окон плагинов | OPEN | |
+| ADR-010 окна редакторов плагинов | ACCEPTED | `docs/adr/010-plugin-windows.md` |
 | VST3 spike | PASS (headless) | `plugin-vst3/tests/host.rs` против тестового плагина; GUI плагина NOT RUN |
 
 ## Milestone 1 (audible vertical slice)
@@ -139,7 +139,8 @@
 | Пользовательские папки плагинов в настройках (PLG-020) | PASS (ручная) | окно Plugins |
 | Добавление плагина из меню «+ Effect → VST3» | PASS (ручная) | скриншот на Xvfb |
 | Generic editor: все параметры, текст значения от плагина, дискретные и read-only (PLG-064) | PASS (ручная) | ввод значения текстом NOT RUN |
-| Окно GUI плагина (PLG-060..063), ADR-010 | NOT RUN | следующий шаг |
+| Окно GUI плагина: нативное окно на ОС, attach, `resizeView`, IRunLoop на Linux, закрытие и повторное открытие (PLG-060..063) | PASS (тестовый плагин) | `plugin-vst3/tests/editor.rs` (Linux под Xvfb, Windows и macOS в CI); ручная проверка на Xvfb: кнопка Edit; реальные плагины с GUI NOT RUN |
+| HiDPI, owner-окно, клавиатура для редакторов | NOT RUN | ADR-010, последствия |
 | Защита от crash-loop при открытии проекта (PLG-025), autosave (PLG-075) | NOT RUN | |
 | Undo для изменений параметров плагина | NOT RUN | изменения в generic editor сейчас без undo |
 
@@ -155,5 +156,4 @@
 ## Известные ограничения текущей реализации
 
 - Ресемплинг сэмплов без anti-aliasing (BLD-041, ADR-012).
-- Piano roll и автоматизация не начаты; у VST3-эффектов нет окна GUI
-  плагина (только generic editor).
+- Piano roll и автоматизация не начаты; VST3-инструменты не начаты.

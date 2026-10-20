@@ -201,6 +201,14 @@ pub trait Host {
         None
     }
     fn set_plugin_param(&mut self, _insert: InsertId, _id: u32, _value: f64) {}
+    /// Opens or closes the plugin's own editor window (PLG-060).
+    fn toggle_plugin_editor(&mut self, _insert: InsertId, _title: &str) {}
+    fn plugin_editor_open(&self, _insert: InsertId) -> bool {
+        false
+    }
+    fn any_plugin_editor_open(&self) -> bool {
+        false
+    }
     /// Why the plugin in `insert` is not loaded, if it is not.
     fn plugin_problem(&self, _insert: InsertId) -> Option<String> {
         None

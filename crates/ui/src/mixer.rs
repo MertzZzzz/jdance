@@ -396,6 +396,17 @@ fn insert_ui(
         if ins.sidechain.is_some() {
             ui.colored_label(Color32::from_rgb(120, 170, 235), "SC");
         }
+        if ins.effect.kind == EffectKind::Plugin {
+            let open = host.plugin_editor_open(ins.id);
+            if ui
+                .selectable_label(open, "Edit")
+                .on_hover_text("Open the plugin's own editor window")
+                .clicked()
+            {
+                let title = format!("{} — {}", ins.effect.name(), t.name);
+                host.toggle_plugin_editor(ins.id, &title);
+            }
+        }
         if index > 0
             && ui
                 .small_button("Up")

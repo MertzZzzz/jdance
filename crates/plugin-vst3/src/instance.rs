@@ -617,6 +617,14 @@ impl std::fmt::Debug for Vst3Controller {
     }
 }
 
+impl Vst3Controller {
+    /// Opens the plugin's own editor in a new window (UI thread only;
+    /// macOS: main thread). `Ok(None)` when the plugin has no editor.
+    pub fn open_editor(&self, title: &str) -> Result<Option<crate::Vst3Editor>, PluginError> {
+        crate::Vst3Editor::open(&self.controller, self.core.clone(), title)
+    }
+}
+
 impl PluginController for Vst3Controller {
     fn params(&self) -> &[ParamInfo] {
         &self.params

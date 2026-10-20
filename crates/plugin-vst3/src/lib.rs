@@ -11,11 +11,13 @@
 #![allow(clippy::unnecessary_cast)]
 
 mod com;
+mod editor;
 mod instance;
 mod module;
 mod scan;
 mod uid;
 
+pub use editor::Vst3Editor;
 pub use instance::{Vst3Controller, Vst3Processor, instantiate};
 pub use module::{Vst3Module, binary_path, bundle_binary};
 pub use scan::{

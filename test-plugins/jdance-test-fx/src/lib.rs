@@ -649,8 +649,181 @@ impl IEditControllerTrait for Controller {
         kResultOk
     }
 
+    /// Only the gain class has an editor.
     unsafe fn createView(&self, _name: FIDString) -> *mut IPlugView {
-        std::ptr::null_mut()
+        if self.mode != Mode::Gain {
+            return std::ptr::null_mut();
+        }
+        let view = ComWrapper::new(View::default());
+        let Some(ptr) = view.to_com_ptr::<IPlugView>() else {
+            return std::ptr::null_mut();
+        };
+        // The view needs its own pointer for IPlugFrame::resizeView.
+        view.me.set(ptr.as_ptr());
+        ptr.into_raw()
+    }
+}
+
+/// Initial editor size; the view asks for [`ATTACHED_SIZE`] when attached
+/// and, on Linux, for [`TIMER_SIZE`] from a run-loop timer.
+pub const INITIAL_SIZE: (i32, i32) = (400, 300);
+pub const ATTACHED_SIZE: (i32, i32) = (480, 320);
+pub const TIMER_SIZE: (i32, i32) = (500, 330);
+
+/// Test editor: draws nothing; exercises attach, resize requests and the
+/// Linux run loop.
+struct View {
+    me: Cell<*mut IPlugView>,
+    size: Cell<(i32, i32)>,
+    frame: RefCell<Option<ComPtr<IPlugFrame>>>,
+    attached: Cell<bool>,
+}
+
+impl Default for View {
+    fn default() -> Self {
+        Self {
+            me: Cell::new(std::ptr::null_mut()),
+            size: Cell::new(INITIAL_SIZE),
+            frame: RefCell::new(None),
+            attached: Cell::new(false),
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+impl Class for View {
+    type Interfaces = (IPlugView,);
+}
+
+#[cfg(target_os = "linux")]
+impl Class for View {
+    type Interfaces = (IPlugView, Linux::ITimerHandler);
+}
+
+impl View {
+    fn request(&self, (w, h): (i32, i32)) {
+        let frame = self.frame.borrow().clone();
+        if let Some(f) = frame {
+            let mut r = ViewRect {
+                left: 0,
+                top: 0,
+                right: w,
+                bottom: h,
+            };
+            unsafe { f.resizeView(self.me.get(), &mut r) };
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Linux::ITimerHandlerTrait for View {
+    unsafe fn onTimer(&self) {
+        if self.attached.get() && self.size.get() != TIMER_SIZE {
+            self.request(TIMER_SIZE);
+        }
+    }
+}
+
+impl IPlugViewTrait for View {
+    unsafe fn isPlatformTypeSupported(&self, kind: FIDString) -> tresult {
+        let kind = unsafe { std::ffi::CStr::from_ptr(kind) }.to_bytes();
+        if matches!(kind, b"X11EmbedWindowID" | b"HWND" | b"NSView") {
+            kResultTrue
+        } else {
+            kResultFalse
+        }
+    }
+
+    unsafe fn attached(&self, parent: *mut c_void, _kind: FIDString) -> tresult {
+        if parent.is_null() {
+            return kInvalidArgument;
+        }
+        self.attached.set(true);
+        self.request(ATTACHED_SIZE);
+        #[cfg(target_os = "linux")]
+        {
+            let frame = self.frame.borrow().clone();
+            if let Some(run_loop) = frame.and_then(|f| f.cast::<Linux::IRunLoop>()) {
+                let me = self.me.get() as *mut FUnknown;
+                let timer =
+                    unsafe { ComRef::from_raw(me) }.and_then(|u| u.cast::<Linux::ITimerHandler>());
+                if let Some(t) = timer {
+                    unsafe { Linux::IRunLoopTrait::registerTimer(&run_loop, t.as_ptr(), 10) };
+                }
+            }
+        }
+        kResultOk
+    }
+
+    unsafe fn removed(&self) -> tresult {
+        #[cfg(target_os = "linux")]
+        {
+            let frame = self.frame.borrow().clone();
+            if let Some(run_loop) = frame.and_then(|f| f.cast::<Linux::IRunLoop>()) {
+                let me = self.me.get() as *mut FUnknown;
+                if let Some(t) =
+                    unsafe { ComRef::from_raw(me) }.and_then(|u| u.cast::<Linux::ITimerHandler>())
+                {
+                    unsafe { Linux::IRunLoopTrait::unregisterTimer(&run_loop, t.as_ptr()) };
+                }
+            }
+        }
+        self.attached.set(false);
+        kResultOk
+    }
+
+    unsafe fn onWheel(&self, _distance: f32) -> tresult {
+        kResultFalse
+    }
+
+    unsafe fn onKeyDown(&self, _key: char16, _code: i16, _modifiers: i16) -> tresult {
+        kResultFalse
+    }
+
+    unsafe fn onKeyUp(&self, _key: char16, _code: i16, _modifiers: i16) -> tresult {
+        kResultFalse
+    }
+
+    unsafe fn getSize(&self, size: *mut ViewRect) -> tresult {
+        if size.is_null() {
+            return kInvalidArgument;
+        }
+        let (w, h) = self.size.get();
+        unsafe {
+            *size = ViewRect {
+                left: 0,
+                top: 0,
+                right: w,
+                bottom: h,
+            }
+        };
+        kResultOk
+    }
+
+    unsafe fn onSize(&self, new_size: *mut ViewRect) -> tresult {
+        if new_size.is_null() {
+            return kInvalidArgument;
+        }
+        let r = unsafe { &*new_size };
+        self.size.set((r.right - r.left, r.bottom - r.top));
+        kResultOk
+    }
+
+    unsafe fn onFocus(&self, _state: TBool) -> tresult {
+        kResultOk
+    }
+
+    unsafe fn setFrame(&self, frame: *mut IPlugFrame) -> tresult {
+        *self.frame.borrow_mut() = unsafe { ComRef::from_raw(frame) }.map(|f| f.to_com_ptr());
+        kResultOk
+    }
+
+    unsafe fn canResize(&self) -> tresult {
+        kResultFalse
+    }
+
+    unsafe fn checkSizeConstraint(&self, _rect: *mut ViewRect) -> tresult {
+        kResultFalse
     }
 }
 

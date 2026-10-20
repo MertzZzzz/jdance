@@ -176,6 +176,9 @@ pub fn create_instance(
 }
 
 struct Live {
+    /// Declared first: the editor closes before the instance is released
+    /// (PLG-063).
+    editor: Option<jdance_plugin_vst3::Vst3Editor>,
     class_id: String,
     controller: Vst3Controller,
     latency: u32,
@@ -271,6 +274,7 @@ impl PluginHost {
                     self.live.insert(
                         id,
                         Live {
+                            editor: None,
                             class_id: slot.class_id.clone(),
                             latency: jdance_plugin_api::PluginProcessor::latency_samples(
                                 &processor,
@@ -364,6 +368,45 @@ impl PluginHost {
             }
         }
         restart
+    }
+
+    /// Opens or closes the plugin's own editor window. `Err` explains
+    /// why it cannot open (no editor, no window system, plugin not loaded).
+    pub fn toggle_editor(&mut self, id: InsertId, title: &str) -> Result<(), String> {
+        let live = self
+            .live
+            .get_mut(&id)
+            .ok_or_else(|| "the plugin is not loaded".to_owned())?;
+        if live.editor.take().is_some() {
+            return Ok(());
+        }
+        match live.controller.open_editor(title) {
+            Ok(Some(e)) => {
+                live.editor = Some(e);
+                Ok(())
+            }
+            Ok(None) => Err("this plugin has no editor; use Parameters".into()),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    pub fn editor_open(&self, id: InsertId) -> bool {
+        self.live.get(&id).is_some_and(|l| l.editor.is_some())
+    }
+
+    pub fn any_editor_open(&self) -> bool {
+        self.live.values().any(|l| l.editor.is_some())
+    }
+
+    /// Runs open editors; closes those the user closed.
+    pub fn poll_editors(&mut self) {
+        for l in self.live.values_mut() {
+            if let Some(e) = &mut l.editor
+                && !e.poll()
+            {
+                l.editor = None;
+            }
+        }
     }
 
     pub fn controller(&mut self, id: InsertId) -> Option<&mut Vst3Controller> {
