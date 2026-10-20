@@ -245,6 +245,7 @@ pub fn compile(
 
     // Incoming latency per track: max over its sources (MIX-030). Channels
     // contribute 0; tracks contribute their output latency.
+    let silenced = mixer.silenced_by_solo();
     let mut in_lat = vec![0u32; order.len()];
     let mut out_lat = vec![0u32; order.len()];
     let mut pdc = Pdc { clamped: false };
@@ -297,7 +298,14 @@ pub fn compile(
             id: t.id,
             inserts,
             fader: StereoGain::new(fader_gains(t), ramp),
-            mute: Smoothed::new(if t.muted { 0.0 } else { 1.0 }, ramp),
+            mute: Smoothed::new(
+                if t.muted || silenced.contains(&t.id) {
+                    0.0
+                } else {
+                    1.0
+                },
+                ramp,
+            ),
             sends: Vec::new(),
             main_out: None,
             latency: acc,

@@ -292,3 +292,22 @@ proptest! {
         prop_assert_eq!(nonzero(&out.left), vec![latency]);
     }
 }
+
+#[test]
+fn solo_silences_unrelated_tracks_only() {
+    let mut b = Builder::new();
+    let mut bus = MixerTrack::new(TrackId(3), "Bus");
+    bus.solo = true;
+    let mut a = MixerTrack::new(TrackId(1), "A");
+    a.main_out = TrackId(3);
+    b.track(a)
+        .track(MixerTrack::new(TrackId(2), "B"))
+        .track(bus);
+    b.channel(TrackId(1), vec![1.0]);
+    // B is unrelated to the soloed bus: its later impulse must be silent.
+    let mut late = vec![0.0; 10];
+    late[5] = 1.0;
+    b.channel(TrackId(2), late);
+    let out = b.render(50);
+    assert_eq!(nonzero(&out.left), [0]);
+}

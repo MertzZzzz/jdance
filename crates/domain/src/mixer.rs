@@ -40,6 +40,8 @@ pub struct MixerTrack {
     pub volume: f32,
     pub pan: f32,
     pub muted: bool,
+    /// Solo-in-place (MIX-012); ignored for the master.
+    pub solo: bool,
     /// Destination of the main output; ignored for the master.
     pub main_out: TrackId,
     pub sends: Vec<Send>,
@@ -54,6 +56,7 @@ impl MixerTrack {
             volume: 1.0,
             pan: 0.0,
             muted: false,
+            solo: false,
             main_out: TrackId::MASTER,
             sends: Vec::new(),
             inserts: Vec::new(),
@@ -426,6 +429,47 @@ impl Mixer {
         self.processing_order().map(|_| ())
     }
 
+    /// Tracks silenced by solo (MIX-012): when any track is soloed, every
+    /// track is silenced except the soloed ones, the tracks feeding them
+    /// and the tracks on their way to the master (main outs and sends).
+    /// The master is never silenced; sidechains are not affected.
+    pub fn silenced_by_solo(&self) -> BTreeSet<TrackId> {
+        let soloed: Vec<TrackId> = self
+            .tracks
+            .iter()
+            .filter(|t| t.solo)
+            .map(|t| t.id)
+            .collect();
+        if soloed.is_empty() {
+            return BTreeSet::new();
+        }
+        // Audio edges only (main out and sends), no sidechains.
+        let mut down: BTreeMap<TrackId, Vec<TrackId>> = BTreeMap::new();
+        let mut up: BTreeMap<TrackId, Vec<TrackId>> = BTreeMap::new();
+        for t in &self.tracks {
+            for d in std::iter::once(t.main_out).chain(t.sends.iter().map(|s| s.dest)) {
+                down.entry(t.id).or_default().push(d);
+                up.entry(d).or_default().push(t.id);
+            }
+        }
+        let mut audible = BTreeSet::new();
+        for graph in [&down, &up] {
+            let mut seen = BTreeSet::new();
+            let mut stack = soloed.clone();
+            while let Some(n) = stack.pop() {
+                if seen.insert(n) {
+                    stack.extend(graph.get(&n).into_iter().flatten().copied());
+                }
+            }
+            audible.extend(seen);
+        }
+        self.tracks
+            .iter()
+            .map(|t| t.id)
+            .filter(|t| !audible.contains(t))
+            .collect()
+    }
+
     /// Tracks that can receive signal from `from` (main out, send or
     /// sidechain source) without creating a cycle. Used by the UI to offer
     /// only valid destinations (MIX-021).
@@ -547,6 +591,23 @@ mod tests {
             }),
         });
         assert!(matches!(m.validate(), Err(RoutingError::Cycle(_))));
+    }
+
+    #[test]
+    fn solo_keeps_sources_and_path_to_master() {
+        let mut m = mixer(5);
+        // T1, T2 → T3 (bus) → master; T3 sends to T4 (return); T5 alone.
+        m.tracks[0].main_out = TrackId(3);
+        m.tracks[1].main_out = TrackId(3);
+        m.tracks[2].sends.push(send(100, 4));
+        assert!(m.silenced_by_solo().is_empty());
+        m.tracks[2].solo = true;
+        let silenced: Vec<u64> = m.silenced_by_solo().iter().map(|t| t.0).collect();
+        assert_eq!(silenced, [5]);
+        m.tracks[2].solo = false;
+        m.tracks[0].solo = true;
+        let silenced: Vec<u64> = m.silenced_by_solo().iter().map(|t| t.0).collect();
+        assert_eq!(silenced, [2, 5]);
     }
 
     #[test]

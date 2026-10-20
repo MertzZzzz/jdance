@@ -1,6 +1,6 @@
 {
   "format": "jdance-project",
-  "format_version": 2,
+  "format_version": 3,
   "project": {
     "channels": [
       {
@@ -58,6 +58,7 @@
         "name": "Master",
         "pan": 0.0,
         "sends": [],
+        "solo": false,
         "volume": 1.0
       },
       "tracks": [
@@ -69,6 +70,7 @@
           "name": "Kick",
           "pan": 0.0,
           "sends": [],
+          "solo": false,
           "volume": 1.0
         },
         {
@@ -97,6 +99,7 @@
           "name": "Perc",
           "pan": 0.0,
           "sends": [],
+          "solo": false,
           "volume": 1.0
         }
       ]

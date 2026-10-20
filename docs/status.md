@@ -54,7 +54,7 @@
 | Меню routing только с допустимыми целями (MIX-021) | PASS (код + скриншот) | `Mixer::valid_destinations`, `valid_sidechain_sources` |
 | Удаление трека и undo (MIX-022, MIX-061) | PASS | `commands` тест: точный undo/redo |
 | Mute/pre-fader/sidechain независим от mute (MIX-012) | PASS | `engine/tests/mixer.rs` |
-| Solo (MIX-012) | NOT RUN | не реализовано |
+| Solo (MIX-012) | PASS | solo-in-place: источники и путь к master слышны; `domain` и `engine` тесты |
 | PDC по графу (MIX-030), тесты MIX-035 (1–3, 5) | PASS | `engine/tests/mixer.rs`, property-тест 48 случайных графов; мутационная проверка: без PDC 4 теста падают |
 | PDC для автоматизации (MIX-035 (4)) | NOT RUN | автоматизации ещё нет |
 | Лимит компенсации (MIX-031) | PASS (код) | `MAX_PDC_SAMPLES`, флаг в UI |
@@ -63,7 +63,7 @@
 | Latency по трекам и master в UI (MIX-034) | PASS (скриншот) | панель Mixer |
 | Встроенный компрессор с sidechain (MIX-040) | PASS | `dsp/src/compressor.rs` тесты |
 | Нет аллокаций в render с полным графом (RT-001) | PASS | `engine/tests/rt_alloc.rs` |
-| Формат проекта v2 + миграция v1 (PER-001) | PASS | `persistence` тест миграции |
+| Формат проекта v3 + миграции v1→v2→v3 (PER-001) | PASS | `persistence` тест миграции |
 | Бюджет stress-проекта (MIX-060) | NOT RUN | fixture `stress-mvp` не создан |
 
 ## Milestone 1A / 1B
@@ -79,4 +79,4 @@
 
 - Ресемплинг сэмплов без anti-aliasing (BLD-041, ADR-012).
 - Один паттерн; piano roll, playlist, автоматизация, плагины — не начаты.
-- Нет solo; нет reverb/delay среди встроенных эффектов.
+- Нет reverb/delay среди встроенных эффектов.

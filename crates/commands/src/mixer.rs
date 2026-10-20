@@ -104,6 +104,18 @@ pub(crate) fn apply(edit: &Edit, p: &mut Project) -> Result<Edit, EditError> {
                 std::mem::replace(&mut t.muted, *m),
             ))
         }
+        Edit::SetTrackSolo(id, solo) => {
+            let t = track_mut(p, *id)?;
+            if t.is_master() {
+                return Err(EditError::Routing(RoutingError::InvalidValue(
+                    "the master track cannot be soloed".into(),
+                )));
+            }
+            Ok(Edit::SetTrackSolo(
+                *id,
+                std::mem::replace(&mut t.solo, *solo),
+            ))
+        }
         Edit::RenameTrack(id, name) => {
             let t = track_mut(p, *id)?;
             Ok(Edit::RenameTrack(
