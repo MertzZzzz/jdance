@@ -16,8 +16,16 @@ pub struct UserSettings {
     pub plugin_paths: Vec<PathBuf>,
 }
 
+/// Unit tests point the configuration directory here.
+#[cfg(test)]
+pub static TEST_DIR: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
 /// `JDANCE_CONFIG_DIR` overrides the platform location (used by tests/CI).
 pub fn config_dir() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(dir) = TEST_DIR.lock().ok().and_then(|d| d.clone()) {
+        return Some(dir);
+    }
     if let Some(dir) = std::env::var_os("JDANCE_CONFIG_DIR") {
         return Some(PathBuf::from(dir));
     }

@@ -463,6 +463,9 @@ fn plugin_params_ui(ui: &mut egui::Ui, ins: &Insert, host: &mut dyn Host) {
             ui.visuals().warn_fg_color,
             format!("{why}. Audio passes through; the saved state is kept."),
         );
+        if host.plugin_held_back(ins.id) && ui.button("Load again").clicked() {
+            host.retry_plugin(ins.id);
+        }
         return;
     };
     if params.is_empty() {
@@ -512,9 +515,42 @@ fn plugin_param_row(ui: &mut egui::Ui, ins: &Insert, p: &PluginParamView, host: 
             ui.add(egui::Slider::new(&mut v, 0.0..=1.0).show_value(false))
                 .changed()
         };
-        ui.label(&p.text);
         if changed {
             host.set_plugin_param(ins.id, p.info.id, v);
+        }
+        // The value text doubles as a text field (PLG-064).
+        let id = egui::Id::unique(("plugin_text", ins.id.0, p.info.id));
+        let edit_id = id.with("edit");
+        let editing: Option<String> = ui.data(|d| d.get_temp(id));
+        match editing {
+            None => {
+                if ui
+                    .add(egui::Button::new(&p.text).frame(false))
+                    .on_hover_text("Click to type a value")
+                    .clicked()
+                {
+                    ui.data_mut(|d| d.insert_temp(id, String::new()));
+                    ui.memory_mut(|m| m.request_focus(edit_id));
+                }
+            }
+            Some(mut text) => {
+                let r = ui.add(
+                    egui::TextEdit::singleline(&mut text)
+                        .id(edit_id)
+                        .hint_text(&p.text)
+                        .desired_width(70.0),
+                );
+                if r.lost_focus() {
+                    if ui.input(|i| i.key_pressed(egui::Key::Enter))
+                        && let Some(v) = host.plugin_param_from_text(ins.id, p.info.id, &text)
+                    {
+                        host.set_plugin_param(ins.id, p.info.id, v);
+                    }
+                    ui.data_mut(|d| d.remove::<String>(id));
+                } else {
+                    ui.data_mut(|d| d.insert_temp(id, text));
+                }
+            }
         }
     });
 }

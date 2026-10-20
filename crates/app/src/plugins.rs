@@ -21,6 +21,19 @@ use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 
 const CACHE_FILE: &str = "plugins.json";
+/// Written while a plugin is being instantiated; found at start-up it
+/// means the instantiation crashed the application (PLG-025).
+const LOADING_MARKER: &str = "plugin-loading.json";
+
+#[derive(Debug, Serialize, Deserialize)]
+struct LoadingMarker {
+    class_id: String,
+    name: String,
+}
+
+fn marker_path() -> Option<PathBuf> {
+    config::config_dir().map(|d| d.join(LOADING_MARKER))
+}
 
 /// Cache key of a module (PLG-022 step 6).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +79,10 @@ pub struct ModuleEntry {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Catalog {
     pub modules: BTreeMap<PathBuf, ModuleEntry>,
+    /// Classes whose instantiation crashed the application: not loaded
+    /// automatically until the user asks (PLG-025). Class id → name.
+    #[serde(default)]
+    pub crashed: BTreeMap<String, String>,
 }
 
 impl Catalog {
@@ -113,7 +130,10 @@ impl Catalog {
     /// every module is scanned again, blocklisted ones included
     /// (PLG-023/024).
     pub fn rescan(&self, roots: &[PathBuf], scanner: &Path, full: bool) -> Self {
-        let mut out = Catalog::default();
+        let mut out = Catalog {
+            crashed: self.crashed.clone(),
+            ..Catalog::default()
+        };
         for path in find_modules(roots) {
             let key = ModuleKey::of(&path);
             if !full
@@ -222,7 +242,24 @@ fn plugin_inserts(project: &Project) -> impl Iterator<Item = (InsertId, &PluginS
 }
 
 impl PluginHost {
-    pub fn new(catalog: Catalog) -> Self {
+    /// Also checks for a plugin that crashed the previous run; its name is
+    /// returned for a notice.
+    pub fn new(mut catalog: Catalog) -> (Self, Option<String>) {
+        let mut crashed = None;
+        if let Some(path) = marker_path()
+            && let Ok(bytes) = std::fs::read(&path)
+        {
+            if let Ok(m) = serde_json::from_slice::<LoadingMarker>(&bytes) {
+                crashed = Some(m.name.clone());
+                catalog.crashed.insert(m.class_id, m.name);
+                let _ = catalog.save_cached();
+            }
+            let _ = std::fs::remove_file(&path);
+        }
+        (Self::with_catalog(catalog), crashed)
+    }
+
+    pub fn with_catalog(catalog: Catalog) -> Self {
         Self {
             catalog,
             modules: ModuleCache::default(),
@@ -268,7 +305,35 @@ impl PluginHost {
             if self.live.contains_key(&id) {
                 continue;
             }
-            match create_instance(&self.catalog, &self.modules, &slot, &self.setup) {
+            if self.catalog.crashed.contains_key(&slot.class_id) {
+                let reason = "crashed the application when it was last loaded".to_owned();
+                if self
+                    .failed
+                    .insert((id, slot.class_id.clone()), reason)
+                    .is_none()
+                {
+                    messages.push(format!(
+                        "Plugin {} was not loaded: it crashed the application last time. \
+                         Use \"Load again\" in its slot to retry.",
+                        slot.name
+                    ));
+                }
+                continue;
+            }
+            let marker = marker_path();
+            if let Some(path) = &marker
+                && let Ok(bytes) = serde_json::to_vec(&LoadingMarker {
+                    class_id: slot.class_id.clone(),
+                    name: slot.name.clone(),
+                })
+            {
+                let _ = jdance_persistence::write_atomically(path, &bytes);
+            }
+            let created = create_instance(&self.catalog, &self.modules, &slot, &self.setup);
+            if let Some(path) = &marker {
+                let _ = std::fs::remove_file(path);
+            }
+            match created {
                 Ok((processor, controller)) => {
                     self.failed.retain(|(i, _), _| *i != id);
                     self.live.insert(
@@ -413,6 +478,29 @@ impl PluginHost {
         self.live.get_mut(&id).map(|l| &mut l.controller)
     }
 
+    /// Whether the plugin in `id` is held back after a crash (PLG-025).
+    pub fn held_back(&self, id: InsertId) -> bool {
+        self.failed
+            .keys()
+            .any(|(i, class)| *i == id && self.catalog.crashed.contains_key(class))
+    }
+
+    /// Allows a held-back plugin class to load again; the next sync
+    /// tries it.
+    pub fn retry(&mut self, id: InsertId) {
+        let classes: Vec<String> = self
+            .failed
+            .keys()
+            .filter(|(i, _)| *i == id)
+            .map(|(_, c)| c.clone())
+            .collect();
+        for c in classes {
+            self.catalog.crashed.remove(&c);
+            self.failed.retain(|(_, fc), _| *fc != c);
+        }
+        let _ = self.catalog.save_cached();
+    }
+
     pub fn problem(&self, id: InsertId) -> Option<String> {
         if self.live.contains_key(&id) {
             return None;
@@ -421,5 +509,78 @@ impl PluginHost {
             .iter()
             .find(|((i, _), _)| *i == id)
             .map(|(_, e)| e.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jdance_domain::{Effect, Insert};
+
+    #[test]
+    fn plugin_that_crashed_last_run_is_held_back_until_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        // The only test in this crate that touches the config directory.
+        *config::TEST_DIR.lock().unwrap() = Some(dir.path().to_path_buf());
+        let bundle = jdance_test_support::test_plugin_bundle(jdance_plugin_vst3::bundle_binary);
+        let descriptors = jdance_plugin_vst3::scan_in_process(bundle).unwrap();
+        let gain = descriptors
+            .iter()
+            .find(|d| d.plugin.name == "JD Test Gain")
+            .unwrap()
+            .clone();
+        let mut catalog = Catalog::default();
+        catalog.modules.insert(
+            bundle.to_path_buf(),
+            ModuleEntry {
+                key: None,
+                result: ModuleResult::Ok(descriptors),
+            },
+        );
+        // A previous run died while loading the plugin.
+        let marker = dir.path().join(LOADING_MARKER);
+        let m = LoadingMarker {
+            class_id: gain.plugin.class_id.clone(),
+            name: gain.plugin.name.clone(),
+        };
+        std::fs::write(&marker, serde_json::to_vec(&m).unwrap()).unwrap();
+
+        let (mut host, crashed) = PluginHost::new(catalog);
+        assert_eq!(crashed.as_deref(), Some("JD Test Gain"));
+        assert!(!marker.exists());
+        assert!(
+            Catalog::load_cached()
+                .crashed
+                .contains_key(&gain.plugin.class_id)
+        );
+
+        let mut p = Project::new();
+        let id = InsertId(p.ids.next());
+        p.mixer.master.inserts.push(Insert {
+            id,
+            bypass: false,
+            effect: Effect::plugin(PluginSlot {
+                format: "vst3".into(),
+                class_id: gain.plugin.class_id.clone(),
+                name: gain.plugin.name.clone(),
+                vendor: gain.plugin.vendor.clone(),
+                version: gain.plugin.version.clone(),
+                category: gain.category.clone(),
+                component_state: Vec::new(),
+                controller_state: Vec::new(),
+            }),
+            sidechain: None,
+        });
+        let messages = host.sync(&p, 48_000, 1);
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        assert!(host.controller(id).is_none());
+        assert!(host.held_back(id));
+
+        host.retry(id);
+        assert!(host.sync(&p, 48_000, 1).is_empty());
+        assert!(host.controller(id).is_some());
+        assert!(!host.held_back(id));
+        assert!(!marker.exists(), "marker removed after a successful load");
+        *config::TEST_DIR.lock().unwrap() = None;
     }
 }

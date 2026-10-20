@@ -138,10 +138,11 @@
 | Каталог: кеш по (path, size, mtime, arch), blocklist с причиной, инкрементальный scan при старте, full rescan (PLG-022..024) | PASS | `scan_plugin_prints_descriptors_or_fails_cleanly`; ручная проверка: тестовый плагин найден при старте |
 | Пользовательские папки плагинов в настройках (PLG-020) | PASS (ручная) | окно Plugins |
 | Добавление плагина из меню «+ Effect → VST3» | PASS (ручная) | скриншот на Xvfb |
-| Generic editor: все параметры, текст значения от плагина, дискретные и read-only (PLG-064) | PASS (ручная) | ввод значения текстом NOT RUN |
+| Generic editor: все параметры, текст значения от плагина, дискретные и read-only, ввод значения текстом (PLG-064) | PASS (ручная) | Xvfb + XTest: «0.5» → Gain 0.500 |
 | Окно GUI плагина: нативное окно на ОС, attach, `resizeView`, IRunLoop на Linux, закрытие и повторное открытие (PLG-060..063) | PASS (тестовый плагин) | `plugin-vst3/tests/editor.rs` (Linux под Xvfb, Windows и macOS в CI); ручная проверка на Xvfb: кнопка Edit; реальные плагины с GUI NOT RUN |
 | HiDPI, owner-окно, клавиатура для редакторов | NOT RUN | ADR-010, последствия |
-| Защита от crash-loop при открытии проекта (PLG-025), autosave (PLG-075) | NOT RUN | |
+| Защита от crash-loop: маркер загрузки, плагин после падения не грузится сам, «Load again» в слоте (PLG-025) | PASS | `plugin_that_crashed_last_run_is_held_back_until_retried` |
+| Autosave (PLG-075) | NOT RUN | |
 | Undo для изменений параметров плагина | NOT RUN | изменения в generic editor сейчас без undo |
 
 ## Milestone 1A / 1B

@@ -122,6 +122,13 @@ impl AudioHost {
             }
             None => UserSettings::default(),
         };
+        let (plugins, crashed) = PluginHost::new(Catalog::load_cached());
+        if let Some(name) = crashed {
+            notices.push(Notice::error(format!(
+                "The plugin {name} crashed jdance while loading. It will not be loaded \
+                 automatically; use \"Load again\" in its mixer slot to retry."
+            )));
+        }
         Self {
             backends,
             active: None,
@@ -137,7 +144,7 @@ impl AudioHost {
             settings_path,
             notices,
             exports: Vec::new(),
-            plugins: PluginHost::new(Catalog::load_cached()),
+            plugins,
             engine_generation: 0,
             scan: None,
         }
@@ -654,6 +661,10 @@ impl Host for AudioHost {
         }
     }
 
+    fn plugin_param_from_text(&mut self, insert: InsertId, id: u32, text: &str) -> Option<f64> {
+        self.plugins.controller(insert)?.param_from_text(id, text)
+    }
+
     fn toggle_plugin_editor(&mut self, insert: InsertId, title: &str) {
         if let Err(e) = self.plugins.toggle_editor(insert, title) {
             self.notices
@@ -667,6 +678,15 @@ impl Host for AudioHost {
 
     fn any_plugin_editor_open(&self) -> bool {
         self.plugins.any_editor_open()
+    }
+
+    fn plugin_held_back(&self, insert: InsertId) -> bool {
+        self.plugins.held_back(insert)
+    }
+
+    fn retry_plugin(&mut self, insert: InsertId) {
+        self.plugins.retry(insert);
+        self.needs_compile = true;
     }
 
     fn plugin_problem(&self, insert: InsertId) -> Option<String> {
