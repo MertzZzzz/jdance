@@ -24,6 +24,9 @@ sudo apt-get install -y libxkbcommon-x11-0 libgl1-mesa-dri
 Без `libxkbcommon-x11` окно на X11 не откроется (panic при старте).
 Это runtime-зависимость, её нужно указать в пакете (ADR-011).
 
+Рендерер: сначала OpenGL (glow), при ошибке — wgpu. Порядок можно задать
+переменной `JDANCE_RENDERER` (`glow`, `wgpu` или `wgpu,glow`).
+
 Headless smoke test GUI: `xvfb-run -a ./target/release/jdance --smoke-test-frames 60`.
 
 ## Windows 11 x86_64

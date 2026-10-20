@@ -7,7 +7,7 @@
 | Crate | Версия | Лицензия | Где | Назначение | Native-компоненты |
 |---|---|---|---|---|---|
 | cpal | 0.18.2 | Apache-2.0 | audio-cpal | audio I/O: WASAPI, CoreAudio, ALSA, JACK | Linux: libasound (ALSA), libjack (JACK) |
-| eframe | 0.37.0 | MIT OR Apache-2.0 | ui, app | окно, event loop, OpenGL (glow) | Linux: libxkbcommon-x11, libGL (dlopen) |
+| eframe | 0.37.0 | MIT OR Apache-2.0 | ui, app | окно, event loop; рендереры glow (OpenGL) и wgpu (запасной: DX12/Vulkan/Metal) | Linux: libxkbcommon-x11, libGL (dlopen) |
 | egui | 0.37.0 | MIT OR Apache-2.0 | ui | immediate-mode UI | — |
 | rfd | 0.17.2 | MIT | ui | системные файловые диалоги | Linux: XDG desktop portal (D-Bus) |
 | hound | 3.5.1 | Apache-2.0 | persistence, test-support | чтение/запись WAV | — |

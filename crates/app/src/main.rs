@@ -193,29 +193,97 @@ fn cmd_gui(args: &[String]) -> Result<(), String> {
         jdance_ui::Host::play(&mut audio);
     }
 
-    let options = eframe::NativeOptions {
+    // Renderer fallback (ADR-002, open): OpenGL first; if the system has
+    // no OpenGL 2+ (RDP sessions, VMs, CI runners) retry with wgpu, which
+    // uses DX12/Vulkan/Metal and on Windows can fall back to WARP.
+    let mut state = Some((audio, project, path, startup_error));
+    let mut last_error = String::new();
+    // `JDANCE_RENDERER=glow`, `wgpu` or a comma-separated order (diagnostics).
+    let renderers: Vec<eframe::Renderer> = std::env::var("JDANCE_RENDERER")
+        .ok()
+        .map(|v| {
+            v.split(',')
+                .filter_map(|r| match r.trim() {
+                    "glow" => Some(eframe::Renderer::Glow),
+                    "wgpu" => Some(eframe::Renderer::Wgpu),
+                    _ => None,
+                })
+                .collect()
+        })
+        .filter(|v: &Vec<_>| !v.is_empty())
+        .unwrap_or_else(|| vec![eframe::Renderer::Glow, eframe::Renderer::Wgpu]);
+    for renderer in renderers {
+        let Some((audio, project, path, startup_error)) = state.take() else {
+            break;
+        };
+        // The closure owns the app state; if the renderer fails before
+        // calling it, the state comes back through `returned`.
+        let returned = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let back = std::rc::Rc::clone(&returned);
+        let started = std::rc::Rc::new(std::cell::Cell::new(false));
+        let started_flag = std::rc::Rc::clone(&started);
+        let guard = ReturnOnDrop {
+            state: Some((audio, project, path, startup_error)),
+            back,
+        };
+        let options = native_options(renderer);
+        let result = eframe::run_native(
+            jdance_ui::APP_NAME,
+            options,
+            Box::new(move |_cc| {
+                started_flag.set(true);
+                let mut guard = guard;
+                let (audio, project, path, startup_error) =
+                    guard.state.take().expect("app state present");
+                let mut app = jdance_ui::JdanceApp::new(audio, FileStore, project, path);
+                if let Some(e) = startup_error {
+                    app = app.with_startup_notice(jdance_ui::Notice::error(e));
+                }
+                if let Some(n) = smoke {
+                    app = app.with_auto_close(n);
+                }
+                Ok(Box::new(app))
+            }),
+        );
+        match result {
+            Ok(()) => return Ok(()),
+            Err(e) if !started.get() => {
+                eprintln!("warning: {renderer:?} renderer unavailable: {e}");
+                last_error = e.to_string();
+                state = returned.borrow_mut().take();
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Err(format!("no usable graphics renderer: {last_error}"))
+}
+
+type AppState = (host::AudioHost, Project, Option<PathBuf>, Option<String>);
+
+/// Hands the app state back if eframe drops the creator without calling it.
+struct ReturnOnDrop {
+    state: Option<AppState>,
+    back: std::rc::Rc<std::cell::RefCell<Option<AppState>>>,
+}
+
+impl Drop for ReturnOnDrop {
+    fn drop(&mut self) {
+        if let Some(s) = self.state.take() {
+            *self.back.borrow_mut() = Some(s);
+        }
+    }
+}
+
+fn native_options(renderer: eframe::Renderer) -> eframe::NativeOptions {
+    eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title(jdance_ui::APP_NAME)
-            .with_inner_size([1100.0, 640.0])
+            .with_inner_size([1100.0, 720.0])
             .with_min_inner_size([640.0, 360.0])
             .with_drag_and_drop(true),
+        renderer,
         ..Default::default()
-    };
-    eframe::run_native(
-        jdance_ui::APP_NAME,
-        options,
-        Box::new(move |_cc| {
-            let mut app = jdance_ui::JdanceApp::new(audio, FileStore, project, path);
-            if let Some(e) = startup_error {
-                app = app.with_startup_notice(jdance_ui::Notice::error(e));
-            }
-            if let Some(n) = smoke {
-                app = app.with_auto_close(n);
-            }
-            Ok(Box::new(app))
-        }),
-    )
-    .map_err(|e| e.to_string())
+    }
 }
 
 #[cfg(test)]
