@@ -1,0 +1,14 @@
+[package]
+name = "jdance-plugin-api"
+description = "Format-neutral plugin hosting interfaces (PLG-010). No format implementation yet."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+
+[lints]
+workspace = true

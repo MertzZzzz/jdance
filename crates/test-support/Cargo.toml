@@ -1,0 +1,16 @@
+[package]
+name = "jdance-test-support"
+description = "Test helpers: signal generators, buffer comparison, golden files, fixture projects."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+jdance-domain.workspace = true
+jdance-dsp.workspace = true
+hound.workspace = true
+
+[lints]
+workspace = true

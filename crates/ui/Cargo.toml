@@ -1,0 +1,19 @@
+[package]
+name = "jdance-ui"
+description = "egui user interface: channel rack, transport, audio settings."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+jdance-audio-api.workspace = true
+jdance-commands.workspace = true
+jdance-domain.workspace = true
+eframe.workspace = true
+egui.workspace = true
+rfd.workspace = true
+
+[lints]
+workspace = true

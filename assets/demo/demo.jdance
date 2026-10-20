@@ -1,0 +1,276 @@
+{
+  "format": "jdance-project",
+  "format_version": 1,
+  "project": {
+    "channels": [
+      {
+        "id": 2,
+        "muted": false,
+        "name": "Kick",
+        "pan": 0.0,
+        "source": {
+          "kind": "sampler",
+          "sample": {
+            "path": "samples/kick.wav"
+          }
+        },
+        "volume": 0.800000011920929
+      },
+      {
+        "id": 3,
+        "muted": false,
+        "name": "Snare",
+        "pan": 0.05000000074505806,
+        "source": {
+          "kind": "sampler",
+          "sample": {
+            "path": "samples/snare.wav"
+          }
+        },
+        "volume": 0.800000011920929
+      },
+      {
+        "id": 4,
+        "muted": false,
+        "name": "Hat",
+        "pan": -0.20000000298023224,
+        "source": {
+          "kind": "sampler",
+          "sample": {
+            "path": "samples/hat.wav"
+          }
+        },
+        "volume": 0.800000011920929
+      }
+    ],
+    "ids": {
+      "next": 5
+    },
+    "mixer": {
+      "master": {
+        "id": 0,
+        "muted": false,
+        "name": "Master",
+        "pan": 0.0,
+        "volume": 1.0
+      }
+    },
+    "patterns": [
+      {
+        "id": 1,
+        "length_steps": 16,
+        "name": "Pattern 1",
+        "rows": [
+          {
+            "channel": 2,
+            "steps": [
+              {
+                "on": true,
+                "velocity": 0.800000011920929
+              },
+              {
+                "on": false,
+                "velocity": 0.800000011920929
+              },
+              {
+                "on": false,
+                "velocity": 0.800000011920929
+              },
+              {
+                "on": false,
+                "velocity": 0.800000011920929
+              },
+              {
+                "on": true,
+                "velocity": 0.800000011920929
+              },
+              {
+                "on": false,
+                "velocity": 0.800000011920929
+              },
+              {
+                "on": false,
+                "velocity": 0.800000011920929
+              },
+              {
+                "on": false,
+                "velocity": 0.800000011920929
+              },
+              {
+                "on": true,
+                "velocity": 0.800000011920929
+              },
+              {
+                "on": false,
+                "velocity": 0.800000011920929
+              },
+              {
+                "on": false,
+                "velocity": 0.800000011920929
+              },
+              {
+                "on": false,
+                "velocity": 0.800000011920929
+              },
+              {
+                "on": true,
+                "velocity": 0.800000011920929
+              },
+              {
+                "on": false,
+                "velocity": 0.800000011920929
+              },
+              {
+                "on": false,
+                "velocity": 0.800000011920929
+              },
+              {
+                "on": false,
+                "velocity": 0.800000011920929
+              }
+            ]
+          },
+          {
+            "channel": 3,
+            "steps": [
+              {
+                "on": false,
+                "velocity": 0.800000011920929
+              },
+              {
+                "on": false,
+                "velocity": 0.800000011920929
+              },
+              {
+                "on": false,
+                "velocity": 0.800000011920929
+              },
+              {
+                "on": false,
+                "velocity": 0.800000011920929
+              },
+              {
+                "on": true,
+                "velocity": 0.800000011920929
+              },
+              {
+                "on": false,
+                "velocity": 0.800000011920929
+              },
+              {
+                "on": false,
+                "velocity": 0.800000011920929
+              },
+              {
+                "on": false,
+                "velocity": 0.800000011920929
+              },
+              {
+                "on": false,
+                "velocity": 0.800000011920929
+              },
+              {
+                "on": false,
+                "velocity": 0.800000011920929
+              },
+              {
+                "on": false,
+                "velocity": 0.800000011920929
+              },
+              {
+                "on": false,
+                "velocity": 0.800000011920929
+              },
+              {
+                "on": true,
+                "velocity": 0.800000011920929
+              },
+              {
+                "on": false,
+                "velocity": 0.800000011920929
+              },
+              {
+                "on": false,
+                "velocity": 0.800000011920929
+              },
+              {
+                "on": false,
+                "velocity": 0.800000011920929
+              }
+            ]
+          },
+          {
+            "channel": 4,
+            "steps": [
+              {
+                "on": false,
+                "velocity": 0.800000011920929
+              },
+              {
+                "on": false,
+                "velocity": 0.800000011920929
+              },
+              {
+                "on": true,
+                "velocity": 0.800000011920929
+              },
+              {
+                "on": false,
+                "velocity": 0.800000011920929
+              },
+              {
+                "on": false,
+                "velocity": 0.800000011920929
+              },
+              {
+                "on": false,
+                "velocity": 0.800000011920929
+              },
+              {
+                "on": true,
+                "velocity": 0.800000011920929
+              },
+              {
+                "on": false,
+                "velocity": 0.800000011920929
+              },
+              {
+                "on": false,
+                "velocity": 0.800000011920929
+              },
+              {
+                "on": false,
+                "velocity": 0.800000011920929
+              },
+              {
+                "on": true,
+                "velocity": 0.800000011920929
+              },
+              {
+                "on": false,
+                "velocity": 0.800000011920929
+              },
+              {
+                "on": false,
+                "velocity": 0.800000011920929
+              },
+              {
+                "on": false,
+                "velocity": 0.800000011920929
+              },
+              {
+                "on": true,
+                "velocity": 0.800000011920929
+              },
+              {
+                "on": true,
+                "velocity": 0.800000011920929
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "tempo_bpm": 124.0
+  }
+}

@@ -1,0 +1,22 @@
+[package]
+name = "jdance-engine"
+description = "Transport, scheduler, voice lifecycle, realtime processor and offline rendering."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+jdance-domain.workspace = true
+jdance-dsp.workspace = true
+rtrb.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+jdance-rt-check.workspace = true
+jdance-test-support.workspace = true
+proptest.workspace = true
+
+[lints]
+workspace = true
