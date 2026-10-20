@@ -10,6 +10,7 @@ publish.workspace = true
 [dependencies]
 jdance-domain.workspace = true
 jdance-dsp.workspace = true
+jdance-plugin-api.workspace = true
 rtrb.workspace = true
 thiserror.workspace = true
 

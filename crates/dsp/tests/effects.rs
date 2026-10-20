@@ -20,6 +20,7 @@ fn make(kind: EffectKind, sr: u32, overrides: &[(&str, f32)]) -> Box<dyn Process
         EffectKind::TempoDelay => Box::new(TempoDelay::new()),
         EffectKind::Reverb => Box::new(Reverb::new()),
         EffectKind::Compressor => Box::new(Compressor::new()),
+        EffectKind::Plugin => unreachable!("plugins are not DSP built-ins"),
     };
     for (i, spec) in kind.params().iter().enumerate() {
         let v = overrides

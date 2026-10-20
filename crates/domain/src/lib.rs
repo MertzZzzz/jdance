@@ -10,6 +10,7 @@ mod export;
 mod ids;
 mod mixer;
 mod playlist;
+mod plugin;
 
 pub use effects::{
     DELAY_DIVISIONS, EQ_MAX_FREQ, Effect, EffectKind, LimiterSettings, Mapping, ParamSpec,
@@ -24,6 +25,7 @@ pub use mixer::{
     MixerTrack, RoutingError, Send, Sidechain, Tap,
 };
 pub use playlist::{LANE_COLORS, Lane, MAX_REPEAT, MAX_START_TICKS, PatternClip, Playlist};
+pub use plugin::{PluginSlot, base64};
 
 use serde::{Deserialize, Serialize};
 

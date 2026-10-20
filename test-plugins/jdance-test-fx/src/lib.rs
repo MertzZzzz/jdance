@@ -249,7 +249,7 @@ impl IComponentTrait for Processor {
             };
             copy_wstring(name, &mut bus.name);
             bus.busType = BusTypes_::kMain as BusType;
-            bus.flags = BusInfo_::BusFlags_::kDefaultActive;
+            bus.flags = BusInfo_::BusFlags_::kDefaultActive as u32;
         } else {
             copy_wstring("Sidechain", &mut bus.name);
             bus.busType = BusTypes_::kAux as BusType;
@@ -745,7 +745,7 @@ impl IPluginFactory2Trait for Factory {
         info.classFlags = if controller {
             0
         } else {
-            ComponentFlags_::kDistributable
+            ComponentFlags_::kDistributable as u32
         };
         let sub = if mode == Mode::Sidechain {
             "Fx|Dynamics"

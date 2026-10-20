@@ -1263,6 +1263,7 @@ version = "0.1.0"
 dependencies = [
  "jdance-domain",
  "jdance-dsp",
+ "jdance-plugin-api",
  "jdance-rt-check",
  "jdance-test-support",
  "proptest",

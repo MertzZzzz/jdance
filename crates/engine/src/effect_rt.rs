@@ -14,6 +14,7 @@ use jdance_dsp::{
     Compressor, DelayLine, ParametricEq, ProcessContext, Processor, Reverb, Smoothed, Tail,
     TempoDelay,
 };
+use jdance_plugin_api::{PluginProcessor, Transport};
 
 /// Bypass crossfade length, ≈ 10 ms.
 fn xfade_len(sample_rate: u32) -> u32 {
@@ -23,12 +24,117 @@ fn xfade_len(sample_rate: u32) -> u32 {
 /// Buffer samples cleared per block during a reset.
 pub const RESET_BUDGET: usize = 16_384;
 
-#[derive(Debug, Clone)]
+/// A hosted plugin in an insert slot.
+///
+/// The host creates the instance once and sends it in one snapshot; later
+/// snapshots are compiled without it ([`PluginRt::carried`]) and take it
+/// over on the swap, so an instance is never rebuilt by a recompile. A
+/// slot without an instance passes audio through, delayed by the declared
+/// latency so delay compensation still holds (missing plugin, PLG-072).
+pub struct PluginRt {
+    processor: Option<Box<dyn PluginProcessor>>,
+    latency: u32,
+    /// Takes over the instance of the same slot in the previous snapshot.
+    carried: bool,
+    fallback: DelayLine,
+    transport: Transport,
+}
+
+impl std::fmt::Debug for PluginRt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PluginRt")
+            .field("instance", &self.processor.is_some())
+            .field("latency", &self.latency)
+            .field("carried", &self.carried)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PluginRt {
+    /// A new instance; its latency comes from the instance.
+    pub fn fresh(processor: Box<dyn PluginProcessor>) -> Self {
+        let latency = processor.latency_samples();
+        Self {
+            processor: Some(processor),
+            latency,
+            carried: false,
+            fallback: DelayLine::new(latency as usize),
+            transport: Transport::default(),
+        }
+    }
+
+    /// The instance already sent in an earlier snapshot, with its current
+    /// latency.
+    pub fn carried(latency: u32) -> Self {
+        Self {
+            processor: None,
+            latency,
+            carried: true,
+            fallback: DelayLine::new(latency as usize),
+            transport: Transport::default(),
+        }
+    }
+
+    /// No instance (plugin missing or failed to load): pass-through.
+    pub fn missing() -> Self {
+        Self {
+            processor: None,
+            latency: 0,
+            carried: false,
+            fallback: DelayLine::new(0),
+            transport: Transport::default(),
+        }
+    }
+
+    pub fn has_instance(&self) -> bool {
+        self.processor.is_some()
+    }
+
+    fn take_state(&mut self, old: &mut PluginRt) {
+        if self.carried && self.processor.is_none() {
+            self.processor = old.processor.take();
+        }
+        self.fallback.take_state(&mut old.fallback);
+    }
+}
+
+impl Processor for PluginRt {
+    fn prepare(&mut self, _sample_rate: u32, _max_block: usize) {}
+
+    /// Plugin parameters go through the plugin controller (PLG-042).
+    fn set_param(&mut self, _index: usize, _value: f32) {}
+
+    fn settle(&mut self) {}
+
+    fn process_block(&mut self, l: &mut [f32], r: &mut [f32], ctx: &ProcessContext) {
+        match &mut self.processor {
+            Some(p) => p.process(l, r, ctx.sidechain, &self.transport),
+            None => self.fallback.process(l, r),
+        }
+    }
+
+    /// VST3 has no realtime reset; the plugin keeps its state. Reported
+    /// clean so bypass and Stop never wait on it.
+    fn reset_step(&mut self, _max_samples: usize) -> bool {
+        true
+    }
+
+    fn latency_frames(&self) -> u32 {
+        self.latency
+    }
+
+    fn tail(&self) -> Tail {
+        Tail::None
+    }
+}
+
+#[derive(Debug)]
 pub enum EffectRt {
     Eq(ParametricEq),
     Delay(TempoDelay),
     Reverb(Reverb),
     Compressor(Compressor),
+    Plugin(PluginRt),
 }
 
 impl EffectRt {
@@ -43,6 +149,7 @@ impl EffectRt {
             }
             EffectKind::Reverb => EffectRt::Reverb(Reverb::new()),
             EffectKind::Compressor => EffectRt::Compressor(Compressor::new()),
+            EffectKind::Plugin => EffectRt::Plugin(PluginRt::missing()),
         };
         let p = rt.processor();
         for (i, spec) in effect.kind.params().iter().enumerate() {
@@ -59,6 +166,7 @@ impl EffectRt {
             EffectRt::Delay(p) => p,
             EffectRt::Reverb(p) => p,
             EffectRt::Compressor(p) => p,
+            EffectRt::Plugin(p) => p,
         }
     }
 
@@ -68,6 +176,7 @@ impl EffectRt {
             EffectRt::Delay(p) => p,
             EffectRt::Reverb(p) => p,
             EffectRt::Compressor(p) => p,
+            EffectRt::Plugin(p) => p,
         }
     }
 
@@ -86,12 +195,13 @@ impl EffectRt {
             (EffectRt::Delay(n), EffectRt::Delay(o)) => n.take_state(o),
             (EffectRt::Reverb(n), EffectRt::Reverb(o)) => n.take_state(o),
             (EffectRt::Compressor(n), EffectRt::Compressor(o)) => n.take_state(o),
+            (EffectRt::Plugin(n), EffectRt::Plugin(o)) => n.take_state(o),
             _ => {}
         }
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct SidechainRt {
     /// Index of the source track (always earlier in processing order).
     pub source: usize,
@@ -99,7 +209,7 @@ pub struct SidechainRt {
     pub delay: DelayLine,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct InsertRt {
     pub id: InsertId,
     /// Delays the main signal before the effect when its sidechain
@@ -153,7 +263,7 @@ impl InsertRt {
         r: &mut [f32],
         dry: (&mut [f32], &mut [f32]),
         sidechain: Option<(&[f32], &[f32])>,
-        tempo_bpm: f64,
+        transport: &Transport,
     ) {
         let n = l.len();
         self.pre_delay.process(l, r);
@@ -177,9 +287,12 @@ impl InsertRt {
             r.copy_from_slice(dr);
             return;
         }
+        if let EffectRt::Plugin(p) = &mut self.effect {
+            p.transport = *transport;
+        }
         let ctx = ProcessContext {
             sidechain,
-            tempo_bpm,
+            tempo_bpm: transport.tempo_bpm,
         };
         self.effect.processor().process_block(l, r, &ctx);
         self.clean = false;
@@ -197,6 +310,14 @@ impl InsertRt {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const T: Transport = Transport {
+        playing: true,
+        tempo_bpm: 120.0,
+        project_time_samples: 0,
+        project_time_quarters: 0.0,
+        cycle: None,
+    };
 
     fn reverb_slot(bypass: bool) -> InsertRt {
         let effect = Effect::new(EffectKind::Reverb)
@@ -219,7 +340,7 @@ mod tests {
             let b = left.min(256);
             let mut l = vec![input; b];
             let mut r = vec![input; b];
-            slot.process(&mut l, &mut r, (&mut dl, &mut dr), None, 120.0);
+            slot.process(&mut l, &mut r, (&mut dl, &mut dr), None, &T);
             out.extend(l);
             left -= b;
         }
@@ -269,7 +390,7 @@ mod tests {
         let mut r = l.clone();
         let mut dl = vec![0.0; MAX_BLOCK];
         let mut dr = vec![0.0; MAX_BLOCK];
-        slot.process(&mut l, &mut r, (&mut dl, &mut dr), None, 120.0);
+        slot.process(&mut l, &mut r, (&mut dl, &mut dr), None, &T);
         assert_eq!(l.iter().position(|v| *v != 0.0), Some(48));
     }
 }

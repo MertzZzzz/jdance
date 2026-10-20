@@ -5,6 +5,7 @@
 //! and smoothing policy. Projects store parameters by ID together with
 //! the schema version, never by position.
 
+use crate::PluginSlot;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -15,6 +16,9 @@ pub enum EffectKind {
     TempoDelay,
     Reverb,
     Compressor,
+    /// A hosted plugin; see [`Effect::plugin`]. Its parameters live in the
+    /// plugin state, not in [`Effect::params`].
+    Plugin,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -306,6 +310,7 @@ const COMPRESSOR_PARAMS: &[ParamSpec] = &[
 ];
 
 impl EffectKind {
+    /// Built-in effects (plugins are added from the plugin browser).
     pub const ALL: [EffectKind; 4] = [
         EffectKind::ParametricEq,
         EffectKind::TempoDelay,
@@ -319,6 +324,7 @@ impl EffectKind {
             EffectKind::TempoDelay => "Tempo Delay",
             EffectKind::Reverb => "Reverb",
             EffectKind::Compressor => "Compressor",
+            EffectKind::Plugin => "Plugin",
         }
     }
 
@@ -333,6 +339,7 @@ impl EffectKind {
             EffectKind::TempoDelay => DELAY_PARAMS,
             EffectKind::Reverb => REVERB_PARAMS,
             EffectKind::Compressor => COMPRESSOR_PARAMS,
+            EffectKind::Plugin => &[],
         }
     }
 
@@ -340,8 +347,10 @@ impl EffectKind {
         self.params().iter().find(|p| p.id == id)
     }
 
+    /// Plugins may have a sidechain input; the host feeds it only if the
+    /// plugin has one (PLG-031).
     pub fn accepts_sidechain(self) -> bool {
-        matches!(self, EffectKind::Compressor)
+        matches!(self, EffectKind::Compressor | EffectKind::Plugin)
     }
 }
 
@@ -369,6 +378,9 @@ pub struct Effect {
     pub schema: u32,
     /// Values by parameter ID. Missing IDs take their defaults.
     pub params: BTreeMap<String, f32>,
+    /// Set exactly when `kind` is [`EffectKind::Plugin`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin: Option<PluginSlot>,
 }
 
 impl Effect {
@@ -381,11 +393,22 @@ impl Effect {
                 .iter()
                 .map(|p| (p.id.to_owned(), p.default))
                 .collect(),
+            plugin: None,
         }
     }
 
-    pub fn name(&self) -> &'static str {
-        self.kind.name()
+    pub fn plugin(slot: PluginSlot) -> Self {
+        Self {
+            plugin: Some(slot),
+            ..Self::new(EffectKind::Plugin)
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        match &self.plugin {
+            Some(p) => &p.name,
+            None => self.kind.name(),
+        }
     }
 
     pub fn accepts_sidechain(&self) -> bool {
@@ -414,6 +437,9 @@ impl Effect {
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        if (self.kind == EffectKind::Plugin) != self.plugin.is_some() {
+            return Err(format!("{} has inconsistent plugin data", self.name()));
+        }
         if self.schema != self.kind.schema_version() {
             return Err(format!(
                 "{} parameter schema {} is not supported (expected {})",
@@ -442,8 +468,17 @@ impl Effect {
     /// Whether changing from `self` to `other` alters latency or
     /// structure, which needs a recompile with delay compensation rather
     /// than a smoothed parameter change.
+    ///
+    /// For plugins only a different class counts: a state change comes
+    /// from the plugin instance itself and needs no engine update.
     pub fn changes_latency(&self, other: &Effect) -> bool {
+        fn class(e: &Effect) -> Option<(&str, &str)> {
+            e.plugin
+                .as_ref()
+                .map(|p| (p.format.as_str(), p.class_id.as_str()))
+        }
         self.kind != other.kind
+            || class(self) != class(other)
             || (self.kind == EffectKind::Compressor
                 && self.get("lookahead") != other.get("lookahead"))
     }

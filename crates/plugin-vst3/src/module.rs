@@ -120,7 +120,7 @@ impl Vst3Module {
         let load_err = |e: libloading::Error| PluginError::Load(e.to_string());
         let mut exit = None;
         #[cfg(target_os = "macos")]
-        let mut bundle_ref = std::ptr::null_mut();
+        let bundle_ref = mac::create_bundle(bundle);
         unsafe {
             #[cfg(target_os = "linux")]
             {
@@ -145,7 +145,6 @@ impl Vst3Module {
             #[cfg(target_os = "macos")]
             {
                 type Entry = unsafe extern "system" fn(*mut c_void) -> bool;
-                bundle_ref = mac::create_bundle(bundle);
                 let entry = library
                     .get::<Entry>(b"bundleEntry\0")
                     .or_else(|_| library.get::<Entry>(b"BundleEntry\0"));

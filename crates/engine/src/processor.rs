@@ -15,8 +15,9 @@ use crate::{
     Command, EngineFeedback, Garbage, MAX_BLOCK, MAX_COMMANDS_PER_RENDER, MAX_VOICES,
     PlaybackSnapshot,
 };
-use jdance_domain::{ChannelId, MAX_CHANNELS, MAX_TRACKS, Tap};
+use jdance_domain::{ChannelId, MAX_CHANNELS, MAX_TRACKS, PPQ, Tap};
 use jdance_dsp::{SamplerVoice, Smoothed};
+use jdance_plugin_api::Transport;
 use rtrb::{Consumer, Producer};
 use std::sync::Arc;
 use std::time::Instant;
@@ -408,6 +409,16 @@ impl EngineProcessor {
         let n_tr = snap.tracks.len();
         channels.zero(n_ch, n);
         inputs.zero(n_tr, n);
+        // Transport for plugins at the block start (PLG-034). Wraps inside
+        // the block are not reported; the next block starts right.
+        let quarters = |samples: u64| samples as f64 / snap.samples_per_tick / f64::from(PPQ);
+        let transport = Transport {
+            playing: *playing && !*stopping,
+            tempo_bpm: snap.tempo_bpm,
+            project_time_samples: *pos as i64,
+            project_time_quarters: quarters(*pos),
+            cycle: snap.loop_range.map(|(a, b)| (quarters(a), quarters(b))),
+        };
 
         // 1. Sequencer events and voices into per-channel buffers. No new
         //    events while stopping.
@@ -468,11 +479,10 @@ impl EngineProcessor {
         }
 
         // 3. Buses in processing order; destinations always come later.
-        let tempo = snap.tempo_bpm;
         let meters = &feedback.meters;
         for (ti, track) in snap.tracks.iter_mut().enumerate() {
             process_inserts(
-                track, ti, inputs, pre_taps, post_taps, scratch, dry, tempo, n,
+                track, ti, inputs, pre_taps, post_taps, scratch, dry, &transport, n,
             );
             if track.struct_fade.is_ramping() || track.struct_fade.current() != 1.0 {
                 track.struct_fade.fill(&mut env[..n]);
@@ -560,7 +570,7 @@ fn process_inserts(
     post_taps: &Buses,
     scratch: &mut Buses,
     dry: &mut Buses,
-    tempo_bpm: f64,
+    transport: &Transport,
     n: usize,
 ) {
     for ins in &mut track.inserts {
@@ -580,7 +590,7 @@ fn process_inserts(
         };
         let (l, r) = inputs.get_mut(ti, n);
         let sidechain = has_sidechain.then(|| scratch.get(1, n));
-        ins.process(l, r, dry.get_mut(0, n), sidechain, tempo_bpm);
+        ins.process(l, r, dry.get_mut(0, n), sidechain, transport);
     }
 }
 

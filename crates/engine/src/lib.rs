@@ -21,14 +21,14 @@ mod param_diff;
 mod processor;
 mod snapshot;
 
-pub use effect_rt::{EffectRt, InsertRt, RESET_BUDGET};
+pub use effect_rt::{EffectRt, InsertRt, PluginRt, RESET_BUDGET};
 pub use feedback::{EngineFeedback, FeedbackReading, MeterSlot, Meters};
 pub use offline::{OfflineRender, render_offline};
 pub use param_diff::{ParamChange, param_only_changes};
 pub use processor::EngineProcessor;
 pub use snapshot::{
-    ChannelRt, MAX_END_TAIL_SECONDS, PlayMode, PlaybackSnapshot, StepEvent, compile, compile_with,
-    samples_per_tick, tick_to_sample,
+    ChannelRt, MAX_END_TAIL_SECONDS, PlayMode, PlaybackSnapshot, StepEvent, compile, compile_full,
+    compile_with, samples_per_tick, tick_to_sample,
 };
 
 use rtrb::{Consumer, Producer, RingBuffer};

@@ -21,26 +21,24 @@ fn render_does_not_allocate() {
     let all: Vec<u32> = (0..16).collect();
     let busy: Vec<&[u32]> = vec![&all; 12];
     let sparse: Vec<&[u32]> = vec![&[0, 8]; 3];
-    let fast = compile(&with_mixer(step_project(140.0, &busy), 1.0), sr, |_| {
-        Some(Arc::clone(&sample))
-    });
-    let slow = compile(&with_mixer(step_project(90.0, &sparse), 0.3), sr, |_| {
-        Some(Arc::clone(&sample))
-    });
-    assert!(fast.latency > 0, "graph exercises delay compensation");
+    let fast_project = with_mixer(step_project(140.0, &busy), 1.0);
+    let slow_project = with_mixer(step_project(90.0, &sparse), 0.3);
+    let fast = || compile(&fast_project, sr, |_| Some(Arc::clone(&sample)));
+    let slow = || compile(&slow_project, sr, |_| Some(Arc::clone(&sample)));
+    assert!(fast().latency > 0, "graph exercises delay compensation");
 
     let (mut handle, mut processor) = create_engine(sr);
     let mut l = vec![0.0f32; 4096];
     let mut r = vec![0.0f32; 4096];
-    handle.set_snapshot(fast.clone()).unwrap();
+    handle.set_snapshot(fast()).unwrap();
     handle.play().unwrap();
 
     reset_violations();
     for i in 0..400 {
         // Swap snapshots (tempo change) and stop/start while rendering.
         match i % 50 {
-            10 => handle.set_snapshot(slow.clone()).unwrap(),
-            30 => handle.set_snapshot(fast.clone()).unwrap(),
+            10 => handle.set_snapshot(slow()).unwrap(),
+            30 => handle.set_snapshot(fast()).unwrap(),
             40 => handle.stop().unwrap(),
             41 => handle.play().unwrap(),
             45 => handle.panic().unwrap(),

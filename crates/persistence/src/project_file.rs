@@ -14,7 +14,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 pub const FORMAT_TAG: &str = "jdance-project";
-pub const CURRENT_FORMAT_VERSION: u32 = 5;
+pub const CURRENT_FORMAT_VERSION: u32 = 6;
 pub const PROJECT_EXTENSION: &str = "jdance";
 
 /// Saves `project` to `path` atomically. Sample paths inside the project
@@ -121,6 +121,11 @@ fn migrate(version: u32, mut project: Value) -> Result<Value, PersistError> {
     if v == 4 {
         project = v4_to_v5(project)?;
         v = 5;
+    }
+    if v == 5 {
+        // v6 added plugin inserts (`kind: "plugin"` with a `plugin` slot);
+        // v5 files never contain them, so nothing changes.
+        v = 6;
     }
     match v {
         CURRENT_FORMAT_VERSION => Ok(project),
@@ -374,6 +379,44 @@ mod tests {
     }
 
     #[test]
+    fn plugin_state_round_trips_unchanged() {
+        use jdance_domain::{Effect, Insert, InsertId, PluginSlot};
+        let mut p = sample_project("a.wav");
+        let id = InsertId(p.ids.next());
+        let state: Vec<u8> = (0..=255).cycle().take(1000).collect();
+        p.mixer.master.inserts.push(Insert {
+            id,
+            bypass: true,
+            effect: Effect::plugin(PluginSlot {
+                format: "vst3".into(),
+                class_id: "0123456789ABCDEF0123456789ABCDEF".into(),
+                name: "Missing Plugin".into(),
+                vendor: "Nobody".into(),
+                version: "2.1".into(),
+                category: "Fx".into(),
+                component_state: state.clone(),
+                controller_state: vec![7],
+            }),
+            sidechain: None,
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("p.jdance");
+        save_project(&file, &p).unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.contains("\"kind\": \"plugin\""), "{text}");
+        let back = load_project(&file).unwrap();
+        assert_eq!(back, p);
+        let slot = back.mixer.master.inserts[0].effect.plugin.as_ref().unwrap();
+        assert_eq!(slot.component_state, state);
+        save_project(&file, &back).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            text,
+            "byte-identical"
+        );
+    }
+
+    #[test]
     fn rejects_newer_and_foreign_files() {
         let newer = br#"{"format":"jdance-project","format_version":99,"project":{}}"#;
         assert!(matches!(
@@ -393,16 +436,16 @@ mod tests {
     #[test]
     fn rejects_semantically_broken_projects() {
         let p = sample_project("a.wav");
-        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 5, "project": p});
+        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 6, "project": p});
         v["project"]["channels"][0]["volume"] = serde_json::json!(50.0);
         assert!(matches!(
             parse_project(v.to_string().as_bytes()),
             Err(PersistError::Corrupt(_))
         ));
-        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 5, "project": p});
+        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 6, "project": p});
         v["project"]["patterns"][0]["rows"][0]["steps"] = serde_json::json!([]);
         assert!(parse_project(v.to_string().as_bytes()).is_err());
-        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 5, "project": p});
+        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 6, "project": p});
         v["project"]["ids"]["next"] = serde_json::json!(1);
         assert!(parse_project(v.to_string().as_bytes()).is_err());
     }
@@ -502,7 +545,7 @@ mod tests {
             pre_fader: false,
         });
         p.mixer.tracks = vec![a, b];
-        let v = serde_json::json!({"format": FORMAT_TAG, "format_version": 5, "project": p});
+        let v = serde_json::json!({"format": FORMAT_TAG, "format_version": 6, "project": p});
         let err = parse_project(v.to_string().as_bytes()).unwrap_err();
         assert!(err.to_string().contains("feedback loop"), "{err}");
     }

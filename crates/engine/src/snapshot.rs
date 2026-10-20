@@ -8,8 +8,10 @@
 //! previous snapshot by object ID without allocating, so edits do not
 //! cause clicks or reset delay lines.
 
-use crate::effect_rt::{EffectRt, InsertRt, SidechainRt};
-use jdance_domain::{ChannelId, MAX_CHANNELS, MixerTrack, Project, SampleRef, SendId, TrackId};
+use crate::effect_rt::{EffectRt, InsertRt, PluginRt, SidechainRt};
+use jdance_domain::{
+    ChannelId, InsertId, MAX_CHANNELS, MixerTrack, PluginSlot, Project, SampleRef, SendId, TrackId,
+};
 use jdance_dsp::{
     DelayLine, SafetyLimiter, SampleBuffer, Smoothed, StereoGain, balance_gains, pan_gains,
 };
@@ -25,7 +27,7 @@ fn ramp_len(sample_rate: u32) -> u32 {
     (sample_rate / 100).max(1)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct PlaybackSnapshot {
     pub sample_rate: u32,
     /// Timeline length shown by the playhead: the pattern length in
@@ -75,7 +77,7 @@ pub struct ChannelRt {
     pub muted: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct TrackRt {
     pub id: TrackId,
     pub inserts: Vec<InsertRt>,
@@ -263,12 +265,28 @@ pub enum PlayMode {
     Song,
 }
 
-/// Compiles `project` for `sample_rate` and `mode`.
+/// Compiles `project` for `sample_rate` and `mode`. Plugin inserts
+/// compile as pass-through placeholders; see [`compile_full`].
 pub fn compile_with(
     project: &Project,
     sample_rate: u32,
     mode: PlayMode,
     samples: impl Fn(&SampleRef) -> Option<Arc<SampleBuffer>>,
+) -> PlaybackSnapshot {
+    compile_full(project, sample_rate, mode, samples, &mut |_, _| {
+        PluginRt::missing()
+    })
+}
+
+/// Like [`compile_with`]; `plugins` supplies each plugin insert: a fresh
+/// instance, the instance carried over from the previous snapshot, or a
+/// placeholder.
+pub fn compile_full(
+    project: &Project,
+    sample_rate: u32,
+    mode: PlayMode,
+    samples: impl Fn(&SampleRef) -> Option<Arc<SampleBuffer>>,
+    plugins: &mut dyn FnMut(InsertId, &PluginSlot) -> PluginRt,
 ) -> PlaybackSnapshot {
     let ramp = ramp_len(sample_rate);
     let mixer = &project.mixer;
@@ -295,7 +313,10 @@ pub fn compile_with(
         let mut acc = in_lat[ti];
         let mut inserts = Vec::with_capacity(t.inserts.len());
         for ins in &t.inserts {
-            let effect = EffectRt::new(&ins.effect, sample_rate, project.tempo_bpm);
+            let effect = match &ins.effect.plugin {
+                Some(slot) => EffectRt::Plugin(plugins(ins.id, slot)),
+                None => EffectRt::new(&ins.effect, sample_rate, project.tempo_bpm),
+            };
             let sidechain_src = ins
                 .sidechain
                 .filter(|sc| index.contains_key(&sc.source))
