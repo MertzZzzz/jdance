@@ -41,6 +41,8 @@ fn render_command_writes_expected_audio() {
             "48000",
             "--format",
             "float32",
+            "--tail",
+            "0",
         ])
         .output()
         .unwrap();
@@ -90,4 +92,12 @@ fn render_reports_missing_samples_and_bad_input() {
         .output()
         .unwrap();
     assert!(!r.status.success());
+    let r = bin()
+        .arg("render")
+        .arg(&project_path)
+        .arg(&out)
+        .args(["--tail", "100"])
+        .output()
+        .unwrap();
+    assert!(!r.status.success(), "tail above the maximum is rejected");
 }

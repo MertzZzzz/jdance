@@ -85,7 +85,10 @@
 | Stop: fade + ограниченный reset | PASS | `stop_fades_out_without_click`, `stop_clears_effect_state` |
 | Realtime/offline equivalence | PASS | property-тест, полная цепочка эффектов + limiter |
 | Нет аллокаций в render (RT-001) со всеми эффектами, SetParam, Stop | PASS | `engine/tests/rt_alloc.rs` |
-| Export tail 5 с, настраиваемый, предупреждение | NOT RUN | следующий шаг |
+| Export: song (без loop) или pattern × N, тот же DSP, новые экземпляры эффектов | PASS | `app/src/render.rs` тесты |
+| Export tail: 5 с по умолчанию, настраиваемый (0–60 с), предупреждение при более длинном ожидаемом tail | PASS | `default_tail_is_five_seconds`, `long_effect_tail_warns`; CLI `--tail`; диалог экспорта (визуально NOT RUN) |
+| Export выровнен по таймлайну (PDC latency обрезается) | PASS | `latency_is_trimmed_so_audio_starts_on_time` |
+| Float32 без скрытого clamp, limiter сохраняется | PASS | `float32_export_keeps_overs` |
 
 ## Playlist (spec-mixer-playlist-effects, раздел Playlist)
 

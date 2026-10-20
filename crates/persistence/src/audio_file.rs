@@ -145,12 +145,8 @@ fn read_float64(path: &Path) -> Result<DecodedAudio, PersistError> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WavExportFormat {
-    Pcm16,
-    Pcm24,
-    Float32,
-}
+/// WAV sample format for export.
+pub use jdance_domain::ExportFormat as WavExportFormat;
 
 /// Writes stereo audio to `path` (not atomically; exports are not
 /// documents). Values are clipped to [-1, 1] for integer formats.

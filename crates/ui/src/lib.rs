@@ -21,7 +21,8 @@ use jdance_commands::{
     add_track, duplicate_clips, make_unique,
 };
 use jdance_domain::{
-    ChannelId, Effect, LaneId, MAX_TEMPO_BPM, MAX_VOLUME, MIN_TEMPO_BPM, PatternId, Project,
+    ChannelId, DEFAULT_EXPORT_TAIL_SECONDS, Effect, ExportFormat, ExportOptions, ExportRange,
+    LaneId, MAX_EXPORT_TAIL_SECONDS, MAX_TEMPO_BPM, MAX_VOLUME, MIN_TEMPO_BPM, PatternId, Project,
     TrackId,
 };
 use settings::SettingsWindow;
@@ -79,7 +80,11 @@ pub struct JdanceApp<H: Host, S: ProjectStore> {
     pending: Option<Pending>,
     allow_close: bool,
     sync_needed: bool,
+    /// Open export dialog: options and the estimated effect tail.
+    export_dialog: Option<(ExportOptions, f32)>,
     export_loops: u32,
+    export_tail: f32,
+    export_format: ExportFormat,
     auto_close_after: Option<u32>,
     frames: u32,
 }
@@ -120,7 +125,10 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             pending: None,
             allow_close: false,
             sync_needed: true,
+            export_dialog: None,
             export_loops: 4,
+            export_tail: DEFAULT_EXPORT_TAIL_SECONDS,
+            export_format: ExportFormat::default(),
             auto_close_after: None,
             frames: 0,
         }
@@ -255,7 +263,119 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
         }
     }
 
-    fn export(&mut self) {
+    fn open_export_dialog(&mut self) {
+        let range = if self.song_mode {
+            ExportRange::Song
+        } else {
+            ExportRange::Pattern {
+                pattern: self.current_pattern,
+                loops: self.export_loops,
+            }
+        };
+        let options = ExportOptions {
+            range,
+            tail_seconds: self.export_tail,
+            format: self.export_format,
+        };
+        let estimate = self.host.estimated_tail_seconds(&self.project);
+        self.export_dialog = Some((options, estimate));
+    }
+
+    fn export_dialog(&mut self, ctx: &egui::Context) {
+        let Some((mut options, estimate)) = self.export_dialog else {
+            return;
+        };
+        let song_empty = self
+            .project
+            .playlist
+            .arrangement_end(&self.project.patterns)
+            == 0;
+        let mut choice = None;
+        egui::Modal::new(egui::Id::unique("export")).show(ctx, |ui| {
+            ui.heading("Export WAV");
+            egui::Grid::new("export_grid")
+                .num_columns(2)
+                .show(ui, |ui| {
+                    ui.label("Range");
+                    ui.horizontal(|ui| {
+                        let song = matches!(options.range, ExportRange::Song);
+                        if ui.selectable_label(song, "Song").clicked() {
+                            options.range = ExportRange::Song;
+                        }
+                        if ui.selectable_label(!song, "Pattern").clicked() {
+                            options.range = ExportRange::Pattern {
+                                pattern: self.current_pattern,
+                                loops: self.export_loops,
+                            };
+                        }
+                    });
+                    ui.end_row();
+                    if let ExportRange::Pattern { pattern, loops } = &mut options.range {
+                        let name = self
+                            .project
+                            .pattern(*pattern)
+                            .map_or("?", |p| p.name.as_str());
+                        ui.label("Loops");
+                        ui.horizontal(|ui| {
+                            ui.add(egui::DragValue::new(loops).range(1..=256));
+                            ui.label(format!("of \"{name}\""));
+                        });
+                        ui.end_row();
+                    }
+                    ui.label("Tail");
+                    ui.add(
+                        egui::DragValue::new(&mut options.tail_seconds)
+                            .range(0.0..=MAX_EXPORT_TAIL_SECONDS)
+                            .speed(0.1)
+                            .suffix(" s"),
+                    );
+                    ui.end_row();
+                    ui.label("Format");
+                    egui::ComboBox::from_id_salt("export_format")
+                        .selected_text(options.format.label())
+                        .show_ui(ui, |ui| {
+                            for f in ExportFormat::ALL {
+                                ui.selectable_value(&mut options.format, f, f.label());
+                            }
+                        });
+                    ui.end_row();
+                });
+            if let Some(w) = options.tail_warning(estimate) {
+                ui.colored_label(ui.visuals().warn_fg_color, w);
+            }
+            let blocked = song_empty && options.range == ExportRange::Song;
+            if blocked {
+                ui.colored_label(ui.visuals().warn_fg_color, "The playlist is empty.");
+            }
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(!blocked, egui::Button::new("Export…"))
+                    .clicked()
+                {
+                    choice = Some(true);
+                }
+                if ui.button("Cancel").clicked() {
+                    choice = Some(false);
+                }
+            });
+        });
+        if let ExportRange::Pattern { loops, .. } = options.range {
+            self.export_loops = loops;
+        }
+        self.export_tail = options.tail_seconds;
+        self.export_format = options.format;
+        self.export_dialog = match choice {
+            None => Some((options, estimate)),
+            Some(go) => {
+                if go {
+                    self.export(options);
+                }
+                None
+            }
+        };
+    }
+
+    fn export(&mut self, options: ExportOptions) {
         let Some(mut out) = rfd::FileDialog::new()
             .add_filter("WAV audio", &["wav"])
             .set_file_name("render.wav")
@@ -268,7 +388,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
         }
         let dir = self.project_dir().map(Path::to_path_buf);
         self.host
-            .export_wav(&self.project, dir.as_deref(), out, self.export_loops);
+            .export_wav(&self.project, dir.as_deref(), out, options);
     }
 
     fn title(&self) -> String {
@@ -344,12 +464,8 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                     self.save(true, now);
                 }
                 ui.separator();
-                ui.horizontal(|ui| {
-                    ui.label("Export loops:");
-                    ui.add(egui::DragValue::new(&mut self.export_loops).range(1..=256));
-                });
                 if ui.button("Export WAV…").clicked() {
-                    self.export();
+                    self.open_export_dialog();
                 }
                 ui.separator();
                 if ui.button("Quit").clicked() {
@@ -834,6 +950,7 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
         }
         self.rename_dialog(&ctx, now);
         self.length_dialog(&ctx, now);
+        self.export_dialog(&ctx);
         let mode = if self.song_mode {
             TransportMode::Song
         } else {

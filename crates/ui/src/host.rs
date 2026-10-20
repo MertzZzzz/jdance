@@ -8,7 +8,7 @@ use jdance_audio_api::{
     ActiveStreamInfo, AudioError, BackendId, DeviceCapabilities, DeviceInfo, DeviceKey,
     DeviceSettings, StatsReading, StreamState,
 };
-use jdance_domain::{PatternId, Project, SampleRef, TrackId};
+use jdance_domain::{ExportOptions, PatternId, Project, SampleRef, TrackId};
 use std::path::{Path, PathBuf};
 
 /// What Play plays.
@@ -165,14 +165,16 @@ pub trait Host {
     fn close_device(&mut self);
     fn open_control_panel(&mut self, key: &DeviceKey) -> Result<(), AudioError>;
 
-    /// Starts an offline render of `loops` pattern loops to `out`; the
-    /// result arrives as a notice.
+    /// Starts an offline render to `out`; the result arrives as a notice.
     fn export_wav(
         &mut self,
         project: &Project,
         project_dir: Option<&Path>,
         out: PathBuf,
-        loops: u32,
+        options: ExportOptions,
     );
+    /// How long the project's effects are expected to ring after the last
+    /// note, for the export tail warning.
+    fn estimated_tail_seconds(&mut self, project: &Project) -> f32;
     fn take_notices(&mut self) -> Vec<Notice>;
 }

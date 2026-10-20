@@ -13,7 +13,10 @@ mod render;
 mod samples;
 
 use jdance_audio_api::AudioBackend;
-use jdance_domain::Project;
+use jdance_domain::{
+    DEFAULT_EXPORT_TAIL_SECONDS, ExportOptions, ExportRange, MAX_EXPORT_TAIL_SECONDS, MAX_REPEAT,
+    Project,
+};
 use jdance_persistence::{WavExportFormat, load_project, save_project};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -21,7 +24,10 @@ use std::process::ExitCode;
 const USAGE: &str = "\
 usage:
   jdance [PROJECT] [--autoplay] [--smoke-test-frames N]
-  jdance render PROJECT OUT.wav [--loops N] [--sample-rate HZ] [--format pcm16|pcm24|float32]
+  jdance render PROJECT OUT.wav [--pattern NAME] [--loops N] [--tail SECONDS]
+                [--sample-rate HZ] [--format pcm16|pcm24|float32]
+    Renders the playlist; with --pattern or --loops, one pattern N times
+    (an empty playlist renders the first pattern). The tail defaults to 5 s.
   jdance devices
   jdance --version";
 
@@ -88,7 +94,22 @@ fn cmd_render(args: &[String]) -> Result<(), String> {
     let [project_path, out] = pos.as_slice() else {
         return Err(format!("render needs PROJECT and OUT.wav\n{USAGE}"));
     };
-    let loops: u32 = parse(flag_value(args, "--loops")?, "--loops", 1)?;
+    let loops = flag_value(args, "--loops")?;
+    let pattern_name = flag_value(args, "--pattern")?;
+    let loops_n: u32 = parse(loops, "--loops", 1)?;
+    if !(1..=MAX_REPEAT).contains(&loops_n) {
+        return Err(format!("--loops must be 1..={MAX_REPEAT}"));
+    }
+    let tail: f32 = parse(
+        flag_value(args, "--tail")?,
+        "--tail",
+        DEFAULT_EXPORT_TAIL_SECONDS,
+    )?;
+    if !(0.0..=MAX_EXPORT_TAIL_SECONDS).contains(&tail) {
+        return Err(format!(
+            "--tail must be 0..={MAX_EXPORT_TAIL_SECONDS} seconds"
+        ));
+    }
     let rate: u32 = parse(flag_value(args, "--sample-rate")?, "--sample-rate", 48_000)?;
     if !(8_000..=384_000).contains(&rate) {
         return Err(format!("unsupported sample rate {rate}"));
@@ -101,14 +122,37 @@ fn cmd_render(args: &[String]) -> Result<(), String> {
     };
     let project_path = Path::new(project_path);
     let project = load_project(project_path).map_err(|e| e.to_string())?;
+    let song = pattern_name.is_none()
+        && loops.is_none()
+        && project.playlist.arrangement_end(&project.patterns) > 0;
+    let range = if song {
+        ExportRange::Song
+    } else {
+        let pattern = match pattern_name {
+            Some(name) => project.patterns.iter().find(|p| p.name == name),
+            None => project.patterns.first(),
+        }
+        .ok_or_else(|| format!("no pattern {}", pattern_name.unwrap_or("to render")))?;
+        ExportRange::Pattern {
+            pattern: pattern.id,
+            loops: loops_n,
+        }
+    };
+    let options = ExportOptions {
+        range,
+        tail_seconds: tail,
+        format,
+    };
     let outcome = render::render_to_wav(
         &project,
         project_path.parent(),
         Path::new(out),
         rate,
-        loops,
-        format,
+        &options,
     )?;
+    if let Some(w) = &outcome.tail_warning {
+        eprintln!("warning: {w}");
+    }
     for w in &outcome.warnings {
         eprintln!("warning: missing sample {w}");
     }

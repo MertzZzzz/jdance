@@ -2,7 +2,7 @@
 //! Wires the UI to the engine, the audio backends and the sample cache.
 
 use crate::config::{self, UserSettings};
-use crate::render::render_to_wav;
+use crate::render::{estimated_tail_seconds, render_to_wav};
 use crate::samples::SampleCache;
 use jdance_audio_api::{
     AudioBackend, AudioError, BackendId, BufferRequest, DeviceCapabilities, DeviceInfo, DeviceKey,
@@ -10,12 +10,12 @@ use jdance_audio_api::{
 };
 use jdance_audio_cpal::CpalBackend;
 use jdance_domain::TrackId;
-use jdance_domain::{Project, SampleRef};
+use jdance_domain::{ExportOptions, Project, SampleRef};
 use jdance_engine::{
     EngineHandle, EngineProcessor, FeedbackReading, Meters, PlayMode, compile_with, create_engine,
     param_only_changes, samples_per_tick,
 };
-use jdance_persistence::{WavExportFormat, resolve_sample_path};
+use jdance_persistence::resolve_sample_path;
 use jdance_ui::{
     Host, LatencyInfo, MeterReadings, Notice, SampleStatus, StreamStatus, TransportMode,
     TransportStatus,
@@ -476,25 +476,25 @@ impl Host for AudioHost {
         project: &Project,
         project_dir: Option<&Path>,
         out: PathBuf,
-        loops: u32,
+        options: ExportOptions,
     ) {
         let (tx, rx) = channel();
         let project = project.clone();
         let dir = project_dir.map(Path::to_path_buf);
         let rate = self.engine_rate();
         std::thread::spawn(move || {
-            let result = render_to_wav(
-                &project,
-                dir.as_deref(),
-                &out,
-                rate,
-                loops,
-                WavExportFormat::Pcm24,
-            )
-            .map(|o| {
-                let mut msg = format!("Exported {} ({} Hz, 24-bit)", out.display(), rate);
+            let result = render_to_wav(&project, dir.as_deref(), &out, rate, &options).map(|o| {
+                let mut msg = format!(
+                    "Exported {} ({} Hz, {})",
+                    out.display(),
+                    rate,
+                    options.format.label()
+                );
                 if !o.warnings.is_empty() {
                     msg.push_str(&format!("; {} sample(s) missing", o.warnings.len()));
+                }
+                if let Some(w) = o.tail_warning {
+                    msg.push_str(&format!(". {w}"));
                 }
                 msg
             });
@@ -502,6 +502,10 @@ impl Host for AudioHost {
         });
         self.exports.push(rx);
         self.notices.push(Notice::info("Exporting…"));
+    }
+
+    fn estimated_tail_seconds(&mut self, project: &Project) -> f32 {
+        estimated_tail_seconds(project, self.engine_rate())
     }
 
     fn take_notices(&mut self) -> Vec<Notice> {

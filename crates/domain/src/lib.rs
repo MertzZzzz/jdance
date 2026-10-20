@@ -6,6 +6,7 @@
 //! it exclusively through `jdance-commands`.
 
 mod effects;
+mod export;
 mod ids;
 mod mixer;
 mod playlist;
@@ -13,6 +14,9 @@ mod playlist;
 pub use effects::{
     DELAY_DIVISIONS, EQ_MAX_FREQ, Effect, EffectKind, LimiterSettings, Mapping, ParamSpec,
     ParamUnit, Smoothing,
+};
+pub use export::{
+    DEFAULT_EXPORT_TAIL_SECONDS, ExportFormat, ExportOptions, ExportRange, MAX_EXPORT_TAIL_SECONDS,
 };
 pub use ids::{ChannelId, ClipId, IdAllocator, InsertId, LaneId, PatternId, SendId, TrackId};
 pub use mixer::{

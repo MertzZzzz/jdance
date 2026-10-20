@@ -22,7 +22,8 @@ piano roll, playlist, mixer). Код FL Studio не используется и 
 - воспроизведение через CPAL (WASAPI / CoreAudio / ALSA / JACK);
 - audio settings, построенные на capabilities устройства;
 - undo/redo, dirty state, safe save проекта;
-- offline render в WAV без аудиоустройства (`jdance render`).
+- экспорт в WAV (song или pattern, хвост эффектов 5 с по умолчанию) из
+  меню и без аудиоустройства (`jdance render`).
 
 Ещё нет: ASIO-host, VST3, piano roll,
 автоматизация (см. план в [спецификации](docs/spec/)).
