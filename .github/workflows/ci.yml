@@ -83,12 +83,10 @@ jobs:
         env:
           JDANCE_CONFIG_DIR: ${{ runner.temp }}/jdance-config
         run: ./target/release/jdance assets/demo/demo.jdance --smoke-test-frames 60
-      # Windows runners lack an OpenGL 2+ driver, so the glow renderer may
-      # not start there. A failure is reported but does not fail CI; it
-      # counts as NOT RUN, not PASS (docs/status.md).
-      - name: GUI startup smoke test (CI-004, Windows, informational)
+      # Windows runners have no OpenGL 2+: the app falls back to wgpu
+      # (verified in run #4: "Glow renderer unavailable", then 60 frames).
+      - name: GUI startup smoke test (CI-004, Windows)
         if: runner.os == 'Windows'
-        continue-on-error: true
         shell: bash
         env:
           JDANCE_CONFIG_DIR: ${{ runner.temp }}/jdance-config

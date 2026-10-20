@@ -9,7 +9,7 @@
 | Пункт | Статус | Артефакт / комментарий |
 |---|---|---|
 | Rust workspace, закреплённый toolchain (BLD-001/002) | PASS | `Cargo.toml`, `rust-toolchain.toml` (1.97.0, edition 2024) |
-| GUI window | PASS (Linux, macOS) | Linux: Xvfb; macOS: CI run #1. **Windows: FAIL в CI** — `egui_glow requires opengl 2.0+` (у раннера нет OpenGL 2); на реальной машине NOT RUN. Решение — ADR-002 (wgpu/DX12 или Mesa в CI) |
+| GUI window | PASS (Linux, macOS, Windows CI) | Linux: Xvfb; macOS: CI. Windows: у раннера нет OpenGL 2 → запасной рендерер wgpu, 60 кадров (CI run #4); реальная Windows-машина NOT RUN |
 | CI на трёх ОС (CI-001/002) | PASS | run #1 (2026-10-20): Linux, Windows, macOS — clippy, тесты, release, headless render зелёные |
 | Лицензия GPL-3.0-or-later, SPDX (LIC-001) | PASS | `LICENSE`, `cargo xtask check` |
 | Политика зависимостей, cargo deny (BLD-011/012) | PASS | локально и в CI run #1 |
