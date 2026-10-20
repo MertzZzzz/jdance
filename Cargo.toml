@@ -9,10 +9,12 @@ members = [
     "crates/audio-cpal",
     "crates/persistence",
     "crates/plugin-api",
+    "crates/plugin-vst3",
     "crates/ui",
     "crates/app",
     "crates/test-support",
     "crates/rt-check",
+    "test-plugins/jdance-test-fx",
     "xtask",
 ]
 default-members = ["crates/app"]

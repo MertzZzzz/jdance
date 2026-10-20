@@ -372,6 +372,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "com-scrape-types"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5ce183b975b8fc736a20919c4002717255fbd867df575c792aeefa9a56a73ad0"
+
+[[package]]
 name = "combine"
 version = "4.6.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -547,7 +553,7 @@ version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ab8ecd87370524b461f8557c119c405552c396ed91fc0a8eec68679eab26f94a"
 dependencies = [
- "libloading 0.7.4",
+ "libloading 0.8.9",
 ]
 
 [[package]]
@@ -1284,8 +1290,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "jdance-plugin-vst3"
+version = "0.1.0"
+dependencies = [
+ "jdance-plugin-api",
+ "jdance-rt-check",
+ "libloading 0.8.9",
+ "rtrb",
+ "serde_json",
+ "tempfile",
+ "vst3",
+]
+
+[[package]]
 name = "jdance-rt-check"
 version = "0.1.0"
+
+[[package]]
+name = "jdance-test-fx"
+version = "0.1.0"
+dependencies = [
+ "vst3",
+]
 
 [[package]]
 name = "jdance-test-support"
@@ -2967,6 +2993,15 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "vst3"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e31e3fe7a6f028ded8c5a9984cf283319e6dc63572c9b71da1d4ee9d71d3b6bf"
+dependencies = [
+ "com-scrape-types",
+]
 
 [[package]]
 name = "wait-timeout"

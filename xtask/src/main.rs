@@ -32,6 +32,9 @@ const ALLOWED: &[(&str, &[&str])] = &[
     ("jdance-audio-cpal", &["jdance-audio-api"]),
     ("jdance-persistence", &["jdance-domain"]),
     ("jdance-plugin-api", &[]),
+    // VST3 hosting; the only crate besides the test plugin with unsafe code.
+    ("jdance-plugin-vst3", &["jdance-plugin-api"]),
+    ("jdance-test-fx", &[]),
     // dsp is pure math with no dependencies (EQ response graph).
     (
         "jdance-ui",

@@ -16,6 +16,8 @@
 | serde_json | 1.0.154 | MIT OR Apache-2.0 | persistence, app, xtask | формат проекта и настроек | — |
 | thiserror | 2.0.21 | MIT OR Apache-2.0 | несколько | типы ошибок | — |
 | proptest | 1.12.0 | MIT OR Apache-2.0 | engine (dev) | property-тесты | — |
+| vst3 | 0.3.0 | MIT OR Apache-2.0 | plugin-vst3, test-fx | bindings VST 3 SDK 3.8 (ADR-008) | — |
+| libloading | 0.8.9 | ISC | plugin-vst3 | загрузка модулей плагинов (`dlopen`/`LoadLibraryExW`) | — |
 | tempfile | 3.27.0 | MIT OR Apache-2.0 | persistence, app (dev) | временные каталоги в тестах | — |
 
 Проверено: Claude Code, 2026-10-20, по `cargo metadata`.

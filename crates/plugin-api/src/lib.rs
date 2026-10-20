@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Format-neutral plugin hosting types (PLG-010).
 //!
-//! Only the data types are defined so far; the processor/controller/editor
-//! traits are added together with the VST3 implementation (Milestone P1).
-//! VST3-specific types must never appear here.
+//! The realtime part ([`PluginProcessor`]) lives in the engine; the
+//! non-realtime part ([`PluginController`]) lives on the UI thread
+//! (PLG-011). VST3-specific types must never appear here.
 
 use serde::{Deserialize, Serialize};
 
@@ -60,4 +60,103 @@ pub struct ParamInfo {
     /// `0` = continuous; otherwise number of discrete steps.
     pub step_count: u32,
     pub flags: ParamFlags,
+}
+
+/// Processing configuration fixed at activation (PLG-044).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ProcessSetupInfo {
+    pub sample_rate: f64,
+    /// Largest block passed to [`PluginProcessor::process`]; longer
+    /// blocks are split by the host.
+    pub max_block: usize,
+    /// Offline render (PLG-045).
+    pub offline: bool,
+}
+
+/// Transport state for one block (PLG-034).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Transport {
+    pub playing: bool,
+    pub tempo_bpm: f64,
+    /// Position of the block start on the timeline.
+    pub project_time_samples: i64,
+    /// The same position in quarter notes.
+    pub project_time_quarters: f64,
+    /// Loop range in quarter notes when cycling.
+    pub cycle: Option<(f64, f64)>,
+}
+
+/// Saved plugin state blobs (PLG-070).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct PluginState {
+    pub component: Vec<u8>,
+    pub controller: Vec<u8>,
+}
+
+/// Notifications from a plugin to the host, delivered on the UI thread.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PluginEvent {
+    /// The plugin's own GUI or the processor changed a parameter.
+    ParamChanged { id: u32, value: f64 },
+    /// The latency changed; the host must re-read it (PLG-035, PLG-051).
+    LatencyChanged,
+    /// Parameter values or titles changed; refresh the generic editor.
+    ParamsChanged,
+    /// The bus configuration changed or the plugin asks to be reloaded.
+    ReloadRequested,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PluginError {
+    Load(String),
+    NotFound(String),
+    Unsupported(String),
+    Failed(String),
+}
+
+impl std::fmt::Display for PluginError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PluginError::Load(e) => write!(f, "could not load plugin: {e}"),
+            PluginError::NotFound(e) => write!(f, "plugin not found: {e}"),
+            PluginError::Unsupported(e) => write!(f, "unsupported plugin: {e}"),
+            PluginError::Failed(e) => write!(f, "plugin call failed: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for PluginError {}
+
+/// Realtime part of a plugin instance, owned by the audio thread.
+///
+/// Implementations do not allocate in [`PluginProcessor::process`]; the
+/// plugin's own code may (PLG-040).
+pub trait PluginProcessor: Send {
+    /// Processes `left`/`right` in place. `sidechain` feeds the plugin's
+    /// sidechain input if it has one; otherwise it is ignored.
+    fn process(
+        &mut self,
+        left: &mut [f32],
+        right: &mut [f32],
+        sidechain: Option<(&[f32], &[f32])>,
+        transport: &Transport,
+    );
+    /// Latency reported at activation, in samples.
+    fn latency_samples(&self) -> u32;
+    fn has_sidechain_input(&self) -> bool;
+}
+
+/// Non-realtime part of a plugin instance, owned by the UI thread.
+pub trait PluginController {
+    fn params(&self) -> &[ParamInfo];
+    fn param_normalized(&self, id: u32) -> f64;
+    /// Sets the value in the controller and sends it to the processor
+    /// (applied at the start of the next block, PLG-042).
+    fn set_param_normalized(&mut self, id: u32, value: f64);
+    fn param_text(&self, id: u32, value: f64) -> String;
+    fn param_from_text(&self, id: u32, text: &str) -> Option<f64>;
+    fn state(&mut self) -> Result<PluginState, PluginError>;
+    /// Events since the last call: GUI edits, output parameter changes
+    /// from the processor, restart requests.
+    fn poll(&mut self) -> Vec<PluginEvent>;
 }

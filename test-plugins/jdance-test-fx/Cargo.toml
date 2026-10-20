@@ -1,0 +1,17 @@
+[package]
+name = "jdance-test-fx"
+description = "Fault-injection and measurement VST3 effects for host tests (PLG-080). Not shipped."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+vst3 = "0.3.0"
+
+[lints]
+workspace = true

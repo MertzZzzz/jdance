@@ -2,7 +2,7 @@
 
 Статусы по разделу 0.2 Amendment 02. `PASS` только с артефактом:
 тест в репозитории, лог CI или acceptance-отчёт.
-Последнее обновление: 2026-10-20 (встроенные эффекты).
+Последнее обновление: 2026-10-20 (VST3 hosting, часть 1).
 
 ## Milestone 0
 
@@ -20,8 +20,10 @@
 | ADR-013 граф микшера, pan law | ACCEPTED | `docs/adr/013-mixer-graph.md` |
 | ADR-002 UI-стек | OPEN | UI spike BLD-020 не проведён: пороги производительности и встраивание окна VST3 не проверены |
 | ADR-006 ASIO через CPAL или свой адаптер | OPEN | |
-| ADR-008/009/010 VST3 | OPEN | |
-| VST3 spike | NOT RUN | |
+| ADR-008 VST3 bindings | ACCEPTED | `docs/adr/008-vst3-bindings.md` (`vst3` 0.3.0, SDK 3.8) |
+| ADR-009 модель процессов плагинов | ACCEPTED | `docs/adr/009-plugin-process-model.md` |
+| ADR-010 X11/Wayland для окон плагинов | OPEN | |
+| VST3 spike | PASS (headless) | `plugin-vst3/tests/host.rs` против тестового плагина; GUI плагина NOT RUN |
 
 ## Milestone 1 (audible vertical slice)
 
@@ -107,6 +109,25 @@
 | Формат проекта v5 (миграция v4→v5: дефолтные lanes) | PASS | `persistence` тесты |
 | UI: canvas, zoom, drag/resize, ruler loop/seek, переименование lane/pattern | PASS (ручная проверка на Xvfb) | скриншот демо-проекта |
 
+## Milestone P1 (VST3 effects) — часть 1: хостинг без UI
+
+| Пункт | Статус | Артефакт / комментарий |
+|---|---|---|
+| Тестовый плагин: gain+bypass, latency 64, sidechain aux bus, журнал параметров, output param changes, non-automatable, без GUI, fault crash/hang (PLG-080) | PASS (частично) | `test-plugins/jdance-test-fx`; нет: смена latency на лету, медленный process, mono-only, resize GUI |
+| Загрузка модуля: Linux `ModuleEntry`, Windows `InitDll` + безопасные флаги поиска DLL, macOS `bundleEntry` с `CFBundle` (PLG-030, PLG-101/102) | PASS (Linux), CI (Windows, macOS) | тесты на трёх ОС в CI |
+| Factory, `PClassInfo2`, канонический class id (PLG-022, PLG-070) | PASS | `scan_lists_effect_classes`, `uid` тест |
+| Lifecycle: component, отдельный controller, `IConnectionPoint`, state → controller, handler, buses, setup, activate, processing; teardown в обратном порядке | PASS | все тесты `host.rs` |
+| Buses: main stereo, первый aux как sidechain, остальное выключено (PLG-031) | PASS | `sidechain_bus_receives_the_sidechain_signal`; mono-адаптация NOT RUN |
+| Pre-allocated ProcessData, деление длинных блоков по max_block (PLG-041) | PASS | `long_blocks_are_split_at_max_block`, `host_side_processing_does_not_allocate` |
+| Параметры UI → processor (offset 0) и output changes → UI (PLG-042) | PASS | `parameter_changes_reach_processor_and_output_changes_return` |
+| State round-trip (PLG-074) | PASS | `state_round_trips` |
+| Latency из `getLatencySamples` (PLG-050) | PASS | `latency_is_reported_and_exact`; `kLatencyChanged` → пересчёт PDC NOT RUN |
+| Load/process/unload 1000 раз (PLG-081) | PASS | `load_process_unload_repeatedly`; проверка утечек памяти NOT RUN |
+| Scanner out-of-process, таймаут, crash → причина (PLG-022) | PASS | `out_of_process_scan_and_blocklist_reasons`, `scanner_crash_and_hang_are_contained` |
+| Пути поиска по ОС (PLG-020) | PASS (код) | `default_search_paths`; кеш и blocklist в настройках — часть 3 |
+| Плагины как insert-эффекты в mixer, PDC, render, persistence, placeholder | NOT RUN | часть 2 |
+| Plugin browser, generic editor, окно GUI плагина | NOT RUN | часть 3 |
+
 ## Milestone 1A / 1B
 
 | Пункт | Статус |
@@ -119,4 +140,5 @@
 ## Известные ограничения текущей реализации
 
 - Ресемплинг сэмплов без anti-aliasing (BLD-041, ADR-012).
-- Piano roll, автоматизация, плагины — не начаты.
+- Piano roll и автоматизация не начаты; плагины — только хостинг без UI
+  (Milestone P1, часть 1).
