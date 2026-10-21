@@ -11,7 +11,7 @@ IBM Plex Sans и IBM Plex Mono под SIL Open Font License 1.1
 
 ## Статус
 
-Ранняя разработка: Milestone 0 и headless-ядро Milestone 1.
+Версия 0.1.0 — первая MVP-версия.
 Что сделано и что проверено — в [docs/status.md](docs/status.md).
 
 Работает сейчас:
@@ -32,8 +32,15 @@ IBM Plex Sans и IBM Plex Mono под SIL Open Font License 1.1
 - экспорт в WAV (song или pattern, хвост эффектов 5 с по умолчанию) из
   меню и без аудиоустройства (`jdance render`).
 
-Ещё нет: ASIO-host,
-автоматизация (см. план в [спецификации](docs/spec/)).
+Ещё нет: ASIO-host, запись и MIDI-вход, аудиоклипы (см. план в
+[спецификации](docs/spec/)).
+
+## Установка
+
+Готовый установщик для Windows (x64) — на странице
+[Releases](https://github.com/MertzZzzz/jdance/releases): файл
+`jdance-<версия>-windows-x64.msi`. Что вошло в версию и известные
+ограничения — в [docs/releases](docs/releases/).
 
 ## Сборка
 

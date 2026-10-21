@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// No console window behind the GUI on Windows; console commands attach to
+// the terminal they were started from (`attach_console`).
+#![cfg_attr(windows, windows_subsystem = "windows")]
 //! jdance entry point.
 //!
 //! ```text
@@ -35,6 +38,13 @@ usage:
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // The plugin scanner talks through pipes and needs no console.
+    if matches!(
+        args.first().map(String::as_str),
+        Some("render" | "devices" | "--version" | "-V" | "--help" | "-h")
+    ) {
+        attach_console();
+    }
     let result = match args.first().map(String::as_str) {
         Some("render") => cmd_render(&args[1..]),
         Some("devices") => cmd_devices(),
@@ -58,6 +68,20 @@ fn main() -> ExitCode {
         }
     }
 }
+
+/// A GUI-subsystem program has no console: write to the parent's, if any.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn attach_console() {
+    use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
+    // SAFETY: no preconditions; without a parent console it just fails.
+    unsafe {
+        AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
+
+#[cfg(not(windows))]
+fn attach_console() {}
 
 fn flag_value<'a>(args: &'a [String], name: &str) -> Result<Option<&'a str>, String> {
     match args.iter().position(|a| a == name) {

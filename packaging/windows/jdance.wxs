@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!--
+  Windows installer (WiX Toolset 5). Built by .github/workflows/release.yml:
+    wix build packaging/windows/jdance.wxs -arch x64 -ext WixToolset.UI.wixext
+      -d Version=0.1.0 -d BinDir=target/release -d DemoDir=assets/demo
+      -d LicenseRtf=License.rtf -o jdance.msi
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <Package Name="jdance"
+           Manufacturer="jdance contributors"
+           Version="$(var.Version)"
+           UpgradeCode="6B2E9C4A-3F1D-4E8B-9A57-2C0D1E4F7A31"
+           Scope="perMachine"
+           Language="1033">
+    <MajorUpgrade DowngradeErrorMessage="A newer version of jdance is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/MertzZzzz/jdance" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/MertzZzzz/jdance/issues" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="jdance">
+        <Directory Id="DemoFolder" Name="demo" />
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="jdance" Level="1">
+      <ComponentGroupRef Id="Program" />
+      <ComponentGroupRef Id="Demo" />
+      <ComponentRef Id="StartMenuShortcut" />
+    </Feature>
+
+    <ComponentGroup Id="Program" Directory="INSTALLFOLDER">
+      <Component Id="Executable">
+        <File Id="JdanceExe" Source="$(var.BinDir)\jdance.exe" KeyPath="yes" />
+        <!-- Double-clicking a .jdance file opens it in jdance. -->
+        <ProgId Id="jdance.Project" Description="jdance project">
+          <Extension Id="jdance" ContentType="application/x-jdance">
+            <Verb Id="open" Command="Open" TargetFile="JdanceExe" Argument="&quot;%1&quot;" />
+          </Extension>
+        </ProgId>
+      </Component>
+      <Component Id="LicenseText">
+        <File Id="LicenseTxt" Source="LICENSE" Name="LICENSE.txt" KeyPath="yes" />
+      </Component>
+      <Component Id="FontLicense">
+        <File Id="FontOfl" Source="crates\ui\assets\fonts\OFL.txt" Name="FONTS-OFL.txt" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- The demo project and its samples, keeping their folders. -->
+    <ComponentGroup Id="Demo" Directory="DemoFolder">
+      <Files Include="$(var.DemoDir)\**" />
+    </ComponentGroup>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Component Id="StartMenuShortcut">
+        <Shortcut Id="StartMenu"
+                  Name="jdance"
+                  Description="Pattern-based digital audio workstation"
+                  Target="[INSTALLFOLDER]jdance.exe"
+                  WorkingDirectory="INSTALLFOLDER" />
+        <RegistryValue Root="HKLM" Key="Software\jdance" Name="StartMenuShortcut"
+                       Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.LicenseRtf)" />
+  </Package>
+</Wix>

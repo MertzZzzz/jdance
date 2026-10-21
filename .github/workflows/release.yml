@@ -1,0 +1,105 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Windows installer (MSI) and GitHub release.
+#
+# A `v*` tag builds the MSI, installs it on the runner, checks the
+# installed program, uninstalls it and publishes a release with the MSI.
+# A manual run (workflow_dispatch) does the same without publishing.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  WIX_VERSION: 5.0.2
+
+jobs:
+  windows-msi:
+    name: Windows MSI
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v5
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Version from Cargo.toml (and the tag)
+        id: version
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "tag $GITHUB_REF_NAME does not match the workspace version $version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "msi=jdance-$version-windows-x64.msi" >> "$GITHUB_OUTPUT"
+
+      - name: Release build
+        run: cargo build --release --locked -p jdance-app
+
+      - name: Install WiX Toolset
+        run: |
+          dotnet tool install --global wix --version $env:WIX_VERSION
+          wix extension add -g WixToolset.UI.wixext/$env:WIX_VERSION
+
+      - name: Build the MSI
+        run: |
+          ./packaging/windows/license-rtf.ps1 -Out License.rtf
+          wix build packaging/windows/jdance.wxs -arch x64 `
+            -ext WixToolset.UI.wixext `
+            -d Version=${{ steps.version.outputs.version }} `
+            -d BinDir=target\release `
+            -d DemoDir=assets\demo `
+            -d LicenseRtf=License.rtf `
+            -o ${{ steps.version.outputs.msi }}
+
+      - name: Install, check and uninstall
+        run: |
+          $msi = (Resolve-Path ${{ steps.version.outputs.msi }}).Path
+          $p = Start-Process msiexec -ArgumentList "/i `"$msi`" /qn /l*v install.log" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content install.log -Tail 50; throw "install failed: $($p.ExitCode)" }
+          $dir = "$env:ProgramFiles\jdance"
+          $exe = "$dir\jdance.exe"
+          foreach ($f in @($exe, "$dir\LICENSE.txt", "$dir\demo\demo.jdance", "$dir\demo\samples\kick.wav",
+                           "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\jdance.lnk")) {
+            if (-not (Test-Path $f)) { throw "missing after install: $f" }
+          }
+          $assoc = (Get-ItemProperty "Registry::HKEY_CLASSES_ROOT\jdance.Project\shell\open\command").'(default)'
+          if ($assoc -notlike "*jdance.exe*") { throw "no .jdance association: $assoc" }
+          $render = "$env:RUNNER_TEMP\installed-render.wav"
+          $r = Start-Process $exe -ArgumentList "render `"$dir\demo\demo.jdance`" `"$render`" --loops 1" -Wait -PassThru
+          if ($r.ExitCode -ne 0 -or -not (Test-Path $render)) { throw "installed jdance could not render the demo" }
+          $env:JDANCE_CONFIG_DIR = "$env:RUNNER_TEMP\jdance-config"
+          $g = Start-Process $exe -ArgumentList "`"$dir\demo\demo.jdance`" --smoke-test-frames 60" -Wait -PassThru
+          if ($g.ExitCode -ne 0) { throw "installed jdance GUI smoke test failed: $($g.ExitCode)" }
+          $u = Start-Process msiexec -ArgumentList "/x `"$msi`" /qn" -Wait -PassThru
+          if ($u.ExitCode -ne 0) { throw "uninstall failed: $($u.ExitCode)" }
+          if (Test-Path $exe) { throw "jdance.exe left behind after uninstall" }
+
+      - name: Checksum
+        shell: bash
+        run: sha256sum ${{ steps.version.outputs.msi }} > ${{ steps.version.outputs.msi }}.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jdance-windows-msi
+          path: |
+            ${{ steps.version.outputs.msi }}
+            ${{ steps.version.outputs.msi }}.sha256
+          retention-days: 30
+
+      - name: Publish the release
+        if: github.ref_type == 'tag'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="docs/releases/${GITHUB_REF_NAME}.md"
+          gh release create "$GITHUB_REF_NAME" \
+            "${{ steps.version.outputs.msi }}" "${{ steps.version.outputs.msi }}.sha256" \
+            --title "jdance ${{ steps.version.outputs.version }} — MVP" \
+            --notes-file "$notes"

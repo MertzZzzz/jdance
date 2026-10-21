@@ -19,7 +19,7 @@
 | vst3 | 0.3.0 | MIT OR Apache-2.0 | plugin-vst3, test-fx | bindings VST 3 SDK 3.8 (ADR-008) | — |
 | libloading | 0.8.9 | ISC | plugin-vst3 | загрузка модулей плагинов (`dlopen`/`LoadLibraryExW`) | — |
 | x11rb | 0.13.2 | MIT OR Apache-2.0 | plugin-vst3 (Linux) | окна редакторов плагинов на X11 (ADR-010) | X-сервер (XWayland под Wayland) |
-| windows-sys | 0.61.2 | MIT OR Apache-2.0 | plugin-vst3 (Windows) | окна редакторов плагинов (Win32) | — |
+| windows-sys | 0.61.2 | MIT OR Apache-2.0 | plugin-vst3, app (Windows) | окна редакторов плагинов (Win32); консоль для CLI-команд GUI-приложения | — |
 | objc2, objc2-app-kit, objc2-foundation | 0.6.5 / 0.3.2 | MIT | plugin-vst3 (macOS) | окна редакторов плагинов (NSWindow) | AppKit |
 | libc | 0.2.186 | MIT OR Apache-2.0 | plugin-vst3 (Linux) | `poll` для IRunLoop | — |
 | tempfile | 3.27.0 | MIT OR Apache-2.0 | persistence, app (dev) | временные каталоги в тестах | — |
