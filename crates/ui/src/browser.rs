@@ -130,8 +130,20 @@ impl BrowserView {
                 heading(ui, "Project");
                 self.project(ui, project, history, &mut out);
                 heading(ui, "Library");
-                for f in &library {
-                    self.folder(ui, host, f, &display(f), 0, &mut out);
+                for r in host.library_roots() {
+                    if r.path.is_dir() {
+                        self.folder(ui, host, &r.path, &r.display(), 0, &mut out);
+                    } else {
+                        ui.label(
+                            RichText::new(format!("{} · unavailable", r.display()))
+                                .size(12.0)
+                                .color(theme::WARN),
+                        )
+                        .on_hover_text(format!(
+                            "{} was not found; it stays in the library until you remove it",
+                            r.path.display()
+                        ));
+                    }
                 }
                 if ui.small_button("+ Add folder…").clicked()
                     && let Some(dir) = rfd::FileDialog::new().pick_folder()

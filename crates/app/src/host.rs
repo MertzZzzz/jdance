@@ -133,6 +133,14 @@ impl AudioHost {
             }
             None => UserSettings::default(),
         };
+        let mut browser = BrowserFs::new();
+        browser.index(
+            settings
+                .library_folders
+                .iter()
+                .map(config::LibraryFolder::root)
+                .collect(),
+        );
         let (plugins, crashed) = PluginHost::new(Catalog::load_cached());
         if let Some(name) = crashed {
             notices.push(Notice::error(format!(
@@ -158,7 +166,7 @@ impl AudioHost {
             plugins,
             engine_generation: 0,
             scan: None,
-            browser: BrowserFs::new(),
+            browser,
             pending_preview: None,
             imports: std::sync::mpsc::channel(),
             next_import: 0,
@@ -816,13 +824,37 @@ impl Host for AudioHost {
         self.start_plugin_scan(full);
     }
 
-    fn library_folders(&self) -> Vec<PathBuf> {
-        self.settings.library_folders.clone()
+    fn library_roots(&self) -> Vec<jdance_ui::LibraryRoot> {
+        self.settings
+            .library_folders
+            .iter()
+            .map(crate::config::LibraryFolder::root)
+            .collect()
     }
 
-    fn set_library_folders(&mut self, folders: Vec<PathBuf>) {
-        self.settings.library_folders = folders;
+    fn set_library_roots(&mut self, roots: Vec<jdance_ui::LibraryRoot>) {
+        self.settings.library_folders = roots
+            .iter()
+            .map(crate::config::LibraryFolder::from_root)
+            .collect();
         self.save_settings();
+        self.browser.index(roots);
+    }
+
+    fn rescan_library(&mut self) {
+        let roots = self.library_roots();
+        for r in &roots {
+            self.browser.refresh(&r.path);
+        }
+        self.browser.index(roots);
+    }
+
+    fn cancel_library_scan(&mut self) {
+        self.browser.cancel_index();
+    }
+
+    fn library_index(&self) -> jdance_ui::IndexStatus {
+        self.browser.index_status()
     }
 
     fn favorite_folders(&self) -> Vec<PathBuf> {

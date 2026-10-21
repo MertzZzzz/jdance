@@ -1,17 +1,24 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Folder listings and file search for the Browser, done on a worker
-//! thread (BLD-022: no blocking file I/O on the UI thread).
+//! Folder listings, the library index and file search for the Browser,
+//! done on worker threads (BLD-022: no blocking file I/O on the UI
+//! thread). The index walks each library folder once (recursively unless
+//! the folder says otherwise), can be cancelled, reports progress and
+//! never follows a symlink into a folder it has already seen.
 
-use jdance_ui::{DirEntry, Listing};
-use std::collections::HashMap;
+use jdance_ui::{DirEntry, IndexStatus, LibraryRoot, Listing};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 /// Extensions shown in the Browser; only WAV loads today.
 const AUDIO: [&str; 7] = ["wav", "wave", "flac", "aif", "aiff", "mp3", "ogg"];
 /// Search limits: results and folder depth.
 const MAX_RESULTS: usize = 500;
-const MAX_DEPTH: usize = 8;
+const MAX_DEPTH: usize = 16;
+/// Files kept by one index (memory bound).
+const MAX_INDEX: usize = 200_000;
 
 enum Job {
     List(PathBuf),
@@ -23,6 +30,16 @@ enum Done {
     Search(u64, Listing),
 }
 
+/// The index of the searched folders and how far it got.
+#[derive(Debug)]
+struct Index {
+    roots: Vec<PathBuf>,
+    files: Arc<std::sync::Mutex<Option<Vec<DirEntry>>>>,
+    count: Arc<AtomicUsize>,
+    cancel: Arc<AtomicBool>,
+    running: Arc<AtomicBool>,
+}
+
 #[derive(Debug)]
 pub struct BrowserFs {
     jobs: Sender<Job>,
@@ -31,6 +48,9 @@ pub struct BrowserFs {
     /// Current search: (id, roots, query) and its result.
     search: Option<(u64, Vec<PathBuf>, String, Listing)>,
     next_search: u64,
+    /// Library folders (their `recursive` flags apply to the index).
+    library: Vec<LibraryRoot>,
+    index: Option<Index>,
 }
 
 impl Default for BrowserFs {
@@ -66,7 +86,80 @@ impl BrowserFs {
             listings: HashMap::new(),
             search: None,
             next_search: 0,
+            library: Vec::new(),
+            index: None,
         }
+    }
+
+    /// Re-indexes `roots` (the library folders) in the background.
+    pub fn index(&mut self, roots: Vec<LibraryRoot>) {
+        self.library = roots;
+        let paths: Vec<PathBuf> = self.library.iter().map(|r| r.path.clone()).collect();
+        self.start_index(paths);
+    }
+
+    fn start_index(&mut self, roots: Vec<PathBuf>) {
+        if let Some(old) = &self.index {
+            old.cancel.store(true, Ordering::Relaxed);
+        }
+        let index = Index {
+            roots: roots.clone(),
+            files: Arc::new(std::sync::Mutex::new(None)),
+            count: Arc::new(AtomicUsize::new(0)),
+            cancel: Arc::new(AtomicBool::new(false)),
+            running: Arc::new(AtomicBool::new(true)),
+        };
+        let depth: Vec<(PathBuf, usize)> = roots
+            .iter()
+            .map(|p| {
+                let flat = self.library.iter().any(|r| r.path == *p && !r.recursive);
+                (p.clone(), if flat { 0 } else { MAX_DEPTH })
+            })
+            .collect();
+        let (files, count, cancel, running) = (
+            Arc::clone(&index.files),
+            Arc::clone(&index.count),
+            Arc::clone(&index.cancel),
+            Arc::clone(&index.running),
+        );
+        let spawned = std::thread::Builder::new()
+            .name("jdance-library-index".into())
+            .spawn(move || {
+                let found = walk(&depth, |_| true, &count, &cancel);
+                if !cancel.load(Ordering::Relaxed)
+                    && let Ok(mut f) = files.lock()
+                {
+                    *f = Some(found);
+                }
+                running.store(false, Ordering::Relaxed);
+            });
+        if spawned.is_err() {
+            index.running.store(false, Ordering::Relaxed);
+        }
+        self.index = Some(index);
+        self.search = None;
+    }
+
+    pub fn cancel_index(&mut self) {
+        if let Some(i) = &self.index {
+            i.cancel.store(true, Ordering::Relaxed);
+        }
+    }
+
+    pub fn index_status(&self) -> IndexStatus {
+        self.index
+            .as_ref()
+            .map_or(IndexStatus::default(), |i| IndexStatus {
+                files: i.count.load(Ordering::Relaxed),
+                running: i.running.load(Ordering::Relaxed),
+                cancelled: i.cancel.load(Ordering::Relaxed),
+            })
+    }
+
+    /// Files of the finished index for exactly `roots`.
+    fn indexed(&self, roots: &[PathBuf]) -> Option<Vec<DirEntry>> {
+        let i = self.index.as_ref().filter(|i| i.roots == roots)?;
+        i.files.lock().ok()?.clone()
     }
 
     /// Applies finished jobs; returns `true` if anything changed.
@@ -104,6 +197,24 @@ impl BrowserFs {
     }
 
     pub fn search(&mut self, roots: &[PathBuf], query: &str) -> Listing {
+        // Over the index when it covers these folders (no disk walk).
+        if let Some(files) = self.indexed(roots) {
+            let q = query.to_lowercase();
+            let mut out: Vec<DirEntry> = files
+                .into_iter()
+                .filter(|e| e.name.to_lowercase().contains(&q))
+                .take(MAX_RESULTS)
+                .collect();
+            out.sort_by_key(|e| e.name.to_lowercase());
+            return Listing::Ready(out);
+        }
+        let indexing = self
+            .index
+            .as_ref()
+            .is_some_and(|i| i.roots == roots && i.running.load(Ordering::Relaxed));
+        if !indexing && self.index.as_ref().is_none_or(|i| i.roots != roots) {
+            self.start_index(roots.to_vec());
+        }
         if let Some((_, r, q, l)) = &self.search
             && r == roots
             && q == query
@@ -170,9 +281,38 @@ fn list(dir: &Path) -> Listing {
 /// Audio files under `roots` whose name contains `query` (any case).
 fn search(roots: &[PathBuf], query: &str) -> Listing {
     let q = query.to_lowercase();
+    let depth: Vec<(PathBuf, usize)> = roots.iter().map(|r| (r.clone(), MAX_DEPTH)).collect();
+    let never = AtomicBool::new(false);
+    let mut out = walk(
+        &depth,
+        |e| e.name.to_lowercase().contains(&q),
+        &AtomicUsize::new(0),
+        &never,
+    );
+    out.truncate(MAX_RESULTS);
+    out.sort_by_key(|e| e.name.to_lowercase());
+    Listing::Ready(out)
+}
+
+/// Audio files under each `(root, depth)` accepted by `keep`, at most
+/// [`MAX_INDEX`]. Each real folder is visited once, so symlink loops end.
+fn walk(
+    roots: &[(PathBuf, usize)],
+    keep: impl Fn(&DirEntry) -> bool,
+    count: &AtomicUsize,
+    cancel: &AtomicBool,
+) -> Vec<DirEntry> {
     let mut out = Vec::new();
-    let mut stack: Vec<(PathBuf, usize)> = roots.iter().map(|r| (r.clone(), 0)).collect();
+    let mut seen = HashSet::new();
+    let mut stack: Vec<(PathBuf, usize)> = roots.to_vec();
     while let Some((dir, depth)) = stack.pop() {
+        if cancel.load(Ordering::Relaxed) || out.len() >= MAX_INDEX {
+            break;
+        }
+        let real = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+        if !seen.insert(real) {
+            continue;
+        }
         let Ok(read) = std::fs::read_dir(&dir) else {
             continue;
         };
@@ -185,23 +325,19 @@ fn search(roots: &[PathBuf], query: &str) -> Listing {
                 continue;
             };
             if meta.is_dir() {
-                if depth < MAX_DEPTH {
-                    stack.push((path, depth + 1));
+                if depth > 0 {
+                    stack.push((path, depth - 1));
                 }
-            } else if is_audio(&path)
-                && path
-                    .file_name()
-                    .is_some_and(|n| n.to_string_lossy().to_lowercase().contains(&q))
-            {
-                out.push(entry(path, &meta));
-                if out.len() >= MAX_RESULTS {
-                    return Listing::Ready(out);
+            } else if is_audio(&path) {
+                let entry = entry(path, &meta);
+                if keep(&entry) {
+                    out.push(entry);
+                    count.fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
     }
-    out.sort_by_key(|e| e.name.to_lowercase());
-    Listing::Ready(out)
+    out
 }
 
 /// Opens the system file manager at `path` (its folder for a file).
@@ -266,5 +402,38 @@ mod tests {
             wait(&mut fs, |fs| fs.list(&d.join("missing"))),
             Listing::Failed(m) if m == "folder not found"
         ));
+    }
+
+    #[test]
+    fn index_is_flat_when_asked_and_survives_symlink_loops() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        std::fs::create_dir_all(d.join("a/b")).unwrap();
+        std::fs::write(d.join("top.wav"), b"x").unwrap();
+        std::fs::write(d.join("a/b/deep.wav"), b"x").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(d, d.join("a/b/loop")).unwrap();
+        let mut fs = BrowserFs::new();
+        let root = |recursive| LibraryRoot {
+            path: d.to_path_buf(),
+            name: Some("Mine".into()),
+            recursive,
+        };
+        fs.index(vec![root(true)]);
+        let Listing::Ready(all) = wait(&mut fs, |fs| fs.search(&[d.to_path_buf()], "")) else {
+            panic!("search failed");
+        };
+        let names: Vec<_> = all.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["deep.wav", "top.wav"],
+            "each file once, the loop ends"
+        );
+        assert_eq!(fs.index_status().files, 2);
+        fs.index(vec![root(false)]);
+        let Listing::Ready(flat) = wait(&mut fs, |fs| fs.search(&[d.to_path_buf()], "")) else {
+            panic!("search failed");
+        };
+        assert_eq!(flat.len(), 1, "a flat folder: no subfolders");
     }
 }

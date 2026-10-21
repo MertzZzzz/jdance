@@ -49,6 +49,8 @@ pub(crate) struct RackOutput {
     pub clone: Vec<ChannelId>,
     /// Channels to delete after the user confirms.
     pub delete: Vec<ChannelId>,
+    /// Open the Sample Selection Dialog for this purpose.
+    pub pick: Option<crate::library::PickFor>,
 }
 
 /// A step-painting drag: the state painted and the steps touched so far.
@@ -334,14 +336,8 @@ impl RackView {
                             .push((format!("Channel {}", project.channels.len() + 1), None));
                         ui.close();
                     }
-                    if ui.button("Sampler from file…").clicked() {
-                        if let Some(p) = pick_wav() {
-                            let name = p.file_stem().map_or_else(
-                                || "Sample".into(),
-                                |s| s.to_string_lossy().into_owned(),
-                            );
-                            out.new_channels.push((name, Some(sample_ref(&p))));
-                        }
+                    if ui.button("Sampler from a sample…").clicked() {
+                        out.pick = Some(crate::library::PickFor::NewChannel);
                         ui.close();
                     }
                     ui.menu_button("Instrument (VST3)", |ui| {
@@ -530,10 +526,7 @@ impl RackView {
                 }
             } else {
                 if ui.button("Load sample…").clicked() {
-                    if let Some(p) = pick_wav() {
-                        out.edits
-                            .push((Edit::SetChannelSample(ch.id, Some(sample_ref(&p))), false));
-                    }
+                    out.pick = Some(crate::library::PickFor::Channel(ch.id));
                     ui.close();
                 }
                 if ui
@@ -828,12 +821,6 @@ fn sample_ref(path: &Path) -> SampleRef {
     SampleRef {
         path: path.to_string_lossy().into_owned(),
     }
-}
-
-fn pick_wav() -> Option<std::path::PathBuf> {
-    rfd::FileDialog::new()
-        .add_filter("WAV audio", &["wav", "wave"])
-        .pick_file()
 }
 
 #[cfg(test)]

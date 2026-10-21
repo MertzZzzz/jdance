@@ -9,6 +9,7 @@ mod browser;
 mod channel_settings;
 mod host;
 mod icons;
+mod library;
 mod mixer;
 mod piano;
 mod piano_dialogs;
@@ -23,8 +24,9 @@ mod toolbar;
 mod widgets;
 
 pub use host::{
-    DirEntry, Host, ImportedAudio, LatencyInfo, Listing, MeterReadings, Notice, NoticeLevel,
-    PluginParamView, SampleStatus, StreamStatus, TransportMode, TransportStatus,
+    DirEntry, Host, ImportedAudio, IndexStatus, LatencyInfo, LibraryRoot, Listing, MeterReadings,
+    Notice, NoticeLevel, PluginParamView, SampleStatus, StreamStatus, TransportMode,
+    TransportStatus,
 };
 
 use egui::{Key, KeyboardShortcut, Modifiers};
@@ -109,6 +111,8 @@ pub struct JdanceApp<H: Host, S: ProjectStore> {
     mode_sent: Option<TransportMode>,
     playlist_view: playlist::PlaylistView,
     sample_editor: Option<sample_editor::SampleEditor>,
+    sample_picker: Option<library::SamplePicker>,
+    show_library: bool,
     /// Audio imports in flight: ticket → where the clip goes (`None` =
     /// add the file only).
     pending_imports: std::collections::BTreeMap<u64, Option<(Option<LaneId>, u64)>>,
@@ -178,6 +182,8 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             mode_sent: None,
             playlist_view: playlist::PlaylistView::default(),
             sample_editor: None,
+            sample_picker: None,
+            show_library: false,
             pending_imports: std::collections::BTreeMap::new(),
             project_browser: project_browser::ProjectBrowser::default(),
             confirm_delete: None,
@@ -583,6 +589,10 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 }
                 if ui.button("Plugins…").clicked() {
                     self.show_plugins = true;
+                    ui.close();
+                }
+                if ui.button("Library folders…").clicked() {
+                    self.show_library = true;
                     ui.close();
                 }
             });
@@ -1104,16 +1114,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 Ok(())
             }
             A::ImportFiles => {
-                let files = rfd::FileDialog::new()
-                    .add_filter("WAV audio", &["wav", "wave"])
-                    .pick_files()
-                    .unwrap_or_default();
-                let dir = self.project_dir().map(Path::to_path_buf);
-                for f in files {
-                    if let Some(t) = self.host.import_audio(&f, dir.as_deref()) {
-                        self.pending_imports.insert(t, None);
-                    }
-                }
+                self.sample_picker = Some(library::SamplePicker::new(library::PickFor::Import));
                 Ok(())
             }
             A::RenameAsset(id) => {
@@ -1235,6 +1236,55 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             }
         };
         self.apply(edit, false, now);
+    }
+
+    fn sample_picker_window(&mut self, ctx: &egui::Context, now: f64) {
+        let Some(mut picker) = self.sample_picker.take() else {
+            return;
+        };
+        let dir = self
+            .path
+            .as_deref()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf);
+        match picker.show(ctx, &self.project, &mut self.host, dir.as_deref()) {
+            None => self.sample_picker = Some(picker),
+            Some(None) => {}
+            Some(Some(picked)) => {
+                let (name, sample) = match &picked {
+                    library::Picked::File(p) => (
+                        p.file_stem()
+                            .map_or_else(|| "Sample".into(), |s| s.to_string_lossy().into_owned()),
+                        jdance_domain::SampleRef {
+                            path: p.to_string_lossy().into_owned(),
+                        },
+                    ),
+                    library::Picked::Asset(id) => match self.project.asset(*id) {
+                        Some(a) => (
+                            a.name.clone(),
+                            jdance_domain::SampleRef {
+                                path: a.path.clone(),
+                            },
+                        ),
+                        None => return,
+                    },
+                };
+                match picker.purpose {
+                    library::PickFor::NewChannel => self.add_channel(name, Some(sample), now),
+                    library::PickFor::Channel(id) => {
+                        self.apply(Edit::SetChannelSample(id, Some(sample)), false, now);
+                    }
+                    library::PickFor::Import => {
+                        if let library::Picked::File(p) = picked {
+                            let dir = self.project_dir().map(Path::to_path_buf);
+                            if let Some(t) = self.host.import_audio(&p, dir.as_deref()) {
+                                self.pending_imports.insert(t, None);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn sample_editor_window(&mut self, ctx: &egui::Context, now: f64) {
@@ -2028,6 +2078,13 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
         self.finish_imports(now);
         self.confirm_delete_dialog(&ctx, now);
         self.sample_editor_window(&ctx, now);
+        if self.show_library {
+            self.show_library = library::library_window(&ctx, &mut self.host);
+        }
+        if let Some(p) = out.pick.take() {
+            self.sample_picker = Some(library::SamplePicker::new(p));
+        }
+        self.sample_picker_window(&ctx, now);
         for (edit, merging) in out.edits.into_iter().chain(mix.edits) {
             self.apply(edit, merging, now);
         }
@@ -2108,6 +2165,9 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
                     .toggle_plugin_editor(jdance_domain::PluginTarget::Channel(w.channel), &title);
             }
             instrument_automation = o.automation;
+            if let Some(p) = o.pick {
+                self.sample_picker = Some(library::SamplePicker::new(p));
+            }
             if open {
                 self.channel_settings = Some(w);
             }

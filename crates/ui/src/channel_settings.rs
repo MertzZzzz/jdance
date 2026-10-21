@@ -13,7 +13,7 @@ use egui::{CornerRadius, Rect, RichText, Sense, Stroke, pos2, vec2};
 use jdance_commands::Edit;
 use jdance_domain::{
     Channel, ChannelId, MAX_CHANNEL_PITCH, MAX_ENVELOPE_MS, MAX_POLYPHONY, MAX_VOLUME, PALETTE,
-    PlaybackMode, PluginTarget, Project, SampleRef, SamplerSettings, color_or_default,
+    PlaybackMode, PluginTarget, Project, SamplerSettings, color_or_default,
 };
 use std::path::Path;
 
@@ -49,6 +49,8 @@ pub(crate) struct SettingsOutput {
     pub end_gesture: bool,
     pub toggle_editor: bool,
     pub automation: Vec<AutomationRequest>,
+    /// Open the Sample Selection Dialog for this channel.
+    pub pick: Option<crate::library::PickFor>,
 }
 
 use crate::piano::key_name;
@@ -310,16 +312,12 @@ impl ChannelSettingsWindow {
         ui.horizontal(|ui| {
             let path = ch.sample().map_or("No sample", |s| s.path.as_str());
             ui.label(RichText::new(path).font(theme::mono(12.0)));
-            if ui.button("Load…").clicked()
-                && let Some(p) = rfd::FileDialog::new()
-                    .add_filter("WAV audio", &["wav", "wave"])
-                    .pick_file()
+            if ui
+                .button("Load…")
+                .on_hover_text("Choose from the library, the project or any file")
+                .clicked()
             {
-                let sample = SampleRef {
-                    path: p.to_string_lossy().into_owned(),
-                };
-                out.edits
-                    .push((Edit::SetChannelSample(id, Some(sample)), false));
+                out.pick = Some(crate::library::PickFor::Channel(id));
             }
         });
         let status = ch.sample().and_then(|smp| host.sample_status(smp, dir));

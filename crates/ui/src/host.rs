@@ -127,6 +127,44 @@ pub struct StreamStatus {
     pub state: StreamState,
 }
 
+/// A sample library folder (spec 0.2.0 §5). Removing one never deletes
+/// files; a missing folder shows as unavailable and stays.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibraryRoot {
+    pub path: PathBuf,
+    /// Display name instead of the folder name.
+    pub name: Option<String>,
+    /// Index subfolders too.
+    pub recursive: bool,
+}
+
+impl LibraryRoot {
+    pub fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            name: None,
+            recursive: true,
+        }
+    }
+
+    pub fn display(&self) -> String {
+        self.name.clone().unwrap_or_else(|| {
+            self.path.file_name().map_or_else(
+                || self.path.display().to_string(),
+                |n| n.to_string_lossy().into_owned(),
+            )
+        })
+    }
+}
+
+/// Progress of the library index (search runs over it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct IndexStatus {
+    pub files: usize,
+    pub running: bool,
+    pub cancelled: bool,
+}
+
 /// An audio file read for import (spec 0.2.0 §2): copied into the
 /// project's `assets/` folder when the project has one.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -210,9 +248,32 @@ pub trait Host {
     -> Option<SampleStatus>;
     /// Library folders shown in the Browser (user settings).
     fn library_folders(&self) -> Vec<PathBuf> {
+        self.library_roots().into_iter().map(|r| r.path).collect()
+    }
+    /// Replaces the folders (new ones index recursively).
+    fn set_library_folders(&mut self, folders: Vec<PathBuf>) {
+        let old = self.library_roots();
+        let roots = folders
+            .into_iter()
+            .map(|p| {
+                old.iter()
+                    .find(|r| r.path == p)
+                    .cloned()
+                    .unwrap_or_else(|| LibraryRoot::new(p))
+            })
+            .collect();
+        self.set_library_roots(roots);
+    }
+    fn library_roots(&self) -> Vec<LibraryRoot> {
         Vec::new()
     }
-    fn set_library_folders(&mut self, _folders: Vec<PathBuf>) {}
+    fn set_library_roots(&mut self, _roots: Vec<LibraryRoot>) {}
+    /// Rebuilds the library index in the background.
+    fn rescan_library(&mut self) {}
+    fn cancel_library_scan(&mut self) {}
+    fn library_index(&self) -> IndexStatus {
+        IndexStatus::default()
+    }
     /// Favorite folders (user settings).
     fn favorite_folders(&self) -> Vec<PathBuf> {
         Vec::new()
