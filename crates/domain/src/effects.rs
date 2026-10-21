@@ -355,6 +355,36 @@ impl EffectKind {
 }
 
 impl ParamSpec {
+    /// Value for a normalized automation value `n` in `0..=1`
+    /// (ADR-014): linear, logarithmic, toggle at 0.5, or the nearest
+    /// choice index.
+    pub fn from_normalized(&self, n: f32) -> f32 {
+        let n = n.clamp(0.0, 1.0);
+        match self.mapping {
+            Mapping::Linear => self.min + (self.max - self.min) * n,
+            Mapping::Log => self.min * (self.max / self.min).powf(n),
+            Mapping::Toggle => {
+                if n >= 0.5 {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            Mapping::Choice(_) => (self.min + (self.max - self.min) * n).round(),
+        }
+    }
+
+    /// Inverse of [`ParamSpec::from_normalized`].
+    pub fn to_normalized(&self, v: f32) -> f32 {
+        let v = v.clamp(self.min, self.max);
+        let n = match self.mapping {
+            Mapping::Log => (v / self.min).ln() / (self.max / self.min).ln(),
+            _ if self.max > self.min => (v - self.min) / (self.max - self.min),
+            _ => 0.0,
+        };
+        n.clamp(0.0, 1.0)
+    }
+
     /// Checks a value for this parameter.
     pub fn check(&self, v: f32) -> Result<(), String> {
         if !v.is_finite() || v < self.min || v > self.max {

@@ -10,12 +10,15 @@
 //! tap → gain/balance → post-fader tap → mute/solo → bus meter → main out
 //! (and sends); the master additionally: safety limiter → output meter.
 
+use crate::EffectRt;
+use crate::automation::{AUTOMATION_STEP, AutomationRt, BlockTimeline, PLUGIN_POINT_STEP};
 use crate::snapshot::TrackRt;
 use crate::{
     Command, EngineFeedback, Garbage, MAX_BLOCK, MAX_COMMANDS_PER_RENDER, MAX_VOICES,
     PlaybackSnapshot,
 };
 use jdance_domain::{ChannelId, MAX_CHANNELS, MAX_TRACKS, PPQ, Tap};
+use jdance_dsp::{ParamEvent, balance_gains};
 use jdance_dsp::{SamplerVoice, Smoothed};
 use jdance_plugin_api::Transport;
 use rtrb::{Consumer, Producer};
@@ -102,6 +105,10 @@ fn peak(x: &[f32]) -> f32 {
     x.iter().fold(0.0f32, |m, v| m.max(v.abs()))
 }
 
+/// Parameter events per insert per block: 64 parameters at 32-sample
+/// resolution.
+const MAX_PARAM_EVENTS: usize = (MAX_BLOCK / AUTOMATION_STEP + 1) * 64;
+
 /// Owned by the audio callback (or by an offline renderer).
 #[derive(Debug)]
 pub struct EngineProcessor {
@@ -129,6 +136,10 @@ pub struct EngineProcessor {
     /// Position inside the loop, in samples.
     pos: u64,
     voice_serial: u64,
+    /// Automation was applied in the previous block.
+    automating: bool,
+    /// Parameter events for one insert, built per block.
+    param_events: Vec<ParamEvent>,
 }
 
 impl EngineProcessor {
@@ -159,6 +170,8 @@ impl EngineProcessor {
             playing: false,
             pos: 0,
             voice_serial: 0,
+            automating: false,
+            param_events: Vec::with_capacity(MAX_PARAM_EVENTS),
         }
     }
 
@@ -339,6 +352,9 @@ impl EngineProcessor {
     }
 
     fn swap_snapshot(&mut self, mut new: Box<PlaybackSnapshot>) {
+        // The new snapshot's targets start at project values: chase the
+        // envelopes again in the next block.
+        self.automating = false;
         if let Some(old) = &mut self.snapshot {
             // Keep the musical position (in ticks) when the tempo changes.
             if old.samples_per_tick != new.samples_per_tick {
@@ -410,6 +426,8 @@ impl EngineProcessor {
             voice_serial,
             feedback,
             stopping,
+            automating,
+            param_events,
             ..
         } = self;
         {
@@ -434,6 +452,15 @@ impl EngineProcessor {
             project_time_quarters: quarters(*pos),
             cycle: snap.loop_range.map(|(a, b)| (quarters(a), quarters(b))),
         };
+
+        // Automation applies in song playback (ADR-014); when it stops,
+        // targets return to their project values.
+        let auto = snap.song && *playing && !*stopping && !snap.automation.is_empty();
+        let restore = *automating && !auto;
+        // First automated block: targets jump to the envelope (chase).
+        let starting = auto && !*automating;
+        *automating = auto;
+        let mut timeline = BlockTimeline::new(*pos);
 
         // 1. Sequencer events and voices into per-channel buffers. No new
         //    events while stopping.
@@ -489,6 +516,9 @@ impl EngineProcessor {
                             }
                         }
                         p = a;
+                        if done < n {
+                            timeline.push(done, a);
+                        }
                     }
                     _ => p = seg_end,
                 }
@@ -502,8 +532,16 @@ impl EngineProcessor {
         }
         render_voices(snap, voices, channels, cursor, n);
         // Instruments render whole blocks, also while stopped (tails).
+        let automation = &snap.automation;
         for (ci, ch) in snap.channels.iter_mut().enumerate() {
             if let Some(inst) = &mut ch.instrument {
+                if auto {
+                    let lanes = std::mem::take(&mut inst.auto_plugin);
+                    queue_plugin_points(&lanes, automation, &timeline, n, |id, o, v| {
+                        inst.plugin.queue_param(id, o, v);
+                    });
+                    inst.auto_plugin = lanes;
+                }
                 let (l, r) = channels.get_mut(ci, n);
                 inst.render(l, r, &transport);
             }
@@ -522,8 +560,25 @@ impl EngineProcessor {
         // 3. Buses in processing order; destinations always come later.
         let meters = &feedback.meters;
         for (ti, track) in snap.tracks.iter_mut().enumerate() {
+            let auto_ctx = AutoCtx {
+                automation,
+                active: auto,
+                starting,
+                restore,
+                timeline: &timeline,
+            };
             process_inserts(
-                track, ti, inputs, pre_taps, post_taps, scratch, dry, &transport, n,
+                track,
+                ti,
+                inputs,
+                pre_taps,
+                post_taps,
+                scratch,
+                dry,
+                &transport,
+                n,
+                &auto_ctx,
+                param_events,
             );
             if track.struct_fade.is_ramping() || track.struct_fade.current() != 1.0 {
                 track.struct_fade.fill(&mut env[..n]);
@@ -536,7 +591,40 @@ impl EngineProcessor {
             copy_into(pre_taps.get_mut(ti, n), inputs.get(ti, n));
             {
                 let (l, r) = inputs.get_mut(ti, n);
-                track.fader.apply(l, r);
+                let automated = track.auto_volume.is_some() || track.auto_pan.is_some();
+                if auto && automated {
+                    // Ramps between envelope values at 32-sample steps of
+                    // the timeline (AUT-021), so the result does not depend
+                    // on block sizes.
+                    let mut o = 0;
+                    while o < n {
+                        let at = timeline.pos_at(o);
+                        let step = AUTOMATION_STEP as u64;
+                        let to_boundary = (step - at % step) as usize;
+                        let len = (n - o).min(to_boundary);
+                        if at.is_multiple_of(step) || (o == 0 && starting) {
+                            let end = at + to_boundary as u64 - 1;
+                            let value = |lane: Option<usize>, base: f32| {
+                                lane.and_then(|i| automation[i].plain_at(end))
+                                    .unwrap_or(base)
+                            };
+                            let vol = value(track.auto_volume, track.base_volume);
+                            let pan = value(track.auto_pan, track.base_pan);
+                            let (gl, gr) = balance_gains(pan);
+                            track.fader.l.set_target_over(gl * vol, to_boundary as u32);
+                            track.fader.r.set_target_over(gr * vol, to_boundary as u32);
+                        }
+                        track.fader.apply(&mut l[o..o + len], &mut r[o..o + len]);
+                        o += len;
+                    }
+                } else {
+                    if restore && automated {
+                        let (gl, gr) = balance_gains(track.base_pan);
+                        track.fader.l.set_target(gl * track.base_volume);
+                        track.fader.r.set_target(gr * track.base_volume);
+                    }
+                    track.fader.apply(l, r);
+                }
             }
             copy_into(post_taps.get_mut(ti, n), inputs.get(ti, n));
             track.mute.fill(&mut env[..n]);
@@ -547,9 +635,23 @@ impl EngineProcessor {
                 } else {
                     post_taps.get(ti, n)
                 };
+                let send_lane = send.auto_level.filter(|_| auto);
+                if restore && send.auto_level.is_some() {
+                    send.gain.set_target(send.base_level);
+                }
                 {
                     let (tl, tr) = scratch.get_mut(0, n);
                     for i in 0..n {
+                        if let Some(lane) = send_lane {
+                            let at = timeline.pos_at(i);
+                            let step = AUTOMATION_STEP as u64;
+                            if at.is_multiple_of(step) || (i == 0 && starting) {
+                                let to_boundary = step - at % step;
+                                if let Some(v) = automation[lane].plain_at(at + to_boundary - 1) {
+                                    send.gain.set_target_over(v, to_boundary as u32);
+                                }
+                            }
+                        }
                         let g = send.gain.next_value();
                         let m = if send.pre_fader { 1.0 } else { env[i] };
                         tl[i] = src_l[i] * g * m;
@@ -601,6 +703,45 @@ impl EngineProcessor {
     }
 }
 
+/// Automation state for one block.
+struct AutoCtx<'a> {
+    automation: &'a [AutomationRt],
+    /// Envelopes apply in this block.
+    active: bool,
+    /// First automated block (chase at offset 0).
+    starting: bool,
+    /// Automation just stopped: return to project values.
+    restore: bool,
+    timeline: &'a BlockTimeline,
+}
+
+/// Queues plugin automation: a chase point at offset 0 (AUT-033), points
+/// every 64 samples and every envelope breakpoint at its exact offset
+/// (AUT-030).
+fn queue_plugin_points(
+    lanes: &[(u32, usize)],
+    automation: &[AutomationRt],
+    timeline: &BlockTimeline,
+    n: usize,
+    mut queue: impl FnMut(u32, u32, f64),
+) {
+    for &(id, lane) in lanes {
+        let a = &automation[lane];
+        let mut o = 0;
+        while o < n {
+            if let Some(v) = a.normalized_at(timeline.pos_at(o)) {
+                queue(id, o as u32, f64::from(v));
+            }
+            o += PLUGIN_POINT_STEP;
+        }
+        for (seg_offset, seg_pos, len) in timeline.segments(n) {
+            for (pos, v) in a.breakpoints(seg_pos, seg_pos + len as u64) {
+                queue(id, (seg_offset as u64 + pos - seg_pos) as u32, f64::from(v));
+            }
+        }
+    }
+}
+
 /// Runs the insert chain of bus `ti` in place on its input buffer.
 #[allow(clippy::too_many_arguments)]
 fn process_inserts(
@@ -613,6 +754,8 @@ fn process_inserts(
     dry: &mut Buses,
     transport: &Transport,
     n: usize,
+    auto: &AutoCtx,
+    events: &mut Vec<ParamEvent>,
 ) {
     for ins in &mut track.inserts {
         let has_sidechain = match &mut ins.sidechain {
@@ -629,9 +772,67 @@ fn process_inserts(
             }
             None => false,
         };
+        events.clear();
+        if let Some((lane, base)) = ins.auto_bypass {
+            let bypass = if auto.active {
+                auto.automation[lane]
+                    .plain_at(auto.timeline.pos_at(0))
+                    .map_or(base, |v| v >= 0.5)
+            } else {
+                base
+            };
+            if auto.active || auto.restore {
+                ins.mix.set_target(if bypass { 0.0 } else { 1.0 });
+            }
+        }
+        if auto.active && !ins.auto_params.is_empty() {
+            // Events at 32-sample steps of the timeline (block-size
+            // independent), plus a chase at offset 0 when automation starts.
+            for o in 0..n {
+                let at = auto.timeline.pos_at(o);
+                if !at.is_multiple_of(AUTOMATION_STEP as u64) && !(o == 0 && auto.starting) {
+                    continue;
+                }
+                for &(index, lane, _) in &ins.auto_params {
+                    if let Some(v) = auto.automation[lane].plain_at(at)
+                        && events.len() < events.capacity()
+                    {
+                        events.push(ParamEvent {
+                            frame: o as u32,
+                            index,
+                            value: v,
+                        });
+                    }
+                }
+            }
+        } else if auto.restore {
+            for &(index, _, base) in &ins.auto_params {
+                if events.len() < events.capacity() {
+                    events.push(ParamEvent {
+                        frame: 0,
+                        index,
+                        value: base,
+                    });
+                }
+            }
+        }
+        if auto.active
+            && !ins.auto_plugin.is_empty()
+            && let EffectRt::Plugin(p) = &mut ins.effect
+        {
+            queue_plugin_points(
+                &ins.auto_plugin,
+                auto.automation,
+                auto.timeline,
+                n,
+                |id, o, v| {
+                    p.queue_param(id, o, v);
+                },
+            );
+        }
         let (l, r) = inputs.get_mut(ti, n);
         let sidechain = has_sidechain.then(|| scratch.get(1, n));
-        ins.process(l, r, dry.get_mut(0, n), sidechain, transport);
+        ins.process(l, r, dry.get_mut(0, n), sidechain, transport, events);
     }
 }
 

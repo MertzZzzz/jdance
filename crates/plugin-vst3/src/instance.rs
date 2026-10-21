@@ -19,6 +19,8 @@ use vst3::{ComPtr, ComWrapper, Interface};
 
 /// Capacity of the UI ↔ processor parameter queues.
 const PARAM_QUEUE: usize = 1024;
+/// Automation points per block (all parameters).
+const AUTOMATION_POINTS: usize = 2048;
 
 fn check(r: tresult, what: &str) -> Result<(), PluginError> {
     if r == kResultOk {
@@ -430,6 +432,8 @@ pub struct Vst3Processor {
     continuous: i64,
     from_ui: rtrb::Consumer<(u32, f64)>,
     to_ui: rtrb::Producer<(u32, f64)>,
+    /// Automation points for the next call: (id, offset, value).
+    automation: Vec<(u32, u32, f64)>,
     /// Keeps the plugin alive; dropped last.
     _core: Arc<Core>,
 }
@@ -483,6 +487,7 @@ impl Vst3Processor {
             continuous: 0,
             from_ui,
             to_ui,
+            automation: Vec::with_capacity(AUTOMATION_POINTS),
             _core: core,
         };
         for i in 0..buses.inputs {
@@ -545,6 +550,22 @@ impl Vst3Processor {
         }
         c.continousTimeSamples = self.continuous;
         c.state = state as u32;
+    }
+
+    /// Moves queued automation points inside `[start, start + n)` into the
+    /// parameter changes of this chunk, rebased to it.
+    fn chunk_automation(&mut self, start: usize, n: usize) {
+        let end = start + n;
+        let in_changes = &self.in_changes;
+        self.automation.retain(|&(id, offset, value)| {
+            let o = offset as usize;
+            if o >= start && o < end {
+                in_changes.add(id, (o - start) as i32, value);
+                false
+            } else {
+                true
+            }
+        });
     }
 
     fn run(&mut self, n: usize) -> bool {
@@ -620,6 +641,7 @@ impl PluginProcessor for Vst3Processor {
                 }
             }
             self.silence[..n].fill(0.0);
+            self.chunk_automation(done, n);
             self.fill_context(transport, done);
             // On failure the input passes through unchanged.
             if self.run(n) {
@@ -628,6 +650,7 @@ impl PluginProcessor for Vst3Processor {
             }
             done += n;
         }
+        self.automation.clear();
     }
 
     fn process_instrument(
@@ -659,6 +682,7 @@ impl PluginProcessor for Vst3Processor {
                     self.events.push(vst_event(e, done));
                 }
             }
+            self.chunk_automation(done, n);
             self.fill_context(transport, done);
             let range = done..done + n;
             if self.run(n) {
@@ -669,6 +693,13 @@ impl PluginProcessor for Vst3Processor {
                 right[range].fill(0.0);
             }
             done += n;
+        }
+        self.automation.clear();
+    }
+
+    fn queue_param(&mut self, id: u32, offset: u32, value: f64) {
+        if self.automation.len() < self.automation.capacity() {
+            self.automation.push((id, offset, value.clamp(0.0, 1.0)));
         }
     }
 

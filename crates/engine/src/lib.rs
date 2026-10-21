@@ -14,6 +14,7 @@
 //! The processor does not depend on any audio device: offline rendering
 //! drives the very same code ([`render_offline`]).
 
+mod automation;
 mod effect_rt;
 mod feedback;
 mod offline;

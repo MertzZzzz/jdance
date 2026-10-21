@@ -175,6 +175,12 @@ pub trait PluginProcessor: Send {
         left.fill(0.0);
         right.fill(0.0);
     }
+    /// Queues an automation point for the next `process` or
+    /// `process_instrument` call, at `offset` samples into that block
+    /// (AUT-030). Realtime-safe; extra points are dropped when full.
+    fn queue_param(&mut self, id: u32, offset: u32, value: f64) {
+        let _ = (id, offset, value);
+    }
     /// Latency reported at activation, in samples.
     fn latency_samples(&self) -> u32;
     fn has_sidechain_input(&self) -> bool;

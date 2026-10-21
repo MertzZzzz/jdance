@@ -11,8 +11,8 @@
 use crate::MAX_BLOCK;
 use jdance_domain::{Effect, EffectKind, InsertId, Tap};
 use jdance_dsp::{
-    Compressor, DelayLine, ParametricEq, ProcessContext, Processor, Reverb, Smoothed, Tail,
-    TempoDelay,
+    Compressor, DelayLine, ParamEvent, ParametricEq, ProcessContext, Processor, Reverb, Smoothed,
+    Tail, TempoDelay, process_with_events,
 };
 use jdance_plugin_api::{PluginProcessor, Transport};
 
@@ -92,6 +92,13 @@ impl PluginRt {
 
     pub fn latency(&self) -> u32 {
         self.latency
+    }
+
+    /// Queues an automation point for the instance's next block.
+    pub fn queue_param(&mut self, id: u32, offset: u32, value: f64) {
+        if let Some(p) = &mut self.processor {
+            p.queue_param(id, offset, value);
+        }
     }
 
     pub(crate) fn take_state(&mut self, old: &mut PluginRt) {
@@ -229,6 +236,12 @@ pub struct InsertRt {
     pub clean: bool,
     /// Reset requested (e.g. after Stop) regardless of bypass.
     pub force_reset: bool,
+    /// Automated built-in parameters: (schema index, lane, project value).
+    pub auto_params: Vec<(u16, usize, f32)>,
+    /// Automated bypass: (lane, project bypass).
+    pub auto_bypass: Option<(usize, bool)>,
+    /// Automated plugin parameters: (ParamID, lane).
+    pub auto_plugin: Vec<(u32, usize)>,
 }
 
 impl InsertRt {
@@ -243,6 +256,9 @@ impl InsertRt {
             dry_delay: DelayLine::new(latency),
             clean: true,
             force_reset: false,
+            auto_params: Vec::new(),
+            auto_bypass: None,
+            auto_plugin: Vec::new(),
         }
     }
 
@@ -268,6 +284,7 @@ impl InsertRt {
         dry: (&mut [f32], &mut [f32]),
         sidechain: Option<(&[f32], &[f32])>,
         transport: &Transport,
+        events: &[ParamEvent],
     ) {
         let n = l.len();
         self.pre_delay.process(l, r);
@@ -281,6 +298,12 @@ impl InsertRt {
         // does not advance here, so re-enabling ramps in from clean state.
         let at_dry = self.mix.current() == 0.0;
         if self.force_reset || (at_dry && (!self.clean || self.mix.target() == 0.0)) {
+            // Parameter changes still land while dry.
+            for e in events {
+                self.effect
+                    .processor()
+                    .set_param(usize::from(e.index), e.value);
+            }
             if !self.clean || self.force_reset {
                 self.clean = self.effect.processor().reset_step(RESET_BUDGET);
                 if self.clean {
@@ -298,7 +321,11 @@ impl InsertRt {
             sidechain,
             tempo_bpm: transport.tempo_bpm,
         };
-        self.effect.processor().process_block(l, r, &ctx);
+        if events.is_empty() {
+            self.effect.processor().process_block(l, r, &ctx);
+        } else {
+            process_with_events(self.effect.processor(), l, r, events, &ctx);
+        }
         self.clean = false;
         if !self.mix.is_ramping() && self.mix.current() == 1.0 {
             return;
@@ -344,7 +371,7 @@ mod tests {
             let b = left.min(256);
             let mut l = vec![input; b];
             let mut r = vec![input; b];
-            slot.process(&mut l, &mut r, (&mut dl, &mut dr), None, &T);
+            slot.process(&mut l, &mut r, (&mut dl, &mut dr), None, &T, &[]);
             out.extend(l);
             left -= b;
         }
@@ -394,7 +421,7 @@ mod tests {
         let mut r = l.clone();
         let mut dl = vec![0.0; MAX_BLOCK];
         let mut dr = vec![0.0; MAX_BLOCK];
-        slot.process(&mut l, &mut r, (&mut dl, &mut dr), None, &T);
+        slot.process(&mut l, &mut r, (&mut dl, &mut dr), None, &T, &[]);
         assert_eq!(l.iter().position(|v| *v != 0.0), Some(48));
     }
 }
@@ -409,6 +436,8 @@ pub const MAX_SOUNDING_NOTES: usize = 256;
 #[derive(Debug)]
 pub struct InstrumentRt {
     pub plugin: PluginRt,
+    /// Automated plugin parameters: (ParamID, lane).
+    pub auto_plugin: Vec<(u32, usize)>,
     events: Vec<jdance_plugin_api::NoteEvent>,
     /// (timeline end position, key, note id) of sounding notes.
     sounding: Vec<(u64, u8, i32)>,
@@ -419,6 +448,7 @@ impl InstrumentRt {
     pub fn new(plugin: PluginRt) -> Self {
         Self {
             plugin,
+            auto_plugin: Vec::new(),
             events: Vec::with_capacity(MAX_INSTRUMENT_EVENTS),
             sounding: Vec::with_capacity(MAX_SOUNDING_NOTES),
             next_id: 0,

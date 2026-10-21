@@ -14,7 +14,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 pub const FORMAT_TAG: &str = "jdance-project";
-pub const CURRENT_FORMAT_VERSION: u32 = 8;
+pub const CURRENT_FORMAT_VERSION: u32 = 9;
 pub const PROJECT_EXTENSION: &str = "jdance";
 
 /// Saves `project` to `path` atomically. Sample paths inside the project
@@ -134,6 +134,10 @@ fn migrate(version: u32, mut project: Value) -> Result<Value, PersistError> {
     if v == 7 {
         // v8 added instrument channels (`source.kind: "plugin"`).
         v = 8;
+    }
+    if v == 8 {
+        // v9 added automation lanes (absent = none).
+        v = 9;
     }
     match v {
         CURRENT_FORMAT_VERSION => Ok(project),
@@ -306,6 +310,7 @@ fn validate(p: &Project) -> Result<(), PersistError> {
     }
     ids.extend(p.playlist.lanes.iter().map(|l| l.id.0));
     ids.extend(p.playlist.clips.iter().map(|c| c.id.0));
+    ids.extend(p.automation.iter().map(|l| l.id.0));
     let n = ids.len();
     ids.sort_unstable();
     ids.dedup();
@@ -328,6 +333,9 @@ fn validate(p: &Project) -> Result<(), PersistError> {
     }
     if let Err(e) = p.validate_routing() {
         return bad(format!("mixer routing: {e}"));
+    }
+    if let Err(e) = p.validate_automation() {
+        return bad(format!("automation: {e}"));
     }
     if let Err(e) = p.validate_arrangement() {
         return bad(format!("arrangement: {e}"));
@@ -384,6 +392,40 @@ mod tests {
         let first = std::fs::read(&file).unwrap();
         save_project(&file, &back).unwrap();
         assert_eq!(std::fs::read(&file).unwrap(), first);
+    }
+
+    #[test]
+    fn automation_round_trips_in_the_spec_format() {
+        use jdance_domain::{
+            AutoPoint, AutomationId, AutomationLane, AutomationTarget, Curve, TrackId,
+        };
+        let mut p = sample_project("a.wav");
+        let id = AutomationId(p.ids.next());
+        p.automation.push(AutomationLane {
+            id,
+            target: AutomationTarget::TrackVolume(TrackId::MASTER),
+            points: vec![
+                AutoPoint {
+                    tick: 0,
+                    value: 0.8,
+                    curve: Curve::Curve,
+                    tension: 0.5,
+                },
+                AutoPoint {
+                    tick: 3840,
+                    value: 0.25,
+                    curve: Curve::Hold,
+                    tension: 0.0,
+                },
+            ],
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.jdance");
+        save_project(&file, &p).unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.contains("\"kind\": \"track_volume\""), "{text}");
+        assert!(text.contains("\"curve\": \"curve\""));
+        assert_eq!(load_project(&file).unwrap(), p);
     }
 
     #[test]
@@ -444,16 +486,16 @@ mod tests {
     #[test]
     fn rejects_semantically_broken_projects() {
         let p = sample_project("a.wav");
-        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 8, "project": p});
+        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 9, "project": p});
         v["project"]["channels"][0]["volume"] = serde_json::json!(50.0);
         assert!(matches!(
             parse_project(v.to_string().as_bytes()),
             Err(PersistError::Corrupt(_))
         ));
-        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 8, "project": p});
+        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 9, "project": p});
         v["project"]["patterns"][0]["rows"][0]["steps"] = serde_json::json!([]);
         assert!(parse_project(v.to_string().as_bytes()).is_err());
-        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 8, "project": p});
+        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 9, "project": p});
         v["project"]["ids"]["next"] = serde_json::json!(1);
         assert!(parse_project(v.to_string().as_bytes()).is_err());
     }
@@ -553,7 +595,7 @@ mod tests {
             pre_fader: false,
         });
         p.mixer.tracks = vec![a, b];
-        let v = serde_json::json!({"format": FORMAT_TAG, "format_version": 8, "project": p});
+        let v = serde_json::json!({"format": FORMAT_TAG, "format_version": 9, "project": p});
         let err = parse_project(v.to_string().as_bytes()).unwrap_err();
         assert!(err.to_string().contains("feedback loop"), "{err}");
     }

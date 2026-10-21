@@ -5,6 +5,7 @@
 //! compiles a [`Project`] into its own realtime representation; the UI edits
 //! it exclusively through `jdance-commands`.
 
+mod automation;
 mod effects;
 mod export;
 mod ids;
@@ -12,6 +13,10 @@ mod mixer;
 mod playlist;
 mod plugin;
 
+pub use automation::{
+    AutoPoint, AutomationLane, AutomationTarget, Curve, MAX_AUTOMATION_POINTS, curve_weight,
+    sort_points,
+};
 pub use effects::{
     DELAY_DIVISIONS, EQ_MAX_FREQ, Effect, EffectKind, LimiterSettings, Mapping, ParamSpec,
     ParamUnit, Smoothing,
@@ -19,7 +24,9 @@ pub use effects::{
 pub use export::{
     DEFAULT_EXPORT_TAIL_SECONDS, ExportFormat, ExportOptions, ExportRange, MAX_EXPORT_TAIL_SECONDS,
 };
-pub use ids::{ChannelId, ClipId, IdAllocator, InsertId, LaneId, PatternId, SendId, TrackId};
+pub use ids::{
+    AutomationId, ChannelId, ClipId, IdAllocator, InsertId, LaneId, PatternId, SendId, TrackId,
+};
 pub use mixer::{
     Insert, MAX_INSERTS_PER_TRACK, MAX_SEND_LEVEL, MAX_SENDS_PER_TRACK, MAX_TRACKS, Mixer,
     MixerTrack, RoutingError, Send, Sidechain, Tap,
@@ -58,6 +65,9 @@ pub struct Project {
     pub patterns: Vec<Pattern>,
     pub mixer: Mixer,
     pub playlist: Playlist,
+    /// Automation lanes on the song timeline (ADR-014).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub automation: Vec<AutomationLane>,
     pub ids: IdAllocator,
 }
 
@@ -73,8 +83,31 @@ impl Project {
             patterns: vec![pattern],
             mixer: Mixer::default(),
             playlist,
+            automation: Vec::new(),
             ids,
         }
+    }
+
+    pub fn automation_lane(&self, id: AutomationId) -> Option<&AutomationLane> {
+        self.automation.iter().find(|l| l.id == id)
+    }
+
+    /// The lane controlling `target`, if any (one lane per target).
+    pub fn lane_for(&self, target: &AutomationTarget) -> Option<&AutomationLane> {
+        self.automation.iter().find(|l| l.target == *target)
+    }
+
+    /// Checks automation lanes. Lanes whose target is gone are kept
+    /// (AUT-050); they are reported by [`AutomationTarget::exists`].
+    pub fn validate_automation(&self) -> Result<(), String> {
+        let mut seen = std::collections::BTreeSet::new();
+        for l in &self.automation {
+            if !seen.insert(&l.target) {
+                return Err("two automation lanes for one target".into());
+            }
+            l.validate()?;
+        }
+        Ok(())
     }
 
     pub fn channel(&self, id: ChannelId) -> Option<&Channel> {

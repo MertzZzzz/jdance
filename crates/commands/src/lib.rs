@@ -12,10 +12,10 @@ pub use mixer::{add_insert, add_send, add_track};
 pub use playlist::{add_clip, add_lane, add_pattern, duplicate_clips, make_unique, steps_beyond};
 
 use jdance_domain::{
-    Channel, ChannelId, ClipId, Effect, InsertId, Lane, LaneId, LimiterSettings, MAX_CHANNELS,
-    MAX_NOTES_PER_ROW, MAX_TEMPO_BPM, MAX_VOLUME, MIN_TEMPO_BPM, Mixer, MixerTrack, Note, Pattern,
-    PatternClip, PatternId, Playlist, Project, RoutingError, SampleRef, SendId, Sidechain, Step,
-    StepRow, TrackId, sort_notes,
+    AutomationId, AutomationLane, AutomationTarget, Channel, ChannelId, ClipId, Effect, InsertId,
+    Lane, LaneId, LimiterSettings, MAX_CHANNELS, MAX_NOTES_PER_ROW, MAX_TEMPO_BPM, MAX_VOLUME,
+    MIN_TEMPO_BPM, Mixer, MixerTrack, Note, Pattern, PatternClip, PatternId, Playlist, Project,
+    RoutingError, SampleRef, SendId, Sidechain, Step, StepRow, TrackId, sort_notes, sort_points,
 };
 use thiserror::Error;
 
@@ -67,6 +67,8 @@ pub enum Edit {
         channel: Channel,
         index: usize,
         rows: Vec<(PatternId, StepRow)>,
+        /// Automation lanes of the channel's instrument (restored by undo).
+        automation: Vec<AutomationLane>,
     },
     RemoveChannel(ChannelId),
     SetChannelVolume(ChannelId, f32),
@@ -168,6 +170,13 @@ pub enum Edit {
     RestoreMixer {
         mixer: Box<Mixer>,
         channel_tracks: Vec<(ChannelId, TrackId)>,
+        automation: Vec<AutomationLane>,
+    },
+    /// Adds (`lane: Some`, new id), replaces or removes (`None`) an
+    /// automation lane. Points are sorted on apply.
+    SetAutomation {
+        id: AutomationId,
+        lane: Option<AutomationLane>,
     },
 }
 
@@ -185,6 +194,7 @@ pub enum MergeKey {
     InsertEffect(InsertId),
     Limiter,
     Notes(PatternId, ChannelId),
+    Automation(AutomationId),
 }
 
 impl Edit {
@@ -241,6 +251,8 @@ impl Edit {
             Edit::RestoreArrangement { .. } => "Change arrangement",
             Edit::SetInsertSidechain(..) => "Change sidechain",
             Edit::RestoreMixer { .. } => "Change mixer",
+            Edit::SetAutomation { lane: None, .. } => "Remove automation",
+            Edit::SetAutomation { .. } => "Edit automation",
         }
     }
 
@@ -258,6 +270,7 @@ impl Edit {
             Edit::SetNotes {
                 pattern, channel, ..
             } => Some(MergeKey::Notes(*pattern, *channel)),
+            Edit::SetAutomation { id, lane: Some(_) } => Some(MergeKey::Automation(*id)),
             _ => None,
         }
     }
@@ -300,6 +313,36 @@ impl Edit {
                     step: old,
                 })
             }
+            Edit::SetAutomation { id, lane } => {
+                let at = p.automation.iter().position(|l| l.id == *id);
+                let old = at.map(|i| p.automation[i].clone());
+                match lane {
+                    Some(new) => {
+                        let mut new = new.clone();
+                        new.id = *id;
+                        sort_points(&mut new.points);
+                        new.validate().map_err(EditError::Arrangement)?;
+                        if p.automation
+                            .iter()
+                            .any(|l| l.id != *id && l.target == new.target)
+                        {
+                            return Err(EditError::Arrangement(
+                                "the target already has an automation lane".into(),
+                            ));
+                        }
+                        match at {
+                            Some(i) => p.automation[i] = new,
+                            None => p.automation.push(new),
+                        }
+                    }
+                    None => {
+                        if let Some(i) = at {
+                            p.automation.remove(i);
+                        }
+                    }
+                }
+                Ok(Edit::SetAutomation { id: *id, lane: old })
+            }
             Edit::SetNotes {
                 pattern,
                 channel,
@@ -330,6 +373,7 @@ impl Edit {
                 channel,
                 index,
                 rows,
+                automation,
             } => {
                 if p.channel(channel.id).is_some() {
                     return Err(EditError::DuplicateChannel(channel.id));
@@ -354,6 +398,7 @@ impl Edit {
                     pat.rows.retain(|r| r.channel != channel.id);
                     pat.rows.push(row.clone());
                 }
+                p.automation.extend(automation.iter().cloned());
                 Ok(Edit::RemoveChannel(channel.id))
             }
             Edit::RemoveChannel(id) => {
@@ -365,10 +410,18 @@ impl Edit {
                         rows.push((pat.id, pat.rows.remove(i)));
                     }
                 }
+                // The channel's automation goes with it (AUT-050).
+                let target = jdance_domain::PluginTarget::Channel(*id);
+                let (automation, keep): (Vec<_>, Vec<_>) =
+                    std::mem::take(&mut p.automation).into_iter().partition(|l| {
+                        matches!(&l.target, AutomationTarget::PluginParam { target: t, .. } if *t == target)
+                    });
+                p.automation = keep;
                 Ok(Edit::AddChannel {
                     channel,
                     index,
                     rows,
+                    automation,
                 })
             }
             Edit::SetChannelVolume(id, v) => {
@@ -648,6 +701,7 @@ pub fn add_sampler_channel(
             channel: Channel::new_sampler(id, name),
             index,
             rows: Vec::new(),
+            automation: Vec::new(),
         },
     )?;
     Ok(id)
@@ -668,6 +722,7 @@ pub fn add_instrument_channel(
             channel: Channel::new_instrument(id, name, plugin),
             index,
             rows: Vec::new(),
+            automation: Vec::new(),
         },
     )?;
     Ok(id)

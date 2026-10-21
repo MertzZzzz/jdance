@@ -8,10 +8,11 @@
 //! previous snapshot by object ID without allocating, so edits do not
 //! cause clicks or reset delay lines.
 
+use crate::automation::{AutoMap, AutomationRt};
 use crate::effect_rt::{EffectRt, InsertRt, InstrumentRt, PluginRt, SidechainRt};
 use jdance_domain::{
-    ChannelId, MAX_CHANNELS, MixerTrack, PluginSlot, PluginTarget, Project, ROOT_KEY, SampleRef,
-    SendId, TICKS_PER_STEP, TrackId,
+    ChannelId, InsertId, MAX_CHANNELS, MixerTrack, PluginSlot, PluginTarget, Project, ROOT_KEY,
+    SampleRef, SendId, TICKS_PER_STEP, TrackId,
 };
 use jdance_dsp::{
     DelayLine, SafetyLimiter, SampleBuffer, Smoothed, StereoGain, balance_gains, pan_gains,
@@ -53,6 +54,10 @@ pub struct PlaybackSnapshot {
     pub tempo_bpm: f64,
     /// Master safety limiter stage; `None` when disabled.
     pub limiter: Option<SafetyLimiter>,
+    /// Automation lanes (song mode only, ADR-014).
+    pub automation: Vec<AutomationRt>,
+    /// Compiled for song playback.
+    pub song: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -101,6 +106,11 @@ pub struct TrackRt {
     /// Fade applied after the inserts around structural edits (insert
     /// added, removed or reordered), so effect changes do not click.
     pub struct_fade: Smoothed,
+    /// Automation lanes of volume and pan, and the project values.
+    pub auto_volume: Option<usize>,
+    pub auto_pan: Option<usize>,
+    pub base_volume: f32,
+    pub base_pan: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -110,6 +120,9 @@ pub struct SendRt {
     pub pre_fader: bool,
     pub gain: Smoothed,
     pub delay: DelayLine,
+    /// Automation lane of the level, and the project level.
+    pub auto_level: Option<usize>,
+    pub base_level: f32,
 }
 
 impl PlaybackSnapshot {
@@ -221,6 +234,116 @@ impl PlaybackSnapshot {
                 }
             }
         }
+    }
+}
+
+/// Compiles the project's lanes and attaches them to their targets.
+/// Lanes whose target is gone are skipped (AUT-050).
+fn bind_automation(
+    project: &Project,
+    snap: &mut PlaybackSnapshot,
+    to_sample: &impl Fn(u64) -> u64,
+) {
+    use jdance_domain::AutomationTarget as T;
+    let find_insert = |snap: &PlaybackSnapshot, id: InsertId| {
+        snap.tracks
+            .iter()
+            .enumerate()
+            .find_map(|(ti, t)| t.inserts.iter().position(|i| i.id == id).map(|ii| (ti, ii)))
+    };
+    for lane in &project.automation {
+        if lane.points.is_empty() {
+            continue;
+        }
+        let index = snap.automation.len();
+        let map = match &lane.target {
+            T::TrackVolume(id) => {
+                let Some(t) = snap.tracks.iter_mut().find(|t| t.id == *id) else {
+                    continue;
+                };
+                t.auto_volume = Some(index);
+                AutoMap::Volume
+            }
+            T::TrackPan(id) => {
+                let Some(t) = snap.tracks.iter_mut().find(|t| t.id == *id) else {
+                    continue;
+                };
+                t.auto_pan = Some(index);
+                AutoMap::Pan
+            }
+            T::SendLevel(id) => {
+                let Some(send) = snap
+                    .tracks
+                    .iter_mut()
+                    .flat_map(|t| t.sends.iter_mut())
+                    .find(|s| s.id == *id)
+                else {
+                    continue;
+                };
+                send.auto_level = Some(index);
+                AutoMap::SendLevel
+            }
+            T::EffectParam { insert, param } => {
+                let Some((ti, ii)) = find_insert(snap, *insert) else {
+                    continue;
+                };
+                let Some(effect) = project
+                    .mixer
+                    .all_tracks()
+                    .flat_map(|t| &t.inserts)
+                    .find(|i| i.id == *insert)
+                    .map(|i| &i.effect)
+                else {
+                    continue;
+                };
+                let Some(at) = effect.kind.params().iter().position(|p| p.id == param) else {
+                    continue;
+                };
+                let spec = &effect.kind.params()[at];
+                let base = effect.get(spec.id);
+                snap.tracks[ti].inserts[ii]
+                    .auto_params
+                    .push((at as u16, index, base));
+                AutoMap::Param(spec)
+            }
+            T::InsertBypass(insert) => {
+                let Some((ti, ii)) = find_insert(snap, *insert) else {
+                    continue;
+                };
+                let ins = &mut snap.tracks[ti].inserts[ii];
+                ins.auto_bypass = Some((index, ins.mix.target() == 0.0));
+                AutoMap::Bypass
+            }
+            T::PluginParam {
+                target: PluginTarget::Insert(insert),
+                param,
+            } => {
+                let Some((ti, ii)) = find_insert(snap, *insert) else {
+                    continue;
+                };
+                snap.tracks[ti].inserts[ii]
+                    .auto_plugin
+                    .push((*param, index));
+                AutoMap::Raw
+            }
+            T::PluginParam {
+                target: PluginTarget::Channel(ch),
+                param,
+            } => {
+                let Some(inst) = snap
+                    .channels
+                    .iter_mut()
+                    .find(|c| c.id == *ch)
+                    .and_then(|c| c.instrument.as_mut())
+                else {
+                    continue;
+                };
+                inst.auto_plugin.push((*param, index));
+                AutoMap::Raw
+            }
+        };
+        snap.automation
+            .push(AutomationRt::compile(lane, map, to_sample));
     }
 }
 
@@ -394,6 +517,10 @@ pub fn compile_full(
             main_out: None,
             latency: acc,
             struct_fade: Smoothed::new(1.0, (sample_rate / 200).max(1)),
+            auto_volume: None,
+            auto_pan: None,
+            base_volume: t.volume,
+            base_pan: t.pan,
         });
     }
 
@@ -411,6 +538,8 @@ pub fn compile_full(
                     pre_fader: s.pre_fader,
                     gain: Smoothed::new(s.level, ramp),
                     delay: pdc.line(in_lat[d] - out_lat[ti]),
+                    auto_level: None,
+                    base_level: s.level,
                 }
             })
             .collect();
@@ -468,11 +597,16 @@ pub fn compile_full(
                 sample_rate,
             )
         }),
+        automation: Vec::new(),
+        song: matches!(mode, PlayMode::Song),
     };
 
     let spt = samples_per_tick(project.tempo_bpm, sample_rate);
     snapshot.samples_per_tick = spt;
     let to_sample = |tick: u64| (tick as f64 * spt).round() as u64;
+    if snapshot.song {
+        bind_automation(project, &mut snapshot, &to_sample);
+    }
     match mode {
         PlayMode::Pattern(id) => {
             let Some(pattern) = project.pattern(id).or_else(|| project.patterns.first()) else {

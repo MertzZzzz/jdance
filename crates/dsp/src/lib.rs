@@ -103,6 +103,15 @@ impl Smoothed {
         self.step = (target - self.current) / self.ramp_len as f32;
     }
 
+    /// Ramps from the current value to `target` over exactly `samples`
+    /// (automation: one segment per 32 samples).
+    pub fn set_target_over(&mut self, target: f32, samples: u32) {
+        let samples = samples.max(1);
+        self.target = target;
+        self.remaining = samples;
+        self.step = (target - self.current) / samples as f32;
+    }
+
     /// Jumps to `value` without a ramp.
     pub fn reset(&mut self, value: f32) {
         self.current = value;

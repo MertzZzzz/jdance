@@ -175,6 +175,24 @@
 | Note-off velocity | NOT RUN | всегда 0 |
 | Кнопка panic в UI | NOT RUN | команда в движке есть |
 
+## Milestone A — автоматизация (часть 1: модель и движок)
+
+| Пункт | Статус | Артефакт / комментарий |
+|---|---|---|
+| ADR-014: дорожки на шкале песни (не clips), кривые hold/linear/curve, только Song-режим | ACCEPTED | `docs/adr/014-automation-model.md` |
+| Модель: точки (тики, нормализованное значение, кривая, tension), цели AUT-002, формат AUT-060, проект v9 | PASS | `domain` и `persistence` тесты |
+| Вычисление огибающей: каждая кривая, одна точка, совпадающие точки, hold, края (AUT-011, AUT-070 unit) | PASS | `curves_and_edges`, `tension_shapes_the_curve` |
+| Команды с undo; перетаскивание = один шаг; одна дорожка на цель | PASS | `automation_lanes_follow_their_objects` |
+| Удаление объекта удаляет его дорожки, undo восстанавливает обе; дорожки без цели сохраняются (AUT-050) | PASS | тот же тест |
+| Громкость/pan/send: значение каждые 32 сэмпла, рампа внутри, hold ≤ 32 сэмпла (AUT-021) | PASS | `volume_follows_the_envelope_within_32_samples`, `hold_jumps_complete_within_32_samples`, `pan_and_send_level_are_automated` |
+| Параметры встроенных эффектов (в т.ч. компрессор с sidechain) и bypass | PASS | `builtin_parameter_and_bypass_are_automated` |
+| VST3: chase в начале блока (AUT-033), точки огибающей с точным offset, промежуточные каждые 64 (AUT-030) | PASS | `plugin_parameters_get_chase_breakpoints_and_intermediate_points`; журнал реального тестового плагина (AUT-031) — NOT RUN |
+| Независимость от размера блока (AUT-070 property) | PASS | `automated_rendering_is_block_size_independent` (мутационная проверка) |
+| RT-001 при применении автоматизации | PASS | `applying_automation_does_not_allocate` |
+| Возврат к значениям проекта после остановки и вне Song-режима (AUT-040) | PASS (код) | рампа к проектным значениям; отдельного теста нет |
+| UI: дорожки автоматизации, «Automate» в меню регуляторов, отметка автоматизированных | NOT RUN | часть 2 |
+| Golden render с автоматизацией (AUT-051, CI-003) | NOT RUN | |
+
 ## Milestone 1A / 1B
 
 | Пункт | Статус |
