@@ -530,6 +530,31 @@ pub trait Host {
     }
     /// Stops the scan; modules not reached keep their earlier result.
     fn cancel_plugin_scan(&mut self) {}
+    /// Script tools: the built-in ones and the user's folder (cached).
+    fn scripts(&mut self) -> Vec<jdance_commands::note_tools::ScriptInfo> {
+        Vec::new()
+    }
+    /// The user's script folder (created if missing).
+    fn script_folder(&mut self) -> Option<PathBuf> {
+        None
+    }
+    /// Starts a script run on a worker; the result comes from
+    /// [`Host::script_result`] with the ticket. A new run replaces the
+    /// running one.
+    fn start_script(
+        &mut self,
+        _run: jdance_commands::note_tools::ScriptRun,
+        _job: crate::ScriptJob,
+    ) -> Option<u64> {
+        None
+    }
+    fn script_result(
+        &mut self,
+        _ticket: u64,
+    ) -> Option<Result<jdance_commands::note_tools::ScriptOutput, String>> {
+        None
+    }
+    fn cancel_script(&mut self) {}
     /// Saved window layout (dock/undock), as written by the UI.
     fn ui_layout(&self) -> String {
         String::new()

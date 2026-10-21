@@ -11,8 +11,10 @@ mod channel_settings;
 mod dock;
 mod host;
 mod icons;
+mod lfo_dialog;
 mod library;
 mod mixer;
+mod note_tools_ui;
 mod piano;
 mod piano_dialogs;
 mod playlist;
@@ -20,6 +22,8 @@ mod plugins;
 mod project_browser;
 mod rack;
 mod recording;
+mod scripts;
+pub use scripts::ScriptJob;
 mod sample_editor;
 mod settings;
 mod theme;
@@ -120,6 +124,7 @@ pub struct JdanceApp<H: Host, S: ProjectStore> {
     /// Which panels are in their own windows (a user setting).
     layout: dock::Layout,
     show_project_browser: bool,
+    lfo_dialog: Option<lfo_dialog::LfoDialog>,
     sample_picker: Option<library::SamplePicker>,
     show_library: bool,
     show_recording: bool,
@@ -208,6 +213,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             automation_editors: Vec::new(),
             layout,
             show_project_browser: true,
+            lfo_dialog: None,
             sample_picker: None,
             show_library: false,
             show_recording: false,
@@ -1274,6 +1280,63 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             self.sample_editor = Some(sample_editor::SampleEditor::for_clip(c));
         } else if let Some(c) = self.project.playlist.automation_clip(id) {
             self.open_automation(c.source);
+        }
+    }
+
+    /// Tools > LFO: writes the curve into the chosen source (a new one
+    /// gets no Playlist clip) and opens it in the Automation Editor.
+    fn lfo_window(&mut self, ctx: &egui::Context, now: f64) {
+        let Some(mut d) = self.lfo_dialog.take() else {
+            return;
+        };
+        let (project, host) = (&self.project, &mut self.host);
+        let r = d.show(ctx, project, &mut |t| {
+            automation::source_name(project, t, host)
+        });
+        if let Some((target, points, range)) = r.apply {
+            let p = &mut self.project;
+            let (id, lane) = match target {
+                lfo_dialog::LfoTarget::Existing(id) => match p.automation_lane(id) {
+                    Some(a) => {
+                        let mut a = a.clone();
+                        a.points =
+                            jdance_commands::note_tools::splice_points(&a.points, range, &points);
+                        a.length = a.length.max(u64::from(range.end));
+                        (id, a)
+                    }
+                    None => {
+                        self.lfo_dialog = None;
+                        return;
+                    }
+                },
+                lfo_dialog::LfoTarget::New(target) => {
+                    let id = jdance_domain::AutomationId(p.ids.next());
+                    let name = automation::source_name(p, &target, &mut self.host);
+                    let bar = 4 * u64::from(jdance_domain::PPQ);
+                    (
+                        id,
+                        jdance_domain::AutomationLane {
+                            id,
+                            name,
+                            target,
+                            length: u64::from(range.end).div_ceil(bar).max(1) * bar,
+                            points,
+                        },
+                    )
+                }
+            };
+            self.apply(
+                Edit::SetAutomation {
+                    id,
+                    lane: Some(lane),
+                },
+                false,
+                now,
+            );
+            self.open_automation(id);
+        }
+        if !r.close {
+            self.lfo_dialog = Some(d);
         }
     }
 
@@ -2665,6 +2728,15 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
         if let Some(id) = piano_out.select_pattern {
             self.current_pattern = id;
         }
+        if let Some(range) = piano_out.lfo
+            && let Some(ch) = self
+                .piano
+                .as_ref()
+                .and_then(|p| self.project.channel(p.channel))
+        {
+            self.lfo_dialog = Some(lfo_dialog::LfoDialog::new(range, ch.track));
+        }
+        self.lfo_window(&ctx, now);
         if let Some(snap) = piano_out.snap {
             self.snap = snap;
         }

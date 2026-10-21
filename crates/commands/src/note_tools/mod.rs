@@ -22,10 +22,12 @@
 
 mod generate;
 mod lfo;
+mod script;
 mod transform;
 
 pub use generate::*;
 pub use lfo::*;
+pub use script::*;
 pub use transform::*;
 
 use jdance_domain::{Note, PPQ, assign_note_ids, sort_notes};

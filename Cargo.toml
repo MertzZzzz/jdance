@@ -9,6 +9,7 @@ members = [
     "crates/audio-cpal",
     "crates/persistence",
     "crates/mp3",
+    "crates/scripts",
     "crates/plugin-api",
     "crates/plugin-vst3",
     "crates/ui",
@@ -33,6 +34,7 @@ publish = false
 jdance-domain = { path = "crates/domain" }
 jdance-commands = { path = "crates/commands" }
 jdance-mp3 = { path = "crates/mp3" }
+jdance-scripts = { path = "crates/scripts" }
 jdance-dsp = { path = "crates/dsp" }
 jdance-engine = { path = "crates/engine" }
 jdance-audio-api = { path = "crates/audio-api" }
@@ -60,6 +62,8 @@ rfd = "0.17.2"
 rtrb = "0.4.0"
 # LAME 3.100 built from bundled source (LGPL-2.0; see docs/licenses.md).
 mp3lame-encoder = "0.2.5"
+# Embedded script runtime for Piano Roll scripts (spec 0.2.0 §18.22).
+rhai = { version = "1.27.0", default-features = false, features = ["std", "no_module", "no_custom_syntax", "no_time", "only_i64", "f32_float"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 tempfile = "3.27.0"

@@ -33,6 +33,8 @@ const ALLOWED: &[(&str, &[&str])] = &[
     ("jdance-persistence", &["jdance-domain"]),
     // LAME adapter: no workspace dependencies.
     ("jdance-mp3", &[]),
+    // Script tools: run on the pure note tools.
+    ("jdance-scripts", &["jdance-domain", "jdance-commands"]),
     ("jdance-plugin-api", &[]),
     // VST3 hosting; the only crate besides the test plugin with unsafe code.
     ("jdance-plugin-vst3", &["jdance-plugin-api"]),
@@ -56,6 +58,7 @@ const ALLOWED: &[(&str, &[&str])] = &[
             "jdance-dsp",
             "jdance-engine",
             "jdance-mp3",
+            "jdance-scripts",
             "jdance-audio-api",
             "jdance-audio-cpal",
             "jdance-persistence",

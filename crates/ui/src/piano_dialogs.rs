@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Piano roll dialogs (spec "DAW UI clean room", §6): Quantize, Humanize,
-//! Transpose, Scale helper and Note properties. Each works on the
-//! selection (or every note when nothing is selected) and applies as one
+//! Piano roll dialogs (spec "DAW UI clean room", §6): Transpose, Scale
+//! helper and Note properties. Each works on the selection (or every note when nothing is selected) and applies as one
 //! undo step.
 
 use crate::piano::key_name;
 use crate::theme;
-use crate::toolbar::{SNAPS, bars_text};
+use crate::toolbar::bars_text;
 use egui::RichText;
-use jdance_commands::notes::{self, Humanize, Quantize, Scale, ScaleMode};
+use jdance_commands::notes::{self, Scale, ScaleMode};
 use jdance_domain::{MAX_PATTERN_STEPS, Note, TICKS_PER_STEP};
 
 const NAMES: [&str; 12] = [
@@ -17,8 +16,6 @@ const NAMES: [&str; 12] = [
 
 #[derive(Debug, Clone)]
 pub(crate) enum Dialog {
-    Quantize(Quantize),
-    Humanize(Humanize),
     Transpose { semitones: i32, octaves: i32 },
     Scale { scale: Scale, highlight: bool },
     Properties(Props),
@@ -82,21 +79,9 @@ pub(crate) struct DialogOutput {
     pub highlight: Option<Option<Scale>>,
 }
 
-fn grid_combo(ui: &mut egui::Ui, grid: &mut u32) {
-    egui::ComboBox::from_id_salt("q_grid")
-        .selected_text(crate::toolbar::snap_name(*grid))
-        .show_ui(ui, |ui| {
-            for (v, name) in SNAPS.into_iter().filter(|(v, _)| *v > 0) {
-                ui.selectable_value(grid, v, name);
-            }
-        });
-}
-
 impl Dialog {
     pub fn title(&self) -> &'static str {
         match self {
-            Self::Quantize(_) => "Quantize",
-            Self::Humanize(_) => "Humanize",
             Self::Transpose { .. } => "Transpose",
             Self::Scale { .. } => "Scale helper",
             Self::Properties(_) => "Note properties",
@@ -139,49 +124,6 @@ impl Dialog {
                     .num_columns(2)
                     .spacing([12.0, 8.0])
                     .show(ui, |ui| match self {
-                        Self::Quantize(q) => {
-                            ui.label("Grid");
-                            grid_combo(ui, &mut q.grid);
-                            ui.end_row();
-                            ui.label("Strength");
-                            ui.add(
-                                egui::Slider::new(&mut q.strength, 0.0..=1.0)
-                                    .custom_formatter(|v, _| format!("{:.0} %", v * 100.0)),
-                            );
-                            ui.end_row();
-                            ui.label("Apply to");
-                            ui.horizontal(|ui| {
-                                ui.checkbox(&mut q.starts, "Starts");
-                                ui.checkbox(&mut q.ends, "Ends (lengths)");
-                            });
-                            ui.end_row();
-                            apply = Some(notes::quantize(notes, selected, *q));
-                        }
-                        Self::Humanize(h) => {
-                            ui.label("Timing ±");
-                            ui.add(
-                                egui::DragValue::new(&mut h.time)
-                                    .range(0..=TICKS_PER_STEP)
-                                    .suffix(" ticks"),
-                            );
-                            ui.end_row();
-                            ui.label("Velocity ±");
-                            ui.add(
-                                egui::Slider::new(&mut h.velocity, 0.0..=0.5)
-                                    .custom_formatter(|v, _| format!("{:.0} %", v * 100.0)),
-                            );
-                            ui.end_row();
-                            ui.label("Seed");
-                            ui.horizontal(|ui| {
-                                ui.add(egui::DragValue::new(&mut h.seed));
-                                if ui.button("New").clicked() {
-                                    h.seed =
-                                        h.seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-                                }
-                            });
-                            ui.end_row();
-                            apply = Some(notes::humanize(notes, selected, *h));
-                        }
                         Self::Transpose { semitones, octaves } => {
                             ui.label("Semitones");
                             ui.add(egui::DragValue::new(semitones).range(-24..=24));

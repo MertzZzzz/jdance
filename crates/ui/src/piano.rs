@@ -19,7 +19,7 @@ use egui::{
     pos2, vec2,
 };
 use jdance_commands::Edit;
-use jdance_commands::notes::{self, Humanize, Quantize, Scale, ScaleMode};
+use jdance_commands::notes::{self, Scale, ScaleMode};
 use jdance_domain::{
     ChannelId, ChannelSource, MAX_NOTES_PER_ROW, Note, Pattern, PatternId, Project, TICKS_PER_STEP,
 };
@@ -137,6 +137,14 @@ pub(crate) struct PianoRoll {
     audition_until: f64,
     /// Last cell (tick, key) of the current Paint gesture.
     last_paint: Option<(u32, u8)>,
+    /// Open Piano Roll Tools dialog (spec 0.2.0 §18).
+    tool_dialog: Option<crate::note_tools_ui::ToolDialog>,
+    /// Its preview: drawn instead of the notes until Apply or Cancel.
+    preview: Option<Vec<Note>>,
+    /// Grid of the quick tools: the last snap that was not off.
+    last_grid: u32,
+    script_dialog: Option<crate::scripts::ScriptDialog>,
+    scripts: Vec<jdance_commands::note_tools::ScriptInfo>,
 }
 
 #[derive(Debug, Default)]
@@ -146,6 +154,10 @@ pub(crate) struct PianoOutput {
     pub close: bool,
     pub select_pattern: Option<PatternId>,
     pub snap: Option<u32>,
+    /// Tools > LFO: automation points for a range of the pattern.
+    pub lfo: Option<jdance_commands::note_tools::Range>,
+    /// Tools > Scripts.
+    pub script: Option<crate::scripts::ScriptRequest>,
 }
 
 fn is_black(key: u8) -> bool {
@@ -241,6 +253,11 @@ impl PianoRoll {
             hover_tick: None,
             audition_until: 0.0,
             last_paint: None,
+            tool_dialog: None,
+            preview: None,
+            last_grid: TICKS_PER_STEP,
+            script_dialog: None,
+            scripts: Vec::new(),
         }
     }
 
@@ -290,6 +307,53 @@ impl PianoRoll {
         out.edits.push((self.set(pattern, notes), false));
         out.end_gesture = true;
         self.selection = select;
+    }
+
+    /// The tools' view of the row: scope = selection, generator range =
+    /// the selection's span (else the pattern).
+    fn tool_input<'a>(
+        &self,
+        pattern: &Pattern,
+        notes: &'a [Note],
+        selected: &'a [usize],
+    ) -> jdance_commands::note_tools::Input<'a> {
+        let range = (!selected.is_empty()).then(|| jdance_commands::note_tools::Range {
+            start: selected.iter().map(|&i| notes[i].start).min().unwrap_or(0),
+            end: selected.iter().map(|&i| notes[i].end()).max().unwrap_or(0),
+        });
+        jdance_commands::note_tools::Input {
+            notes,
+            selected,
+            pattern_len: pattern.length_ticks() as u32,
+            grid: self.last_grid,
+            range,
+        }
+    }
+
+    /// Quick tools apply at once; the others open their dialog.
+    fn start_tool(
+        &mut self,
+        ctx: &egui::Context,
+        tool: jdance_commands::note_tools::Tool,
+        pattern: &Pattern,
+        notes: &[Note],
+        out: &mut PianoOutput,
+    ) {
+        if crate::note_tools_ui::is_quick(&tool) {
+            let sel = indices(notes, &self.selection);
+            let input = self.tool_input(pattern, notes, &sel);
+            match jdance_commands::note_tools::run(&tool, &input) {
+                Ok(Some(o)) if o.dropped == 0 => {
+                    let select = o.select.iter().map(|&i| o.notes[i]).collect();
+                    self.commit(out, pattern, o.notes, select);
+                    return;
+                }
+                Ok(None) => return,
+                // Dropped notes need a confirmation; errors show there.
+                _ => {}
+            }
+        }
+        self.tool_dialog = Some(crate::note_tools_ui::ToolDialog::new(ctx, tool));
     }
 
     fn header(
@@ -374,10 +438,8 @@ impl PianoRoll {
                 mode: ScaleMode::Major,
             });
             let highlight = self.scale.is_some();
-            let quantize = Quantize {
-                grid: self.snap.max(TICKS_PER_STEP / 4),
-                ..Quantize::default()
-            };
+            let mut tool = None;
+            let mut script = None;
             ui.menu_button("Tools", |ui| {
                 let mut open = |ui: &mut egui::Ui, label: &str, d: Dialog, enabled: bool| {
                     if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
@@ -385,8 +447,49 @@ impl PianoRoll {
                         ui.close();
                     }
                 };
-                open(ui, "Quantize…", Dialog::Quantize(quantize), any);
-                open(ui, "Humanize…", Dialog::Humanize(Humanize::default()), any);
+                for t in crate::note_tools_ui::menu_tools(self.last_grid) {
+                    let Some(t) = t else {
+                        ui.separator();
+                        continue;
+                    };
+                    let quick = crate::note_tools_ui::is_quick(&t);
+                    let label = if quick {
+                        t.name().to_owned()
+                    } else {
+                        format!("{}…", t.name())
+                    };
+                    let enabled = any
+                        || t.is_generator()
+                        || matches!(t, jdance_commands::note_tools::Tool::Randomize(_));
+                    let tip = if quick {
+                        format!(
+                            "Applies at once on a {} grid",
+                            crate::toolbar::snap_name(self.last_grid)
+                        )
+                    } else {
+                        "Opens with a preview; Apply is one undo step".to_owned()
+                    };
+                    if ui
+                        .add_enabled(enabled, egui::Button::new(label))
+                        .on_hover_text(tip)
+                        .clicked()
+                    {
+                        tool = Some(t);
+                        ui.close();
+                    }
+                }
+                if ui
+                    .button("LFO…")
+                    .on_hover_text("Writes an LFO curve into an automation source")
+                    .clicked()
+                {
+                    out.lfo = Some(jdance_commands::note_tools::Range {
+                        start: 0,
+                        end: pattern.length_ticks() as u32,
+                    });
+                    ui.close();
+                }
+                ui.separator();
                 open(
                     ui,
                     "Transpose…",
@@ -403,11 +506,22 @@ impl PianoRoll {
                     Dialog::Properties(Props::of(&target)),
                     any,
                 );
+                ui.separator();
+                let has_last = crate::scripts::last_run(ui.ctx()).is_some();
+                ui.menu_button("Scripts", |ui| {
+                    script = crate::scripts::menu(ui, &self.scripts, has_last);
+                });
             })
             .response
             .on_hover_text("Note tools: they work on the selection, or on every note");
             if let Some(d) = chosen {
                 self.dialog = Some(d);
+            }
+            if let Some(t) = tool {
+                self.start_tool(ui.ctx(), t, pattern, notes, out);
+            }
+            if script.is_some() {
+                out.script = script;
             }
             if ui.button("Close").clicked() {
                 out.close = true;
@@ -425,12 +539,25 @@ impl PianoRoll {
         snap: u32,
     ) -> PianoOutput {
         self.snap = snap;
+        if snap > 0 {
+            self.last_grid = snap;
+        }
         let mut out = PianoOutput::default();
         let notes: Vec<Note> = pattern
             .row(self.channel)
             .map(|r| r.notes.clone())
             .unwrap_or_default();
         self.selection.retain(|s| notes.contains(s));
+        let sel = indices(&notes, &self.selection);
+        self.scripts = host.scripts();
+        let input = self.tool_input(pattern, &notes, &sel);
+        self.preview = match &mut self.tool_dialog {
+            Some(d) => d.preview(&input).map(|o| o.notes.clone()),
+            None => self
+                .script_dialog
+                .as_ref()
+                .and_then(|d| d.preview().map(<[Note]>::to_vec)),
+        };
 
         self.header(ui, project, pattern, &notes, &mut out);
         ui.add_space(4.0);
@@ -536,7 +663,37 @@ impl PianoRoll {
                     ),
                 )
             };
-            for n in &notes {
+            if let Some(preview) = &self.preview {
+                // Tool preview: the result in teal over the dimmed notes.
+                for n in &notes {
+                    let r = note_rect(n);
+                    if r.intersects(clip) {
+                        painter.rect_filled(
+                            r,
+                            CornerRadius::same(3),
+                            theme::MUTED.gamma_multiply(0.25),
+                        );
+                    }
+                }
+                for n in preview {
+                    let r = note_rect(n);
+                    if !r.intersects(clip) {
+                        continue;
+                    }
+                    painter.rect_filled(
+                        r,
+                        CornerRadius::same(3),
+                        theme::TEAL.gamma_multiply(0.35 + 0.5 * n.velocity),
+                    );
+                    painter.rect_stroke(
+                        r,
+                        CornerRadius::same(3),
+                        Stroke::new(1.0, theme::TEAL),
+                        StrokeKind::Inside,
+                    );
+                }
+            }
+            for n in notes.iter().filter(|_| self.preview.is_none()) {
                 let r = note_rect(n);
                 if !r.intersects(clip) {
                     continue;
@@ -978,6 +1135,68 @@ impl PianoRoll {
         self.velocity_lane(ui, pattern, &notes, px_tick, h_offset, &mut out);
         self.shortcuts(ui, pattern, &notes, &mut out);
 
+        if let Some(req) = out.script.take() {
+            use crate::scripts::{ScriptDialog, ScriptRequest};
+            let last = crate::scripts::last_run(ui.ctx());
+            match req {
+                ScriptRequest::OpenFolder => {
+                    if let Some(dir) = host.script_folder() {
+                        host.reveal_in_file_manager(&dir);
+                    }
+                }
+                ScriptRequest::Open(id) => {
+                    if let Some(info) = self.scripts.iter().find(|s| s.id == id) {
+                        self.script_dialog = Some(ScriptDialog::new(info.clone(), last.as_ref()));
+                    }
+                }
+                ScriptRequest::RunLast => {
+                    if let Some(l) = &last
+                        && let Some(info) = self.scripts.iter().find(|s| s.id == l.id)
+                    {
+                        let mut d = ScriptDialog::new(info.clone(), Some(l));
+                        // A changed script asks for its settings again.
+                        d.auto_apply = info.hash == l.hash;
+                        self.script_dialog = Some(d);
+                    }
+                }
+            }
+        }
+        if let Some(mut d) = self.script_dialog.take() {
+            let input = self.tool_input(pattern, &notes, &sel);
+            if let Some(s) = d.preview_selection() {
+                // Selection scripts preview by selecting.
+                self.selection = s.iter().filter_map(|&i| notes.get(i).copied()).collect();
+            }
+            let r = d.show(ui.ctx(), host, &input);
+            match r.apply {
+                Some(jdance_commands::note_tools::ScriptOutput::Notes(o)) => {
+                    let select = o.select.iter().map(|&i| o.notes[i]).collect();
+                    self.commit(&mut out, pattern, o.notes, select);
+                }
+                Some(jdance_commands::note_tools::ScriptOutput::Selection(s)) => {
+                    self.selection = s.iter().filter_map(|&i| notes.get(i).copied()).collect();
+                }
+                None => {}
+            }
+            if !r.close {
+                self.script_dialog = Some(d);
+            } else {
+                self.preview = None;
+            }
+        }
+        if let Some(mut d) = self.tool_dialog.take() {
+            let input = self.tool_input(pattern, &notes, &sel);
+            let r = d.show(ui.ctx(), &input);
+            if let Some(o) = r.apply {
+                let select = o.select.iter().map(|&i| o.notes[i]).collect();
+                self.commit(&mut out, pattern, o.notes, select);
+            }
+            if !r.close {
+                self.tool_dialog = Some(d);
+            } else {
+                self.preview = None;
+            }
+        }
         if let Some(mut d) = self.dialog.take() {
             let idx = indices(&notes, &self.selection);
             let r = d.show(ui.ctx(), &notes, &idx);

@@ -157,6 +157,52 @@ pub struct AudioHost {
     ),
     next_import: u64,
     recorder: Recorder,
+    scripts: ScriptHost,
+}
+
+/// Script tools: the loaded scripts and the run in flight.
+#[derive(Default)]
+struct ScriptHost {
+    list: Vec<jdance_scripts::Script>,
+    loaded_at: Option<std::time::Instant>,
+    next: u64,
+    running: Option<(
+        u64,
+        Arc<std::sync::atomic::AtomicBool>,
+        Receiver<ScriptResult>,
+    )>,
+    done: Vec<(u64, ScriptResult)>,
+}
+
+type ScriptResult = Result<jdance_commands::note_tools::ScriptOutput, String>;
+
+impl ScriptHost {
+    fn folder() -> Option<PathBuf> {
+        config::config_dir().map(|d| d.join("scripts"))
+    }
+
+    /// Built-ins plus the user folder, read again every few seconds.
+    fn refresh(&mut self, notices: &mut Vec<Notice>) {
+        if self
+            .loaded_at
+            .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(3))
+        {
+            return;
+        }
+        let first = self.loaded_at.is_none();
+        self.loaded_at = Some(std::time::Instant::now());
+        let mut list = jdance_scripts::builtins();
+        if let Some(dir) = Self::folder() {
+            let (user, errors) = jdance_scripts::load_folder(&dir);
+            list.extend(user);
+            if first {
+                for e in errors {
+                    notices.push(Notice::warning(format!("Script not loaded: {e}")));
+                }
+            }
+        }
+        self.list = list;
+    }
 }
 
 impl std::fmt::Debug for AudioHost {
@@ -219,6 +265,7 @@ impl AudioHost {
             imports: std::sync::mpsc::channel(),
             next_import: 0,
             recorder: Recorder::default(),
+            scripts: ScriptHost::default(),
         }
     }
 
@@ -1297,6 +1344,79 @@ impl Host for AudioHost {
         self.settings.plugin_paths = paths;
         self.save_settings();
         self.start_plugin_scan(false);
+    }
+
+    fn scripts(&mut self) -> Vec<jdance_commands::note_tools::ScriptInfo> {
+        self.scripts.refresh(&mut self.notices);
+        self.scripts.list.iter().map(|s| s.info.clone()).collect()
+    }
+
+    fn script_folder(&mut self) -> Option<PathBuf> {
+        let dir = ScriptHost::folder()?;
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            self.notices.push(Notice::warning(format!(
+                "Cannot create {}: {e}",
+                dir.display()
+            )));
+            return None;
+        }
+        Some(dir)
+    }
+
+    fn start_script(
+        &mut self,
+        run: jdance_commands::note_tools::ScriptRun,
+        job: jdance_ui::ScriptJob,
+    ) -> Option<u64> {
+        self.cancel_script();
+        let script = self
+            .scripts
+            .list
+            .iter()
+            .find(|s| s.info.id == run.id)?
+            .clone();
+        self.scripts.next += 1;
+        let ticket = self.scripts.next;
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = Arc::clone(&cancel);
+        let (tx, rx) = channel();
+        std::thread::Builder::new()
+            .name("jdance-script".into())
+            .spawn(move || {
+                let input = jdance_commands::note_tools::Input {
+                    notes: &job.notes,
+                    selected: &job.selected,
+                    pattern_len: job.pattern_len,
+                    grid: job.grid,
+                    range: job.range,
+                };
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    script.run(&run, &input, flag)
+                }))
+                .unwrap_or_else(|_| Err("the script runtime failed".into()));
+                let _ = tx.send(r);
+            })
+            .ok()?;
+        self.scripts.running = Some((ticket, cancel, rx));
+        Some(ticket)
+    }
+
+    fn script_result(&mut self, ticket: u64) -> Option<ScriptResult> {
+        if let Some((t, _, rx)) = &self.scripts.running
+            && let Ok(r) = rx.try_recv()
+        {
+            self.scripts.done.push((*t, r));
+            self.scripts.running = None;
+        }
+        let i = self.scripts.done.iter().position(|(t, _)| *t == ticket)?;
+        Some(self.scripts.done.remove(i).1)
+    }
+
+    fn cancel_script(&mut self) {
+        if let Some((_, c, _)) = self.scripts.running.take() {
+            c.store(true, Relaxed);
+        }
+        self.scripts.done.clear();
     }
 
     fn ui_layout(&self) -> String {
