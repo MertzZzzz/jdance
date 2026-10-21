@@ -1,18 +1,22 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Playlist: lanes and pattern clips (spec "Playlist").
 //!
-//! - A lane is organizational only: no instrument, no routing. Its
-//!   mute/solo gates which clips' events are admitted to playback.
-//! - A clip references a pattern; its duration is always
-//!   `pattern.length_ticks · repeat_count` (never stored separately).
+//! - A lane holds pattern and audio clips. Its mute/solo gates which
+//!   clips play. Its `audio_track` routes only its audio clips; pattern
+//!   clips play through their channels' own routing (spec 0.2.0 §2).
+//! - A pattern clip shows `duration` ticks of its pattern starting at
+//!   `offset`; looped clips repeat the pattern, so the number of
+//!   repetitions is derived, never stored (spec 0.2.0 §4).
 //! - Clips may overlap freely; every admitted event plays.
 
-use crate::{ClipId, LaneId, Pattern, PatternId};
+use crate::{AudioClip, ClipId, LaneId, Pattern, PatternId, TrackId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-/// Upper bound for clip repetitions.
+/// Upper bound for repetitions of a looped clip (bounds `duration`).
 pub const MAX_REPEAT: u32 = 1024;
+/// Upper bound for a pattern clip's duration and offset in ticks.
+pub const MAX_CLIP_TICKS: u64 = MAX_REPEAT as u64 * crate::MAX_PATTERN_STEPS as u64 * 240;
 /// Upper bound for a clip start, ≈ 4 hours at 120 BPM.
 pub const MAX_START_TICKS: u64 = 960 * 4 * 60 * 120;
 
@@ -21,6 +25,8 @@ pub struct Playlist {
     /// Display order only.
     pub lanes: Vec<Lane>,
     pub clips: Vec<PatternClip>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audio_clips: Vec<AudioClip>,
     /// Global loop region in ticks `[start, end)` for song playback.
     pub loop_range: Option<(u64, u64)>,
     pub loop_enabled: bool,
@@ -34,6 +40,13 @@ pub struct Lane {
     pub color: [u8; 3],
     pub muted: bool,
     pub solo: bool,
+    /// Mixer track for this lane's audio clips (default master).
+    #[serde(default = "master")]
+    pub audio_track: TrackId,
+}
+
+fn master() -> TrackId {
+    TrackId::MASTER
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,18 +56,44 @@ pub struct PatternClip {
     pub pattern: PatternId,
     /// Start in ticks.
     pub start: u64,
-    /// `>= 1`.
-    pub repeat: u32,
+    /// Pattern position shown at `start`, in ticks; looped clips use it
+    /// modulo the pattern length.
+    pub offset: u64,
+    /// Length on the timeline in ticks, `>= 1`.
+    pub duration: u64,
+    /// Repeats the pattern for as long as `duration`; otherwise the clip
+    /// shows at most the pattern's own range.
+    pub looped: bool,
     pub muted: bool,
 }
 
 impl PatternClip {
-    /// `[start, start + duration)` in ticks for the given pattern.
-    pub fn interval(&self, pattern: &Pattern) -> (u64, u64) {
-        (
-            self.start,
-            self.start + pattern.length_ticks() * u64::from(self.repeat),
-        )
+    /// A looped clip of `repeat` whole repetitions of `pattern`.
+    pub fn repeating(id: ClipId, lane: LaneId, pattern: &Pattern, start: u64, repeat: u32) -> Self {
+        Self {
+            id,
+            lane,
+            pattern: pattern.id,
+            start,
+            offset: 0,
+            duration: pattern.length_ticks() * u64::from(repeat.max(1)),
+            looped: true,
+            muted: false,
+        }
+    }
+
+    /// `[start, start + duration)` in ticks.
+    pub fn interval(&self) -> (u64, u64) {
+        (self.start, self.start + self.duration)
+    }
+
+    /// Pattern repetitions the clip touches (whole or partial).
+    pub fn repetitions(&self, pattern: &Pattern) -> u64 {
+        let len = pattern.length_ticks().max(1);
+        if !self.looped {
+            return 1;
+        }
+        ((self.offset % len) + self.duration).div_ceil(len)
     }
 }
 
@@ -81,9 +120,11 @@ impl Playlist {
                     color: LANE_COLORS[i % LANE_COLORS.len()],
                     muted: false,
                     solo: false,
+                    audio_track: TrackId::MASTER,
                 })
                 .collect(),
             clips: Vec::new(),
+            audio_clips: Vec::new(),
             loop_range: None,
             loop_enabled: false,
         }
@@ -105,13 +146,27 @@ impl Playlist {
         self.clips.iter_mut().find(|c| c.id == id)
     }
 
+    pub fn audio_clip(&self, id: ClipId) -> Option<&AudioClip> {
+        self.audio_clips.iter().find(|c| c.id == id)
+    }
+
+    pub fn audio_clip_mut(&mut self, id: ClipId) -> Option<&mut AudioClip> {
+        self.audio_clips.iter_mut().find(|c| c.id == id)
+    }
+
     /// Whether the clip's events are admitted to playback (spec
     /// "Mute/Solo"): clip mute first, then lane mute, then lane solo.
     pub fn admits(&self, clip: &PatternClip) -> bool {
-        if clip.muted {
-            return false;
-        }
-        let Some(lane) = self.lane(clip.lane) else {
+        !clip.muted && self.lane_plays(clip.lane)
+    }
+
+    /// Whether an audio clip plays (same rules as pattern clips).
+    pub fn admits_audio(&self, clip: &AudioClip) -> bool {
+        !clip.muted && self.lane_plays(clip.lane)
+    }
+
+    fn lane_plays(&self, lane: LaneId) -> bool {
+        let Some(lane) = self.lane(lane) else {
             return false;
         };
         if lane.muted {
@@ -121,16 +176,10 @@ impl Playlist {
         !any_solo || lane.solo
     }
 
-    /// Right edge of all clips in ticks, muted clips included.
-    pub fn arrangement_end(&self, patterns: &[Pattern]) -> u64 {
-        self.clips
-            .iter()
-            .filter_map(|c| {
-                let p = patterns.iter().find(|p| p.id == c.pattern)?;
-                Some(c.interval(p).1)
-            })
-            .max()
-            .unwrap_or(0)
+    /// Right edge of all pattern clips in ticks, muted clips included.
+    /// Audio clips: [`crate::Project::arrangement_end_ticks`].
+    pub fn arrangement_end(&self) -> u64 {
+        self.clips.iter().map(|c| c.interval().1).max().unwrap_or(0)
     }
 
     /// Structural checks against the project's patterns.
@@ -151,8 +200,8 @@ impl Playlist {
             if !patterns.iter().any(|p| p.id == c.pattern) {
                 return Err(format!("clip {} references a missing pattern", c.id.0));
             }
-            if c.repeat == 0 || c.repeat > MAX_REPEAT {
-                return Err(format!("clip {} repeat {} out of range", c.id.0, c.repeat));
+            if c.duration == 0 || c.duration > MAX_CLIP_TICKS || c.offset > MAX_CLIP_TICKS {
+                return Err(format!("clip {} duration or offset out of range", c.id.0));
             }
             if c.start > MAX_START_TICKS {
                 return Err(format!("clip {} starts too late", c.id.0));
@@ -182,30 +231,30 @@ mod tests {
     }
 
     fn clip(id: u64, lane: LaneId, start: u64, repeat: u32) -> PatternClip {
-        PatternClip {
-            id: ClipId(id),
-            lane,
-            pattern: PatternId(1),
-            start,
-            repeat,
-            muted: false,
-        }
+        let pat = Pattern::new(PatternId(1), "A");
+        PatternClip::repeating(ClipId(id), lane, &pat, start, repeat)
     }
 
     #[test]
-    fn duration_and_end_follow_pattern_length() {
+    fn duration_is_stored_and_repetitions_are_derived() {
         let (mut pl, mut pats) = setup();
         let lane = pl.lanes[0].id;
         pl.clips.push(clip(1, lane, 3840, 3));
-        assert_eq!(pl.clips[0].interval(&pats[0]), (3840, 3840 + 3 * 3840));
+        assert_eq!(pl.clips[0].interval(), (3840, 3840 + 3 * 3840));
         pats[0].length_steps = 8;
-        assert_eq!(pl.arrangement_end(&pats), 3840 + 3 * 1920);
-        pl.clips[0].muted = true;
         assert_eq!(
-            pl.arrangement_end(&pats),
-            3840 + 3 * 1920,
-            "muted clips count"
+            pl.arrangement_end(),
+            3840 + 3 * 3840,
+            "the clip keeps its length when the pattern shrinks"
         );
+        assert_eq!(pl.clips[0].repetitions(&pats[0]), 6);
+        pl.clips[0].offset = 960;
+        pl.clips[0].duration = 1920;
+        assert_eq!(pl.clips[0].repetitions(&pats[0]), 2, "960..2880 spans two");
+        pl.clips[0].looped = false;
+        assert_eq!(pl.clips[0].repetitions(&pats[0]), 1);
+        pl.clips[0].muted = true;
+        assert_eq!(pl.arrangement_end(), 3840 + 1920, "muted clips count");
     }
 
     #[test]
@@ -233,7 +282,9 @@ mod tests {
         pl.clips.push(clip(2, LaneId(9), 0, 1));
         assert!(pl.validate(&pats).is_err());
         pl.clips.pop();
-        pl.clips.push(clip(3, lane, 0, 0));
+        let mut empty = clip(3, lane, 0, 1);
+        empty.duration = 0;
+        pl.clips.push(empty);
         assert!(pl.validate(&pats).is_err());
     }
 }

@@ -51,6 +51,11 @@ id_type!(
     AutomationId
 );
 
+id_type!(
+    /// Audio file imported into the project.
+    AssetId
+);
+
 impl TrackId {
     /// The master track always has ID 0; allocated IDs start at 1.
     pub const MASTER: TrackId = TrackId(0);

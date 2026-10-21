@@ -1,6 +1,6 @@
 {
   "format": "jdance-project",
-  "format_version": 5,
+  "format_version": 11,
   "project": {
     "tempo_bpm": 124.0,
     "channels": [
@@ -492,7 +492,8 @@
             60
           ],
           "muted": false,
-          "solo": false
+          "solo": false,
+          "audio_track": 0
         },
         {
           "id": 3,
@@ -503,7 +504,8 @@
             235
           ],
           "muted": false,
-          "solo": false
+          "solo": false,
+          "audio_track": 0
         },
         {
           "id": 4,
@@ -514,7 +516,8 @@
             110
           ],
           "muted": false,
-          "solo": false
+          "solo": false,
+          "audio_track": 0
         },
         {
           "id": 5,
@@ -525,7 +528,8 @@
             200
           ],
           "muted": false,
-          "solo": false
+          "solo": false,
+          "audio_track": 0
         },
         {
           "id": 6,
@@ -536,7 +540,8 @@
             80
           ],
           "muted": false,
-          "solo": false
+          "solo": false,
+          "audio_track": 0
         },
         {
           "id": 7,
@@ -547,7 +552,8 @@
             200
           ],
           "muted": false,
-          "solo": false
+          "solo": false,
+          "audio_track": 0
         }
       ],
       "clips": [
@@ -556,7 +562,9 @@
           "lane": 2,
           "pattern": 1,
           "start": 0,
-          "repeat": 3,
+          "offset": 0,
+          "duration": 11520,
+          "looped": true,
           "muted": false
         },
         {
@@ -564,7 +572,9 @@
           "lane": 3,
           "pattern": 19,
           "start": 11520,
-          "repeat": 1,
+          "offset": 0,
+          "duration": 3840,
+          "looped": true,
           "muted": false
         },
         {
@@ -572,13 +582,16 @@
           "lane": 2,
           "pattern": 1,
           "start": 15360,
-          "repeat": 4,
+          "offset": 0,
+          "duration": 15360,
+          "looped": true,
           "muted": false
         }
       ],
       "loop_range": null,
       "loop_enabled": false
     },
+    "timebase_rate": 48000,
     "ids": {
       "next": 23
     }

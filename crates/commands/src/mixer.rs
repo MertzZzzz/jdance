@@ -11,8 +11,8 @@
 
 use crate::{Edit, EditError, History, check_range};
 use jdance_domain::{
-    ChannelId, Effect, Insert, InsertId, MAX_SEND_LEVEL, MAX_VOLUME, Mixer, MixerTrack, Project,
-    RoutingError, Send, SendId, TrackId,
+    ChannelId, Effect, Insert, InsertId, LaneId, MAX_SEND_LEVEL, MAX_VOLUME, Mixer, MixerTrack,
+    Project, RoutingError, Send, SendId, TrackId,
 };
 
 fn tracks_mut(m: &mut Mixer) -> impl Iterator<Item = &mut MixerTrack> {
@@ -43,10 +43,26 @@ fn channel_tracks(p: &Project) -> Vec<(ChannelId, TrackId)> {
     p.channels.iter().map(|c| (c.id, c.track)).collect()
 }
 
+fn lane_tracks(p: &Project) -> Vec<(LaneId, TrackId)> {
+    p.playlist
+        .lanes
+        .iter()
+        .map(|l| (l.id, l.audio_track))
+        .collect()
+}
+
 fn restore_channel_tracks(p: &mut Project, routes: &[(ChannelId, TrackId)]) {
     for (c, t) in routes {
         if let Some(ch) = p.channel_mut(*c) {
             ch.track = *t;
+        }
+    }
+}
+
+fn restore_lane_tracks(p: &mut Project, routes: &[(LaneId, TrackId)]) {
+    for (l, t) in routes {
+        if let Some(lane) = p.playlist.lane_mut(*l) {
+            lane.audio_track = *t;
         }
     }
 }
@@ -58,6 +74,7 @@ fn structural(
 ) -> Result<Edit, EditError> {
     let mixer = p.mixer.clone();
     let routes = channel_tracks(p);
+    let lanes = lane_tracks(p);
     let automation = p.automation.clone();
     let existed: Vec<bool> = automation.iter().map(|l| l.target.exists(p)).collect();
     let result = f(p).and_then(|()| p.validate_routing().map_err(EditError::Routing));
@@ -81,12 +98,14 @@ fn structural(
             Ok(Edit::RestoreMixer {
                 mixer: Box::new(mixer),
                 channel_tracks: routes,
+                lane_tracks: lanes,
                 automation,
             })
         }
         Err(e) => {
             p.mixer = mixer;
             restore_channel_tracks(p, &routes);
+            restore_lane_tracks(p, &lanes);
             p.automation = automation;
             Err(e)
         }
@@ -199,6 +218,9 @@ pub(crate) fn apply(edit: &Edit, p: &mut Project) -> Result<Edit, EditError> {
                 .track_index(*id)
                 .ok_or(EditError::Routing(RoutingError::UnknownTrack(*id)))?;
             p.mixer.tracks.remove(index);
+            for l in p.playlist.lanes.iter_mut().filter(|l| l.audio_track == *id) {
+                l.audio_track = TrackId::MASTER;
+            }
             for c in p.channels.iter_mut().filter(|c| c.track == *id) {
                 c.track = TrackId::MASTER;
             }
@@ -294,10 +316,12 @@ pub(crate) fn apply(edit: &Edit, p: &mut Project) -> Result<Edit, EditError> {
         Edit::RestoreMixer {
             mixer,
             channel_tracks,
+            lane_tracks,
             automation,
         } => structural(p, |p| {
             p.mixer = (**mixer).clone();
             restore_channel_tracks(p, channel_tracks);
+            restore_lane_tracks(p, lane_tracks);
             p.automation = automation.clone();
             Ok(())
         }),

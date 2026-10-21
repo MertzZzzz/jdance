@@ -127,6 +127,23 @@ pub struct StreamStatus {
     pub state: StreamState,
 }
 
+/// An audio file read for import (spec 0.2.0 §2): copied into the
+/// project's `assets/` folder when the project has one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportedAudio {
+    /// The file that was dropped or chosen.
+    pub source: PathBuf,
+    /// Stored path: relative to the project folder, or absolute while the
+    /// project is unsaved.
+    pub path: String,
+    pub name: String,
+    pub hash: u64,
+    pub size: u64,
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub frames: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SampleStatus {
     Loading,
@@ -217,7 +234,20 @@ pub trait Host {
     /// Plays a file on the preview bus; `None` stops. The project does not
     /// change.
     fn preview_file(&mut self, _path: Option<&Path>) {}
+    /// Plays the part `[from, to)` of a file (fractions of its length) on
+    /// the preview bus.
+    fn preview_range(&mut self, path: &Path, _range: (f64, f64)) {
+        self.preview_file(Some(path));
+    }
     fn reveal_in_file_manager(&mut self, _path: &Path) {}
+    /// Starts reading `path` for import in the background; the result
+    /// comes from [`Host::take_imports`] with the returned ticket.
+    fn import_audio(&mut self, _path: &Path, _project_dir: Option<&Path>) -> Option<u64> {
+        None
+    }
+    fn take_imports(&mut self) -> Vec<(u64, Result<ImportedAudio, String>)> {
+        Vec::new()
+    }
 
     /// Peak level per bucket of a loaded sample (waveform display).
     fn sample_peaks(

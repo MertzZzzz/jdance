@@ -58,6 +58,67 @@ pub struct PlaybackSnapshot {
     pub automation: Vec<AutomationRt>,
     /// Compiled for song playback.
     pub song: bool,
+    /// Audio clips (song mode), sorted by start.
+    pub audio_clips: Vec<AudioClipRt>,
+}
+
+/// An audio clip at engine-rate positions (spec 0.2.0 §2). Its output is a
+/// pure function of the timeline position, so seeking into a clip, loop
+/// wraps and delay compensation need no state.
+#[derive(Debug)]
+pub struct AudioClipRt {
+    /// The asset converted to the engine rate.
+    pub buffer: Arc<SampleBuffer>,
+    /// Index into [`PlaybackSnapshot::tracks`].
+    pub track: usize,
+    /// Timeline `[start, end)` in samples.
+    pub start: u64,
+    pub end: u64,
+    /// Buffer frame played at `start`.
+    pub source: u64,
+    pub gain: f32,
+    /// Fade lengths in samples (at least the anti-click fade).
+    pub fade_in: u64,
+    pub fade_out: u64,
+    /// Delay compensation: the clip sounds `delay` samples later.
+    pub delay: u64,
+}
+
+impl AudioClipRt {
+    /// Adds the clip's output for timeline samples `[from, from + n)`
+    /// into `l` and `r` (`n` = their length). Realtime-safe.
+    pub fn render_add(&self, from: u64, l: &mut [f32], r: &mut [f32]) {
+        let n = l.len() as u64;
+        let (start, end) = (self.start + self.delay, self.end + self.delay);
+        let (a, b) = (from.max(start), (from + n).min(end));
+        if a >= b {
+            return;
+        }
+        let buf = &*self.buffer;
+        for t in a..b {
+            let k = t - start;
+            let Some(i) = usize::try_from(self.source + k)
+                .ok()
+                .filter(|i| *i < buf.len())
+            else {
+                break;
+            };
+            let fin = if self.fade_in > 0 {
+                ((k + 1) as f32 / self.fade_in as f32).min(1.0)
+            } else {
+                1.0
+            };
+            let fout = if self.fade_out > 0 {
+                ((end - t) as f32 / self.fade_out as f32).min(1.0)
+            } else {
+                1.0
+            };
+            let g = self.gain * fin * fout;
+            let o = (t - from) as usize;
+            l[o] += buf.left[i] * g;
+            r[o] += buf.right[i] * g;
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -655,6 +716,7 @@ pub fn compile_full(
         }),
         automation: Vec::new(),
         song: matches!(mode, PlayMode::Song),
+        audio_clips: Vec::new(),
     };
 
     let spt = samples_per_tick(project.tempo_bpm, sample_rate);
@@ -672,7 +734,14 @@ pub fn compile_full(
             snapshot.loop_len = len;
             snapshot.end = len;
             snapshot.loop_range = Some((0, len));
-            push_pattern_events(project, pattern, 0, len, &to_sample, &mut snapshot.events);
+            push_pattern_events(
+                project,
+                pattern,
+                0,
+                (0, pattern.length_ticks()),
+                &to_sample,
+                &mut snapshot.events,
+            );
         }
         PlayMode::Song => {
             let pl = &project.playlist;
@@ -680,24 +749,39 @@ pub fn compile_full(
                 let Some(pattern) = project.pattern(clip.pattern) else {
                     continue;
                 };
-                let len_ticks = pattern.length_ticks();
-                for r in 0..u64::from(clip.repeat) {
-                    // Each repetition uses local pattern time.
-                    let base = clip.start + r * len_ticks;
-                    let limit = to_sample(base + len_ticks);
-                    let before = snapshot.events.len();
+                // Repetitions in local pattern time, cut to the clip.
+                let len = pattern.length_ticks().max(1);
+                let (lo, hi) = clip.interval();
+                let offset = if clip.looped {
+                    clip.offset % len
+                } else {
+                    clip.offset
+                };
+                let mut base = lo as i64 - offset as i64;
+                while base < hi as i64 {
                     push_pattern_events(
                         project,
                         pattern,
                         base,
-                        limit,
+                        (lo, hi),
                         &to_sample,
                         &mut snapshot.events,
                     );
-                    debug_assert!(snapshot.events[before..].iter().all(|e| e.pos < limit));
+                    if !clip.looped {
+                        break;
+                    }
+                    base += len as i64;
                 }
             }
-            let end = to_sample(pl.arrangement_end(&project.patterns));
+            let audio_end = compile_audio_clips(
+                project,
+                sample_rate,
+                &samples,
+                &track_of,
+                &in_lat,
+                &mut snapshot.audio_clips,
+            );
+            let end = to_sample(pl.arrangement_end()).max(audio_end);
             snapshot.end = end;
             snapshot.loop_len = end;
             snapshot.loop_range = pl
@@ -723,16 +807,72 @@ pub fn samples_per_tick(tempo_bpm: f64, sample_rate: u32) -> f64 {
     f64::from(sample_rate) * 60.0 / (tempo_bpm * f64::from(jdance_domain::PPQ))
 }
 
-/// Adds the pattern's active steps at `base` ticks, keeping only events
-/// before `limit` samples.
+/// Places the project's audio clips at `sample_rate`; returns the end of
+/// the last one in samples. Clips whose file is not loaded are skipped.
+fn compile_audio_clips(
+    project: &Project,
+    sample_rate: u32,
+    samples: &impl Fn(&SampleRef) -> Option<Arc<SampleBuffer>>,
+    track_of: &impl Fn(TrackId) -> usize,
+    in_lat: &[u32],
+    out: &mut Vec<AudioClipRt>,
+) -> u64 {
+    let pl = &project.playlist;
+    let tb = f64::from(project.timebase_rate.max(1));
+    let sr = f64::from(sample_rate);
+    let fade = (jdance_domain::EDGE_FADE_SECONDS * sr).round() as u64;
+    let mut end = 0;
+    for c in &pl.audio_clips {
+        let Some(asset) = project.asset(c.asset) else {
+            continue;
+        };
+        let to_dev = |frames: u64, rate: f64| (frames as f64 * sr / rate).round() as u64;
+        let start = to_dev(c.start, tb);
+        let len = to_dev(c.length(asset, project.timebase_rate), tb);
+        end = end.max(start + len);
+        if !pl.admits_audio(c) || len == 0 {
+            continue;
+        }
+        let Some(buffer) = samples(&SampleRef {
+            path: asset.path.clone(),
+        })
+        .filter(|b| b.sample_rate == sample_rate) else {
+            continue;
+        };
+        let lane_track = pl.lane(c.lane).map_or(TrackId::MASTER, |l| l.audio_track);
+        let track = track_of(lane_track);
+        let bound = |f: u64| f.max(fade).min(len / 2);
+        out.push(AudioClipRt {
+            buffer,
+            track,
+            start,
+            end: start + len,
+            source: to_dev(c.source_in, f64::from(asset.sample_rate.max(1))),
+            gain: c.gain,
+            fade_in: bound(to_dev(c.fade_in, tb)),
+            fade_out: bound(to_dev(c.fade_out, tb)),
+            delay: u64::from(in_lat.get(track).copied().unwrap_or(0)),
+        });
+    }
+    out.sort_by_key(|c| c.start);
+    end
+}
+
+/// Adds the pattern's active steps and notes of the repetition starting
+/// at `base` ticks (may be negative when a clip starts mid-pattern),
+/// keeping only events inside `window` ticks; gates end at the
+/// repetition's or the window's end.
 fn push_pattern_events(
     project: &Project,
     pattern: &jdance_domain::Pattern,
-    base: u64,
-    limit: u64,
+    base: i64,
+    window: (u64, u64),
     to_sample: &impl Fn(u64) -> u64,
     out: &mut Vec<StepEvent>,
 ) {
+    let (lo, hi) = (window.0 as i64, window.1 as i64);
+    let rep_end = (base + pattern.length_ticks() as i64).min(hi);
+    let inside = |t: i64| t >= lo && t < rep_end;
     for row in &pattern.rows {
         let Some(ch_index) = project
             .channel_index(row.channel)
@@ -749,36 +889,30 @@ fn push_pattern_events(
             .enumerate()
             .take(pattern.length_steps as usize)
         {
-            if !step.on {
+            let tick = base + i as i64 * i64::from(TICKS_PER_STEP);
+            if !step.on || !inside(tick) {
                 continue;
             }
-            let tick = base + i as u64 * u64::from(jdance_domain::TICKS_PER_STEP);
-            let pos = to_sample(tick);
-            if pos < limit {
-                // Instruments hold a step for one step; samplers ignore it.
-                let gate_end = to_sample(tick + u64::from(TICKS_PER_STEP));
-                out.push(StepEvent {
-                    pos,
-                    channel: ch_index,
-                    velocity: step.velocity,
-                    key: ROOT_KEY,
-                    length: gate_end.saturating_sub(pos).max(1),
-                });
-            }
+            let pos = to_sample(tick as u64);
+            // Instruments hold a step for one step; samplers ignore it.
+            let gate_end = to_sample((tick + i64::from(TICKS_PER_STEP)).min(hi) as u64);
+            out.push(StepEvent {
+                pos,
+                channel: ch_index,
+                velocity: step.velocity,
+                key: ROOT_KEY,
+                length: gate_end.saturating_sub(pos).max(1),
+            });
         }
         // Notes start inside the pattern; gated notes end at the
-        // repetition's end at the latest (spec "Playback boundaries").
-        let rep_end = base + pattern.length_ticks();
+        // repetition's (or the clip's) end at the latest.
         for n in &row.notes {
-            let start = base + u64::from(n.start);
-            if start >= rep_end {
+            let start = base + i64::from(n.start);
+            if !inside(start) {
                 continue;
             }
-            let pos = to_sample(start);
-            if pos >= limit {
-                continue;
-            }
-            let end = to_sample((start + u64::from(n.length)).min(rep_end));
+            let pos = to_sample(start as u64);
+            let end = to_sample((start + i64::from(n.length)).min(rep_end) as u64);
             out.push(StepEvent {
                 pos,
                 channel: ch_index,

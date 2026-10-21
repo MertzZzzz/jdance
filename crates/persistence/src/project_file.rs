@@ -14,7 +14,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 pub const FORMAT_TAG: &str = "jdance-project";
-pub const CURRENT_FORMAT_VERSION: u32 = 10;
+pub const CURRENT_FORMAT_VERSION: u32 = 11;
 pub const PROJECT_EXTENSION: &str = "jdance";
 
 /// Saves `project` to `path` atomically. Sample paths inside the project
@@ -22,7 +22,13 @@ pub const PROJECT_EXTENSION: &str = "jdance";
 /// not modified.
 pub fn save_project(path: &Path, project: &Project) -> Result<(), PersistError> {
     let dir = path.parent().unwrap_or(Path::new(""));
+    backup_older_format(path)?;
     let mut doc = project.clone();
+    for a in &mut doc.assets {
+        if let Some(rel) = relative_to(Path::new(&a.path), dir) {
+            a.path = rel;
+        }
+    }
     for ch in &mut doc.channels {
         let ChannelSource::Sampler { sample: Some(s) } = &mut ch.source else {
             continue;
@@ -47,6 +53,40 @@ pub fn save_project(path: &Path, project: &Project) -> Result<(), PersistError> 
     .map_err(|e| PersistError::Corrupt(e.to_string()))?;
     bytes.push(b'\n');
     write_atomically(path, &bytes)
+}
+
+/// Before a file written by an older format version is overwritten for the
+/// first time, keeps a copy and a manifest next to it (spec 0.2.0 §13).
+fn backup_older_format(path: &Path) -> Result<(), PersistError> {
+    let Ok(bytes) = std::fs::read(path) else {
+        return Ok(());
+    };
+    let version = serde_json::from_slice::<Value>(&bytes)
+        .ok()
+        .and_then(|v| v.get("format_version").and_then(Value::as_u64));
+    let Some(version) = version.filter(|v| *v < u64::from(CURRENT_FORMAT_VERSION)) else {
+        return Ok(());
+    };
+    let name = path
+        .file_name()
+        .map_or_else(|| "project".into(), |n| n.to_string_lossy().into_owned());
+    let backup = path.with_file_name(format!("{name}.v{version}.bak"));
+    if backup.exists() {
+        return Ok(());
+    }
+    std::fs::write(&backup, &bytes).map_err(io_err(&backup))?;
+    let manifest = serde_json::json!({
+        "format": "jdance-backup",
+        "original": name,
+        "original_format_version": version,
+        "backup": backup.file_name().map(|n| n.to_string_lossy().into_owned()),
+        "migrated_to_format_version": CURRENT_FORMAT_VERSION,
+    });
+    let manifest_path = path.with_file_name(format!("{name}.backup.json"));
+    let mut text =
+        serde_json::to_vec_pretty(&manifest).map_err(|e| PersistError::Corrupt(e.to_string()))?;
+    text.push(b'\n');
+    write_atomically(&manifest_path, &text)
 }
 
 fn relative_to(sample: &Path, dir: &Path) -> Option<String> {
@@ -144,10 +184,57 @@ fn migrate(version: u32, mut project: Value) -> Result<Value, PersistError> {
         // palette by position).
         v = 10;
     }
+    if v == 10 {
+        project = v10_to_v11(project)?;
+        v = 11;
+    }
     match v {
         CURRENT_FORMAT_VERSION => Ok(project),
         v => Err(PersistError::Corrupt(format!("unknown format_version {v}"))),
     }
+}
+
+/// v11 (0.2.0): pattern clips store `offset`, `duration` and `looped`
+/// instead of a repeat count; audio assets, audio clips, lane audio routing
+/// and the timebase are new (absent = none / defaults). Playback stays the
+/// same: `duration = repeat × pattern length`, looped.
+fn v10_to_v11(mut project: Value) -> Result<Value, PersistError> {
+    let corrupt = |m: &str| PersistError::Corrupt(format!("v10 project: {m}"));
+    let lengths: std::collections::BTreeMap<u64, u64> = project
+        .get("patterns")
+        .and_then(Value::as_array)
+        .ok_or_else(|| corrupt("no patterns"))?
+        .iter()
+        .filter_map(|p| {
+            let id = p.get("id")?.as_u64()?;
+            let steps = p.get("length_steps")?.as_u64()?;
+            Some((id, steps * u64::from(jdance_domain::TICKS_PER_STEP)))
+        })
+        .collect();
+    let clips = project
+        .get_mut("playlist")
+        .and_then(|p| p.get_mut("clips"))
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| corrupt("no playlist clips"))?;
+    for c in clips {
+        let obj = c.as_object_mut().ok_or_else(|| corrupt("clip"))?;
+        let repeat = obj
+            .remove("repeat")
+            .and_then(|r| r.as_u64())
+            .ok_or_else(|| corrupt("clip without repeat"))?;
+        let pattern = obj
+            .get("pattern")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| corrupt("clip without pattern"))?;
+        let len = lengths
+            .get(&pattern)
+            .copied()
+            .ok_or_else(|| corrupt("clip of a missing pattern"))?;
+        obj.insert("offset".into(), 0.into());
+        obj.insert("duration".into(), (repeat * len).into());
+        obj.insert("looped".into(), true.into());
+    }
+    Ok(project)
 }
 
 /// v5 added the playlist (lanes, pattern clips, loop). Older projects get
@@ -544,6 +631,52 @@ mod tests {
         let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 9, "project": p});
         v["project"]["ids"]["next"] = serde_json::json!(1);
         assert!(parse_project(v.to_string().as_bytes()).is_err());
+    }
+
+    #[test]
+    fn v10_repeat_counts_become_looped_durations_and_old_files_are_backed_up() {
+        let mut p = Project::new();
+        let lane = p.playlist.lanes[0].id;
+        let pat = p.patterns[0].clone();
+        p.playlist.clips.push(jdance_domain::PatternClip::repeating(
+            jdance_domain::ClipId(p.ids.next()),
+            lane,
+            &pat,
+            3840,
+            3,
+        ));
+        // The same project as format version 10 wrote it.
+        let mut v = serde_json::to_value(&p).unwrap();
+        let clip = &mut v["playlist"]["clips"][0];
+        let obj = clip.as_object_mut().unwrap();
+        for k in ["offset", "duration", "looped"] {
+            obj.remove(k);
+        }
+        obj.insert("repeat".into(), 3.into());
+        for l in v["playlist"]["lanes"].as_array_mut().unwrap() {
+            l.as_object_mut().unwrap().remove("audio_track");
+        }
+        v.as_object_mut().unwrap().remove("timebase_rate");
+        let file = serde_json::json!({"format": FORMAT_TAG, "format_version": 10, "project": v});
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.jdance");
+        std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
+        let loaded = load_project(&path).unwrap();
+        assert_eq!(loaded, p, "same playback: 3 repetitions, looped");
+        assert_eq!(loaded.timebase_rate, jdance_domain::DEFAULT_TIMEBASE);
+        save_project(&path, &loaded).unwrap();
+        let backup = dir.path().join("old.jdance.v10.bak");
+        assert_eq!(
+            std::fs::read(&backup).unwrap(),
+            serde_json::to_vec(&file).unwrap()
+        );
+        assert!(dir.path().join("old.jdance.backup.json").exists());
+        // Saving again keeps the first backup.
+        save_project(&path, &loaded).unwrap();
+        assert_eq!(
+            std::fs::read(&backup).unwrap(),
+            serde_json::to_vec(&file).unwrap()
+        );
     }
 
     #[test]

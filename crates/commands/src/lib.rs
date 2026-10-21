@@ -10,14 +10,18 @@ pub mod notes;
 mod playlist;
 
 pub use mixer::{add_insert, add_send, add_track};
-pub use playlist::{add_clip, add_lane, add_pattern, duplicate_clips, make_unique, steps_beyond};
+pub use playlist::{
+    Edge, add_clip, add_lane, add_pattern, audio_clip_edge, duplicate_clips, make_unique,
+    pattern_clip_edge, slice_audio_clip, slice_pattern_clip, steps_beyond,
+};
 
 use jdance_domain::{
-    AutoPoint, AutomationId, AutomationLane, AutomationTarget, Channel, ChannelId, ClipId, Curve,
-    Effect, InsertId, Lane, LaneId, LimiterSettings, MAX_CHANNEL_PITCH, MAX_CHANNELS,
-    MAX_NOTES_PER_ROW, MAX_POLYPHONY, MAX_TEMPO_BPM, MAX_VOLUME, MIN_TEMPO_BPM, Mixer, MixerTrack,
-    Note, Pattern, PatternClip, PatternId, Playlist, Project, RoutingError, SampleRef,
-    SamplerSettings, SendId, Sidechain, Step, StepRow, TrackId, sort_notes, sort_points,
+    AssetId, AudioAsset, AudioClip, AutoPoint, AutomationId, AutomationLane, AutomationTarget,
+    Channel, ChannelId, ClipId, Curve, Effect, InsertId, Lane, LaneId, LimiterSettings,
+    MAX_CHANNEL_PITCH, MAX_CHANNELS, MAX_NOTES_PER_ROW, MAX_POLYPHONY, MAX_TEMPO_BPM, MAX_VOLUME,
+    MIN_TEMPO_BPM, Mixer, MixerTrack, Note, Pattern, PatternClip, PatternId, Playlist, Project,
+    RoutingError, SampleRef, SamplerSettings, SendId, Sidechain, Step, StepRow, TrackId,
+    sort_notes, sort_points,
 };
 use thiserror::Error;
 
@@ -166,7 +170,26 @@ pub enum Edit {
         start: u64,
         lane: LaneId,
     },
-    SetClipRepeat(ClipId, u32),
+    /// Start, visible pattern range and looping of a pattern clip
+    /// (resize from either edge, loop on/off).
+    SetClipShape {
+        id: ClipId,
+        start: u64,
+        offset: u64,
+        duration: u64,
+        looped: bool,
+    },
+    /// Imports an audio file into the project.
+    AddAsset(AudioAsset),
+    /// Removes an unused asset (the file on disk stays).
+    RemoveAsset(AssetId),
+    RenameAsset(AssetId, String),
+    AddAudioClip(AudioClip),
+    RemoveAudioClip(ClipId),
+    /// Replaces an audio clip by ID (move, trim, gain, mute, fades).
+    SetAudioClip(AudioClip),
+    /// Mixer track for a lane's audio clips.
+    SetLaneAudioTrack(LaneId, TrackId),
     SetClipMuted(ClipId, bool),
     /// Inserts `pattern` (a copy with a new ID) and points `clip` at it.
     MakeUnique {
@@ -186,6 +209,7 @@ pub enum Edit {
     RestoreMixer {
         mixer: Box<Mixer>,
         channel_tracks: Vec<(ChannelId, TrackId)>,
+        lane_tracks: Vec<(LaneId, TrackId)>,
         automation: Vec<AutomationLane>,
     },
     /// Adds (`lane: Some`, new id), replaces or removes (`None`) an
@@ -213,6 +237,7 @@ pub enum MergeKey {
     ChannelPlayback(ChannelId),
     Sampler(ChannelId),
     Automation(AutomationId),
+    AudioClip(ClipId),
 }
 
 impl Edit {
@@ -267,7 +292,14 @@ impl Edit {
             Edit::AddClip(_) => "Add clip",
             Edit::RemoveClip(_) => "Delete clip",
             Edit::MoveClip { .. } => "Move clip",
-            Edit::SetClipRepeat(..) => "Resize clip",
+            Edit::SetClipShape { .. } => "Resize clip",
+            Edit::AddAsset(_) => "Import audio",
+            Edit::RemoveAsset(_) => "Remove audio file",
+            Edit::RenameAsset(..) => "Rename audio file",
+            Edit::AddAudioClip(_) => "Add audio clip",
+            Edit::RemoveAudioClip(_) => "Delete audio clip",
+            Edit::SetAudioClip(_) => "Edit audio clip",
+            Edit::SetLaneAudioTrack(..) => "Route lane audio",
             Edit::SetClipMuted(..) => "Mute clip",
             Edit::MakeUnique { .. } => "Make unique",
             Edit::SetLoop { .. } => "Change loop",
@@ -282,6 +314,7 @@ impl Edit {
     pub fn merge_key(&self) -> Option<MergeKey> {
         match self {
             Edit::SetTempo(_) => Some(MergeKey::Tempo),
+            Edit::SetAudioClip(c) => Some(MergeKey::AudioClip(c.id)),
             Edit::SetChannelVolume(id, _) => Some(MergeKey::ChannelVolume(*id)),
             Edit::SetChannelPan(id, _) => Some(MergeKey::ChannelPan(*id)),
             Edit::SetMasterVolume(_) => Some(MergeKey::MasterVolume),
@@ -574,8 +607,15 @@ impl Edit {
             | Edit::AddClip(_)
             | Edit::RemoveClip(_)
             | Edit::MoveClip { .. }
-            | Edit::SetClipRepeat(..)
+            | Edit::SetClipShape { .. }
             | Edit::SetClipMuted(..)
+            | Edit::AddAsset(_)
+            | Edit::RemoveAsset(_)
+            | Edit::RenameAsset(..)
+            | Edit::AddAudioClip(_)
+            | Edit::RemoveAudioClip(_)
+            | Edit::SetAudioClip(_)
+            | Edit::SetLaneAudioTrack(..)
             | Edit::MakeUnique { .. }
             | Edit::SetLoop { .. }
             | Edit::RestoreArrangement { .. } => playlist::apply(self, p),

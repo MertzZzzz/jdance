@@ -289,7 +289,12 @@ impl RackView {
             }
         }
 
-        if !dropped_on_row {
+        // System drops count only over the rack (the playlist takes its own).
+        let over_rack = ui
+            .ctx()
+            .pointer_latest_pos()
+            .is_some_and(|p| ui.max_rect().contains(p));
+        if !dropped_on_row && over_rack {
             for file in dropped {
                 let name = file
                     .file_stem()

@@ -4,7 +4,7 @@
 
 use crate::plugins::{Catalog, ModuleCache, create_instance};
 use jdance_domain::{
-    ClipId, ExportOptions, ExportRange, MAX_REPEAT, PatternClip, Playlist, Project,
+    ClipId, ExportOptions, ExportRange, MAX_REPEAT, PatternClip, Playlist, Project, SampleRef,
 };
 use jdance_dsp::SampleBuffer;
 use jdance_engine::{OfflineRender, PlayMode, PluginRt, compile_full, render_offline};
@@ -43,7 +43,7 @@ fn export_project(project: &Project, range: ExportRange) -> Result<Project, Stri
     match range {
         ExportRange::Song => {
             p.playlist.loop_enabled = false;
-            if p.playlist.arrangement_end(&p.patterns) == 0 {
+            if p.arrangement_end_ticks() == 0 {
                 return Err("the playlist is empty; nothing to export".into());
             }
         }
@@ -52,14 +52,14 @@ fn export_project(project: &Project, range: ExportRange) -> Result<Project, Stri
                 return Err("the pattern to export does not exist".into());
             }
             let mut playlist = Playlist::with_lanes(1, || u64::MAX - 1);
-            playlist.clips.push(PatternClip {
-                id: ClipId(u64::MAX),
-                lane: playlist.lanes[0].id,
-                pattern,
-                start: 0,
-                repeat: loops.clamp(1, MAX_REPEAT),
-                muted: false,
-            });
+            let pat = p.pattern(pattern).expect("checked");
+            playlist.clips.push(PatternClip::repeating(
+                ClipId(u64::MAX),
+                playlist.lanes[0].id,
+                pat,
+                0,
+                loops.clamp(1, MAX_REPEAT),
+            ));
             p.playlist = playlist;
         }
     }
@@ -118,8 +118,19 @@ pub fn render_project(
         }
     }
     let mut samples: HashMap<PathBuf, Arc<SampleBuffer>> = HashMap::new();
-    for ch in &project.channels {
-        let Some(s) = ch.sample() else { continue };
+    let assets: Vec<SampleRef> = project
+        .assets
+        .iter()
+        .map(|a| SampleRef {
+            path: a.path.clone(),
+        })
+        .collect();
+    for s in project
+        .channels
+        .iter()
+        .filter_map(|c| c.sample())
+        .chain(&assets)
+    {
         let path = resolve_sample_path(project_dir, s);
         if samples.contains_key(&path) {
             continue;
@@ -219,14 +230,9 @@ mod tests {
 
     fn add_clip(p: &mut Project, start_bar: u64, repeat: u32) {
         let lane = p.playlist.lanes[0].id;
-        p.playlist.clips.push(PatternClip {
-            id: ClipId(p.ids.next()),
-            lane,
-            pattern: p.patterns[0].id,
-            start: start_bar * 3840,
-            repeat,
-            muted: false,
-        });
+        let id = ClipId(p.ids.next());
+        let clip = PatternClip::repeating(id, lane, &p.patterns[0], start_bar * 3840, repeat);
+        p.playlist.clips.push(clip);
     }
 
     fn master_insert(p: &mut Project, effect: Effect) {

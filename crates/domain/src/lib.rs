@@ -5,6 +5,7 @@
 //! compiles a [`Project`] into its own realtime representation; the UI edits
 //! it exclusively through `jdance-commands`.
 
+mod audio;
 mod automation;
 mod effects;
 mod export;
@@ -13,6 +14,10 @@ mod mixer;
 mod playlist;
 mod plugin;
 
+pub use audio::{
+    AudioAsset, AudioClip, DEFAULT_TIMEBASE, EDGE_FADE_SECONDS, MAX_START_FRAMES, content_hash,
+    frames_per_tick,
+};
 pub use automation::{
     AutoPoint, AutomationLane, AutomationTarget, Curve, MAX_AUTOMATION_POINTS, curve_weight,
     sort_points,
@@ -25,13 +30,16 @@ pub use export::{
     DEFAULT_EXPORT_TAIL_SECONDS, ExportFormat, ExportOptions, ExportRange, MAX_EXPORT_TAIL_SECONDS,
 };
 pub use ids::{
-    AutomationId, ChannelId, ClipId, IdAllocator, InsertId, LaneId, PatternId, SendId, TrackId,
+    AssetId, AutomationId, ChannelId, ClipId, IdAllocator, InsertId, LaneId, PatternId, SendId,
+    TrackId,
 };
 pub use mixer::{
     Insert, MAX_INSERTS_PER_TRACK, MAX_SEND_LEVEL, MAX_SENDS_PER_TRACK, MAX_TRACKS, Mixer,
     MixerTrack, RoutingError, Send, Sidechain, Tap,
 };
-pub use playlist::{LANE_COLORS, Lane, MAX_REPEAT, MAX_START_TICKS, PatternClip, Playlist};
+pub use playlist::{
+    LANE_COLORS, Lane, MAX_CLIP_TICKS, MAX_REPEAT, MAX_START_TICKS, PatternClip, Playlist,
+};
 pub use plugin::{PluginSlot, base64};
 
 use serde::{Deserialize, Serialize};
@@ -68,7 +76,17 @@ pub struct Project {
     /// Automation lanes on the song timeline (ADR-014).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub automation: Vec<AutomationLane>,
+    /// Frames per second of audio clip positions (spec 0.2.0 §2).
+    #[serde(default = "default_timebase")]
+    pub timebase_rate: u32,
+    /// Imported audio files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assets: Vec<AudioAsset>,
     pub ids: IdAllocator,
+}
+
+fn default_timebase() -> u32 {
+    DEFAULT_TIMEBASE
 }
 
 impl Project {
@@ -84,8 +102,45 @@ impl Project {
             mixer: Mixer::default(),
             playlist,
             automation: Vec::new(),
+            timebase_rate: DEFAULT_TIMEBASE,
+            assets: Vec::new(),
             ids,
         }
+    }
+
+    pub fn asset(&self, id: AssetId) -> Option<&AudioAsset> {
+        self.assets.iter().find(|a| a.id == id)
+    }
+
+    /// `[start, end)` of an audio clip in (fractional) ticks at the
+    /// current tempo.
+    pub fn audio_clip_ticks(&self, clip: &AudioClip) -> Option<(f64, f64)> {
+        let asset = self.asset(clip.asset)?;
+        let fpt = frames_per_tick(self.tempo_bpm, self.timebase_rate);
+        let (a, b) = clip.interval(asset, self.timebase_rate);
+        Some((a as f64 / fpt, b as f64 / fpt))
+    }
+
+    /// Right edge of the arrangement in ticks: pattern and audio clips.
+    pub fn arrangement_end_ticks(&self) -> u64 {
+        let audio = self
+            .playlist
+            .audio_clips
+            .iter()
+            .filter_map(|c| self.audio_clip_ticks(c))
+            .map(|(_, b)| b.ceil() as u64)
+            .max()
+            .unwrap_or(0);
+        self.playlist.arrangement_end().max(audio)
+    }
+
+    /// Audio clips and samplers using `asset` (spec 0.2.0 §10).
+    pub fn asset_usage(&self, asset: AssetId) -> usize {
+        self.playlist
+            .audio_clips
+            .iter()
+            .filter(|c| c.asset == asset)
+            .count()
     }
 
     pub fn automation_lane(&self, id: AutomationId) -> Option<&AutomationLane> {
@@ -177,7 +232,32 @@ impl Project {
                 }
             }
         }
-        self.playlist.validate(&self.patterns)
+        self.playlist.validate(&self.patterns)?;
+        if self.timebase_rate == 0 {
+            return Err("project timebase is zero".into());
+        }
+        let mut assets = std::collections::BTreeSet::new();
+        for a in &self.assets {
+            if !assets.insert(a.id) {
+                return Err(format!("duplicate asset ID {}", a.id.0));
+            }
+            a.validate()?;
+        }
+        let mut ids: std::collections::BTreeSet<u64> =
+            self.playlist.clips.iter().map(|c| c.id.0).collect();
+        for c in &self.playlist.audio_clips {
+            if !ids.insert(c.id.0) {
+                return Err(format!("duplicate clip ID {}", c.id.0));
+            }
+            if self.playlist.lane(c.lane).is_none() {
+                return Err(format!("audio clip {} is on a missing lane", c.id.0));
+            }
+            let asset = self
+                .asset(c.asset)
+                .ok_or_else(|| format!("audio clip {} references a missing file", c.id.0))?;
+            c.validate(asset)?;
+        }
+        Ok(())
     }
 
     /// Checks references from channels into the mixer and the routing
@@ -186,6 +266,11 @@ impl Project {
         for c in &self.channels {
             if !self.mixer.has_track(c.track) {
                 return Err(RoutingError::UnknownTrack(c.track));
+            }
+        }
+        for l in &self.playlist.lanes {
+            if !self.mixer.has_track(l.audio_track) {
+                return Err(RoutingError::UnknownTrack(l.audio_track));
             }
         }
         self.mixer.validate()

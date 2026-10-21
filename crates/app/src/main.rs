@@ -150,9 +150,7 @@ fn cmd_render(args: &[String]) -> Result<(), String> {
     };
     let project_path = Path::new(project_path);
     let project = load_project(project_path).map_err(|e| e.to_string())?;
-    let song = pattern_name.is_none()
-        && loops.is_none()
-        && project.playlist.arrangement_end(&project.patterns) > 0;
+    let song = pattern_name.is_none() && loops.is_none() && project.arrangement_end_ticks() > 0;
     let range = if song {
         ExportRange::Song
     } else {
@@ -252,6 +250,10 @@ impl jdance_ui::ProjectStore for FileStore {
 
     fn save(&self, path: &Path, project: &Project) -> Result<(), String> {
         save_project(path, project).map_err(|e| e.to_string())
+    }
+
+    fn collect_assets(&self, dir: &Path, project: &mut Project) -> Result<usize, String> {
+        jdance_persistence::collect_assets(project, dir).map_err(|e| e.to_string())
     }
 }
 

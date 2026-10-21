@@ -28,7 +28,8 @@ pub(crate) enum BrowserAction {
     ChannelSettings(ChannelId),
     /// Undo this many steps.
     UndoSteps(usize),
-    AddSample(PathBuf),
+    /// Double-click: the Sample Editor (nothing is added).
+    OpenFile(PathBuf),
     AddInstrument(PluginDescriptor),
 }
 
@@ -394,7 +395,7 @@ impl BrowserView {
         }
         let resp = resp.on_hover_text(if supported {
             format!(
-                "{}\nClick: select and preview · drag onto the Channel Rack",
+                "{}\nClick: select and preview · double-click: Sample Editor\nDrag onto the Channel Rack (sampler) or the Playlist (audio clip)",
                 e.path.display()
             )
         } else {
@@ -416,7 +417,7 @@ impl BrowserView {
             }
         }
         if resp.double_clicked() && supported {
-            out.push(BrowserAction::AddSample(e.path.clone()));
+            out.push(BrowserAction::OpenFile(e.path.clone()));
         }
     }
 

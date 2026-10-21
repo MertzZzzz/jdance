@@ -56,14 +56,9 @@ impl Song {
     fn clip(&mut self, lane: usize, start_bar: u64, repeat: u32) -> ClipId {
         self.next += 1;
         let id = ClipId(self.next);
-        self.p.playlist.clips.push(PatternClip {
-            id,
-            lane: self.lane(lane),
-            pattern: self.pat,
-            start: start_bar * BAR_TICKS,
-            repeat,
-            muted: false,
-        });
+        let pat = self.p.pattern(self.pat).unwrap();
+        let clip = PatternClip::repeating(id, self.lane(lane), pat, start_bar * BAR_TICKS, repeat);
+        self.p.playlist.clips.push(clip);
         id
     }
 
@@ -223,17 +218,19 @@ fn seek_starts_events_from_the_new_position_only() {
 }
 
 #[test]
-fn pattern_length_change_keeps_repeats_and_moves_end() {
+fn pattern_length_change_keeps_the_clip_length_and_repeats_more() {
+    // Spec 0.2.0 §4: a clip stores its duration; the pattern definition
+    // changing does not move the arrangement.
     let mut s = Song::new();
     s.clip(0, 0, 3);
     s.p.patterns[0].length_steps = 8;
     for row in &mut s.p.patterns[0].rows {
         row.steps.truncate(8);
     }
-    assert_eq!(s.snapshot().end, 3 * BAR / 2);
+    assert_eq!(s.snapshot().end, 3 * BAR);
     assert_eq!(
         positions(&s.hits(2 * BAR as usize)),
-        [0, BAR as usize / 2, BAR as usize]
+        [0, BAR as usize / 2, BAR as usize, 3 * BAR as usize / 2]
     );
 }
 

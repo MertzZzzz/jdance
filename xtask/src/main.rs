@@ -412,14 +412,10 @@ fn gen_demo() -> Result<(), String> {
     project.patterns.push(brk.clone());
     let lanes: Vec<jdance_domain::LaneId> = project.playlist.lanes.iter().map(|l| l.id).collect();
     for (lane, pattern, bar, repeat) in [(0, beat, 0, 3), (1, brk.id, 3, 1), (0, beat, 4, 4)] {
-        project.playlist.clips.push(jdance_domain::PatternClip {
-            id: jdance_domain::ClipId(project.ids.next()),
-            lane: lanes[lane],
-            pattern,
-            start: bar * 3_840,
-            repeat,
-            muted: false,
-        });
+        let id = jdance_domain::ClipId(project.ids.next());
+        let pat = project.pattern(pattern).expect("demo pattern");
+        let clip = jdance_domain::PatternClip::repeating(id, lanes[lane], pat, bar * 3_840, repeat);
+        project.playlist.clips.push(clip);
     }
     project.playlist.lanes[0].name = "Beat".into();
     project.playlist.lanes[1].name = "Breaks".into();

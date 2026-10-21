@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Project files, safe save and audio file import/export.
 
+mod assets;
 mod audio_file;
 mod project_file;
 mod safe_write;
 
+pub use assets::{ASSETS_DIR, AudioFileInfo, collect_assets, copy_into_assets, inspect_audio};
 pub use audio_file::{DecodedAudio, WavExportFormat, read_wav, write_wav};
 pub use project_file::{
     CURRENT_FORMAT_VERSION, FORMAT_TAG, PROJECT_EXTENSION, load_project, resolve_sample_path,

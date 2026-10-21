@@ -8,31 +8,34 @@ mod automation;
 mod browser;
 mod channel_settings;
 mod host;
+mod icons;
 mod mixer;
 mod piano;
 mod piano_dialogs;
 mod playlist;
 mod plugins;
+mod project_browser;
 mod rack;
+mod sample_editor;
 mod settings;
 mod theme;
 mod toolbar;
 mod widgets;
 
 pub use host::{
-    DirEntry, Host, LatencyInfo, Listing, MeterReadings, Notice, NoticeLevel, PluginParamView,
-    SampleStatus, StreamStatus, TransportMode, TransportStatus,
+    DirEntry, Host, ImportedAudio, LatencyInfo, Listing, MeterReadings, Notice, NoticeLevel,
+    PluginParamView, SampleStatus, StreamStatus, TransportMode, TransportStatus,
 };
 
 use egui::{Key, KeyboardShortcut, Modifiers};
 use jdance_commands::{
-    Edit, History, add_clip, add_insert, add_lane, add_pattern, add_sample_channel, add_send,
-    add_track, duplicate_clips, make_unique,
+    Edit, History, add_insert, add_lane, add_pattern, add_sample_channel, add_send, add_track,
+    duplicate_clips, make_unique,
 };
 use jdance_domain::{
-    ChannelId, DEFAULT_EXPORT_TAIL_SECONDS, Effect, ExportFormat, ExportOptions, ExportRange,
-    LaneId, MAX_EXPORT_TAIL_SECONDS, MAX_TEMPO_BPM, MIN_TEMPO_BPM, PatternId, PluginSlot, Project,
-    TrackId,
+    ChannelId, ClipId, DEFAULT_EXPORT_TAIL_SECONDS, Effect, ExportFormat, ExportOptions,
+    ExportRange, LaneId, MAX_EXPORT_TAIL_SECONDS, MAX_TEMPO_BPM, MIN_TEMPO_BPM, PatternId,
+    PluginSlot, Project, TrackId,
 };
 use settings::SettingsWindow;
 use std::path::{Path, PathBuf};
@@ -46,6 +49,11 @@ const NOTICE_SECONDS: f64 = 8.0;
 pub trait ProjectStore {
     fn load(&self, path: &Path) -> Result<Project, String>;
     fn save(&self, path: &Path, project: &Project) -> Result<(), String>;
+    /// Copies audio files still outside `dir` into its `assets/` folder
+    /// and makes their paths relative; returns how many were copied.
+    fn collect_assets(&self, _dir: &Path, _project: &mut Project) -> Result<usize, String> {
+        Ok(0)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +62,7 @@ pub(crate) enum RenameTarget {
     Track(TrackId),
     Pattern(PatternId),
     Lane(LaneId),
+    Asset(jdance_domain::AssetId),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -99,6 +108,13 @@ pub struct JdanceApp<H: Host, S: ProjectStore> {
     song_mode: bool,
     mode_sent: Option<TransportMode>,
     playlist_view: playlist::PlaylistView,
+    sample_editor: Option<sample_editor::SampleEditor>,
+    /// Audio imports in flight: ticket → where the clip goes (`None` =
+    /// add the file only).
+    pending_imports: std::collections::BTreeMap<u64, Option<(Option<LaneId>, u64)>>,
+    project_browser: project_browser::ProjectBrowser,
+    /// Pattern or audio file waiting for a delete confirmation.
+    confirm_delete: Option<playlist::Source>,
     rack_view: rack::RackView,
     /// Channels waiting for the delete confirmation.
     delete_channels: Option<Vec<ChannelId>>,
@@ -161,6 +177,10 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             song_mode,
             mode_sent: None,
             playlist_view: playlist::PlaylistView::default(),
+            sample_editor: None,
+            pending_imports: std::collections::BTreeMap::new(),
+            project_browser: project_browser::ProjectBrowser::default(),
+            confirm_delete: None,
             rack_view: rack::RackView::default(),
             delete_channels: None,
             piano: None,
@@ -293,6 +313,12 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             }
         };
         self.host.capture_plugin_states(&mut self.project);
+        if let Some(dir) = path.parent()
+            && let Err(e) = self.store.collect_assets(dir, &mut self.project)
+        {
+            self.notify(Notice::error(format!("Save failed: {e}")), now);
+            return false;
+        }
         match self.store.save(&path, &self.project) {
             Ok(()) => {
                 self.history.mark_saved();
@@ -331,11 +357,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
         let Some((mut options, estimate)) = self.export_dialog else {
             return;
         };
-        let song_empty = self
-            .project
-            .playlist
-            .arrangement_end(&self.project.patterns)
-            == 0;
+        let song_empty = self.project.arrangement_end_ticks() == 0;
         let mut choice = None;
         egui::Modal::new(egui::Id::unique("export")).show(ctx, |ui| {
             ui.heading("Export WAV");
@@ -774,14 +796,6 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
     fn playlist_action(&mut self, action: playlist::PlaylistAction, now: f64) {
         use playlist::PlaylistAction as A;
         let result = match action {
-            A::AddClip { lane, start } => add_clip(
-                &mut self.history,
-                &mut self.project,
-                lane,
-                self.current_pattern,
-                start,
-            )
-            .map(|_| ()),
             A::Duplicate(ids) => {
                 duplicate_clips(&mut self.history, &mut self.project, &ids).map(|_| ())
             }
@@ -797,11 +811,532 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 self.host.seek_ticks(ticks);
                 Ok(())
             }
+            A::Place {
+                source,
+                lane,
+                start,
+                count,
+            } => self.place(source, lane, start, count),
+            A::ImportAudio { path, lane, start } => {
+                let dir = self.project_dir().map(Path::to_path_buf);
+                match self.host.import_audio(&path, dir.as_deref()) {
+                    Some(t) => {
+                        self.pending_imports.insert(t, Some((lane, start)));
+                        Ok(())
+                    }
+                    None => Err(jdance_commands::EditError::Arrangement(
+                        "audio import is not available".into(),
+                    )),
+                }
+            }
+            A::Slice { clip, tick } => self.slice_clip(clip, tick),
+            A::Open(id) => {
+                self.open_clip(id);
+                Ok(())
+            }
         };
         match result {
             Ok(()) => self.sync_needed = true,
             Err(e) => self.notify(Notice::error(e.to_string()), now),
         }
+    }
+
+    /// `count` consecutive copies of `source` on `lane` from `start` ticks,
+    /// one undo step; the new clips are selected.
+    fn place(
+        &mut self,
+        source: playlist::Source,
+        lane: Option<LaneId>,
+        start: u64,
+        count: u32,
+    ) -> Result<(), jdance_commands::EditError> {
+        let p = &mut self.project;
+        let mut edits = Vec::new();
+        let mut ids = Vec::new();
+        let lane = match lane {
+            Some(l) => l,
+            None => {
+                let name = match source {
+                    playlist::Source::Pattern(id) => p.pattern(id).map(|x| x.name.clone()),
+                    playlist::Source::Asset(id) => p.asset(id).map(|x| x.name.clone()),
+                };
+                let (id, edit) = new_lane_edit(p, name.unwrap_or_else(|| "Lane".into()));
+                edits.push(edit);
+                id
+            }
+        };
+        match source {
+            playlist::Source::Pattern(id) => {
+                let pat = p
+                    .pattern(id)
+                    .ok_or(jdance_commands::EditError::NoSuchPattern(id))?;
+                let len = pat.length_ticks();
+                let pat = pat.clone();
+                for k in 0..u64::from(count.max(1)) {
+                    let cid = ClipId(p.ids.next());
+                    ids.push(cid);
+                    edits.push(Edit::AddClip(jdance_domain::PatternClip::repeating(
+                        cid,
+                        lane,
+                        &pat,
+                        start + k * len,
+                        1,
+                    )));
+                }
+            }
+            playlist::Source::Asset(id) => {
+                let asset = p.asset(id).cloned().ok_or_else(|| {
+                    jdance_commands::EditError::Arrangement("the audio file is gone".into())
+                })?;
+                let fpt = jdance_domain::frames_per_tick(p.tempo_bpm, p.timebase_rate);
+                let first = (start as f64 * fpt).round() as u64;
+                for k in 0..u64::from(count.max(1)) {
+                    let cid = ClipId(p.ids.next());
+                    ids.push(cid);
+                    let mut clip = audio_clip_for(&asset, cid, lane, 0);
+                    clip.start = first + k * clip.length(&asset, p.timebase_rate);
+                    edits.push(Edit::AddAudioClip(clip));
+                }
+            }
+        }
+        self.history
+            .execute(&mut self.project, Edit::Batch(edits))?;
+        self.playlist_view.select_only(&ids);
+        Ok(())
+    }
+
+    /// Imports finished in the background become an asset (reused when the
+    /// same content is already in the project) and a clip, as one undo
+    /// step; a missing lane is created.
+    fn finish_imports(&mut self, now: f64) {
+        for (ticket, result) in self.host.take_imports() {
+            let Some(target) = self.pending_imports.remove(&ticket) else {
+                continue;
+            };
+            let audio = match result {
+                Ok(a) => a,
+                Err(e) => {
+                    self.notify(Notice::error(format!("Import failed: {e}")), now);
+                    continue;
+                }
+            };
+            let p = &mut self.project;
+            let mut edits = Vec::new();
+            let asset = match p
+                .assets
+                .iter()
+                .find(|a| a.hash == audio.hash && a.size == audio.size)
+            {
+                Some(a) => a.clone(),
+                None => {
+                    let a = jdance_domain::AudioAsset {
+                        id: jdance_domain::AssetId(p.ids.next()),
+                        name: audio.name.clone(),
+                        path: audio.path.clone(),
+                        hash: audio.hash,
+                        size: audio.size,
+                        sample_rate: audio.sample_rate,
+                        channels: audio.channels,
+                        frames: audio.frames,
+                    };
+                    edits.push(Edit::AddAsset(a.clone()));
+                    a
+                }
+            };
+            let Some(target) = target else {
+                // Import only: the file joins the project's samples.
+                if !edits.is_empty()
+                    && let Err(e) = self.history.execute(&mut self.project, Edit::Batch(edits))
+                {
+                    self.notify(Notice::error(format!("Import failed: {e}")), now);
+                }
+                continue;
+            };
+            let (lane, start) = target;
+            let lane = match lane {
+                Some(l) => l,
+                None => {
+                    let (id, edit) = new_lane_edit(p, audio.name.clone());
+                    edits.push(edit);
+                    id
+                }
+            };
+            let fpt = jdance_domain::frames_per_tick(p.tempo_bpm, p.timebase_rate);
+            let cid = ClipId(p.ids.next());
+            let clip = audio_clip_for(&asset, cid, lane, (start as f64 * fpt).round() as u64);
+            edits.push(Edit::AddAudioClip(clip));
+            match self.history.execute(&mut self.project, Edit::Batch(edits)) {
+                Ok(()) => {
+                    self.sync_needed = true;
+                    self.playlist_view.select_only(&[cid]);
+                    self.playlist_view.source = Some(playlist::Source::Asset(asset.id));
+                }
+                Err(e) => self.notify(Notice::error(format!("Import failed: {e}")), now),
+            }
+        }
+    }
+
+    /// Cuts a pattern or audio clip at `tick` into two (one undo step).
+    fn slice_clip(&mut self, id: ClipId, tick: u64) -> Result<(), jdance_commands::EditError> {
+        let p = &mut self.project;
+        let new_id = ClipId(p.ids.next());
+        let edits = if let Some(c) = p.playlist.clip(id).copied() {
+            let len = p.pattern(c.pattern).map_or(1, |x| x.length_ticks());
+            let Some((l, r)) = jdance_commands::slice_pattern_clip(&c, len, tick, new_id) else {
+                return Ok(());
+            };
+            vec![
+                Edit::SetClipShape {
+                    id,
+                    start: l.start,
+                    offset: l.offset,
+                    duration: l.duration,
+                    looped: l.looped,
+                },
+                Edit::AddClip(r),
+            ]
+        } else if let Some(c) = p.playlist.audio_clip(id).copied() {
+            let Some(asset) = p.asset(c.asset).cloned() else {
+                return Ok(());
+            };
+            let fpt = jdance_domain::frames_per_tick(p.tempo_bpm, p.timebase_rate);
+            let at = (tick as f64 * fpt).round() as u64;
+            let Some((l, r)) =
+                jdance_commands::slice_audio_clip(&c, &asset, p.timebase_rate, at, new_id)
+            else {
+                return Ok(());
+            };
+            vec![Edit::SetAudioClip(l), Edit::AddAudioClip(r)]
+        } else {
+            return Ok(());
+        };
+        self.history.execute(&mut self.project, Edit::Batch(edits))
+    }
+
+    /// Double-click on a clip: the Piano Roll of its pattern, or the
+    /// Sample Editor of an audio clip (spec 0.2.0 §3).
+    fn open_clip(&mut self, id: ClipId) {
+        if let Some(c) = self.project.playlist.clip(id) {
+            self.current_pattern = c.pattern;
+            let channel = self
+                .piano
+                .as_ref()
+                .map(|p| p.channel)
+                .or_else(|| self.rack_view.selection.iter().next().copied())
+                .or_else(|| self.project.channels.first().map(|c| c.id));
+            if let Some(ch) = channel {
+                self.piano = Some(piano::PianoRoll::new(ch));
+            }
+        } else if let Some(c) = self.project.playlist.audio_clip(id) {
+            self.sample_editor = Some(sample_editor::SampleEditor::for_clip(c));
+        }
+    }
+
+    fn project_action(&mut self, action: project_browser::ProjectAction, now: f64) {
+        use project_browser::ProjectAction as A;
+        let result: Result<(), jdance_commands::EditError> = match action {
+            A::Select(src) => {
+                if let playlist::Source::Pattern(id) = src {
+                    self.current_pattern = id;
+                    // The playlist follows the current pattern.
+                }
+                self.playlist_view.source = Some(src);
+                Ok(())
+            }
+            A::OpenPattern(id) => {
+                self.current_pattern = id;
+                let channel = self
+                    .piano
+                    .as_ref()
+                    .map(|p| p.channel)
+                    .or_else(|| self.rack_view.selection.iter().next().copied())
+                    .or_else(|| self.project.channels.first().map(|c| c.id));
+                if let Some(ch) = channel {
+                    self.piano = Some(piano::PianoRoll::new(ch));
+                }
+                Ok(())
+            }
+            A::OpenAsset(id) => {
+                self.sample_editor = Some(sample_editor::SampleEditor::new(
+                    sample_editor::Target::Asset(id),
+                ));
+                Ok(())
+            }
+            A::AddPattern => {
+                let n = self.project.patterns.len() + 1;
+                add_pattern(&mut self.history, &mut self.project, format!("Pattern {n}")).map(
+                    |id| {
+                        self.current_pattern = id;
+                    },
+                )
+            }
+            A::DuplicatePattern(id) => match self.project.pattern(id).cloned() {
+                Some(src) => {
+                    let new_id = PatternId(self.project.ids.next());
+                    let index = self
+                        .project
+                        .patterns
+                        .iter()
+                        .position(|p| p.id == id)
+                        .map_or(self.project.patterns.len(), |i| i + 1);
+                    self.history
+                        .execute(
+                            &mut self.project,
+                            Edit::AddPattern {
+                                pattern: jdance_domain::Pattern {
+                                    id: new_id,
+                                    name: format!("{} copy", src.name),
+                                    ..src
+                                },
+                                index,
+                            },
+                        )
+                        .map(|()| self.current_pattern = new_id)
+                }
+                None => Ok(()),
+            },
+            A::RenamePattern(id) => {
+                self.start_rename(RenameTarget::Pattern(id));
+                Ok(())
+            }
+            A::DeletePattern(id) => {
+                self.confirm_delete = Some(playlist::Source::Pattern(id));
+                Ok(())
+            }
+            A::ImportFiles => {
+                let files = rfd::FileDialog::new()
+                    .add_filter("WAV audio", &["wav", "wave"])
+                    .pick_files()
+                    .unwrap_or_default();
+                let dir = self.project_dir().map(Path::to_path_buf);
+                for f in files {
+                    if let Some(t) = self.host.import_audio(&f, dir.as_deref()) {
+                        self.pending_imports.insert(t, None);
+                    }
+                }
+                Ok(())
+            }
+            A::RenameAsset(id) => {
+                self.start_rename(RenameTarget::Asset(id));
+                Ok(())
+            }
+            A::PreviewAsset(id) => {
+                if let Some(a) = self.project.asset(id) {
+                    let path = match self.project_dir() {
+                        Some(d) if Path::new(&a.path).is_relative() => d.join(&a.path),
+                        _ => PathBuf::from(&a.path),
+                    };
+                    self.host.preview_file(Some(&path));
+                }
+                Ok(())
+            }
+            A::LoadIntoSampler(id) => {
+                if let Some(a) = self.project.asset(id).cloned() {
+                    self.load_into_sampler(&a, None, 0.0, 1.0, now);
+                }
+                Ok(())
+            }
+            A::DeleteAsset(id) => {
+                self.confirm_delete = Some(playlist::Source::Asset(id));
+                Ok(())
+            }
+        };
+        match result {
+            Ok(()) => self.sync_needed = true,
+            Err(e) => self.notify(Notice::error(e.to_string()), now),
+        }
+    }
+
+    /// Deleting a pattern or file that clips use needs a confirmation
+    /// naming what goes with it (spec 0.2.0 §10). One undo step.
+    fn confirm_delete_dialog(&mut self, ctx: &egui::Context, now: f64) {
+        let Some(target) = self.confirm_delete else {
+            return;
+        };
+        let p = &self.project;
+        let (name, clips, samplers) = match target {
+            playlist::Source::Pattern(id) => match p.pattern(id) {
+                Some(x) => (
+                    x.name.clone(),
+                    p.playlist.clips.iter().filter(|c| c.pattern == id).count(),
+                    0,
+                ),
+                None => {
+                    self.confirm_delete = None;
+                    return;
+                }
+            },
+            playlist::Source::Asset(id) => match p.asset(id) {
+                Some(a) => (
+                    a.name.clone(),
+                    p.asset_usage(id),
+                    p.channels
+                        .iter()
+                        .filter(|c| c.sample().is_some_and(|s| s.path == a.path))
+                        .count(),
+                ),
+                None => {
+                    self.confirm_delete = None;
+                    return;
+                }
+            },
+        };
+        if clips == 0 && samplers == 0 {
+            self.confirm_delete = None;
+            self.delete_source(target, now);
+            return;
+        }
+        let mut choice = None;
+        egui::Modal::new(egui::Id::unique("confirm_delete")).show(ctx, |ui| {
+            ui.set_width(380.0);
+            ui.heading(format!("Delete \u{201c}{name}\u{201d}?"));
+            if clips > 0 {
+                ui.label(format!("{clips} clip(s) in the Playlist use it and are deleted with it."));
+            }
+            if samplers > 0 {
+                ui.label(format!(
+                    "{samplers} sampler channel(s) play this file; they keep it (the file itself is not deleted)."
+                ));
+            }
+            ui.label(egui::RichText::new("You can undo this.").color(theme::MUTED));
+            ui.horizontal(|ui| {
+                if ui.button("Delete").clicked() {
+                    choice = Some(true);
+                }
+                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    choice = Some(false);
+                }
+            });
+        });
+        match choice {
+            Some(true) => {
+                self.confirm_delete = None;
+                self.delete_source(target, now);
+            }
+            Some(false) => self.confirm_delete = None,
+            None => {}
+        }
+    }
+
+    fn delete_source(&mut self, target: playlist::Source, now: f64) {
+        let edit = match target {
+            playlist::Source::Pattern(id) => Edit::RemovePattern(id),
+            playlist::Source::Asset(id) => {
+                let mut edits: Vec<Edit> = self
+                    .project
+                    .playlist
+                    .audio_clips
+                    .iter()
+                    .filter(|c| c.asset == id)
+                    .map(|c| Edit::RemoveAudioClip(c.id))
+                    .collect();
+                edits.push(Edit::RemoveAsset(id));
+                Edit::Batch(edits)
+            }
+        };
+        self.apply(edit, false, now);
+    }
+
+    fn sample_editor_window(&mut self, ctx: &egui::Context, now: f64) {
+        let Some(mut ed) = self.sample_editor.take() else {
+            return;
+        };
+        let dir = self
+            .path
+            .as_deref()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf);
+        let mut out = sample_editor::SampleEditorOutput::default();
+        let open = ed.show(ctx, &self.project, &mut self.host, dir.as_deref(), &mut out);
+        let merging = !out.end_gesture;
+        for edit in out.edits {
+            self.apply(edit, merging, now);
+        }
+        if out.end_gesture {
+            self.history.end_gesture();
+        }
+        let at = self.host.transport().position_ticks.unwrap_or(0);
+        let first_lane = self.project.playlist.lanes.first().map(|l| l.id);
+        if let Some((asset, a, b)) = out.place
+            && let Some(lane) = first_lane
+            && let Some(asset) = self.project.asset(asset).cloned()
+        {
+            let p = &mut self.project;
+            let fpt = jdance_domain::frames_per_tick(p.tempo_bpm, p.timebase_rate);
+            let id = ClipId(p.ids.next());
+            let mut clip = audio_clip_for(&asset, id, lane, (at as f64 * fpt).round() as u64);
+            clip.source_in = a;
+            clip.source_out = b.max(a + 1);
+            self.apply(Edit::AddAudioClip(clip), false, now);
+            self.playlist_view.select_only(&[id]);
+        }
+        if let Some((asset, channel, (start, end))) = out.load
+            && let Some(asset) = self.project.asset(asset).cloned()
+        {
+            self.load_into_sampler(&asset, channel, start, end, now);
+        }
+        if let Some(path) = out.import {
+            self.playlist_action(
+                playlist::PlaylistAction::ImportAudio {
+                    path,
+                    lane: first_lane,
+                    start: at,
+                },
+                now,
+            );
+        }
+        if open {
+            self.sample_editor = Some(ed);
+        }
+    }
+
+    /// Points a sampler (or a new one) at `asset`, with its start/end
+    /// markers on `start..end` (fractions), as one undo step.
+    fn load_into_sampler(
+        &mut self,
+        asset: &jdance_domain::AudioAsset,
+        channel: Option<ChannelId>,
+        start: f32,
+        end: f32,
+        now: f64,
+    ) {
+        let sample = jdance_domain::SampleRef {
+            path: asset.path.clone(),
+        };
+        let id = match channel {
+            Some(id) => {
+                self.apply(Edit::SetChannelSample(id, Some(sample)), false, now);
+                id
+            }
+            None => match jdance_commands::add_sample_channel(
+                &mut self.history,
+                &mut self.project,
+                asset.name.clone(),
+                Some(sample),
+            ) {
+                Ok(id) => id,
+                Err(e) => {
+                    self.notify(Notice::error(e.to_string()), now);
+                    return;
+                }
+            },
+        };
+        if (start, end) != (0.0, 1.0)
+            && let Some(ch) = self.project.channel(id)
+        {
+            let mut s = ch.sampler;
+            s.start = start.clamp(0.0, 1.0);
+            s.end = end.clamp(s.start, 1.0);
+            self.apply(Edit::SetSampler(id, s), false, now);
+        }
+        self.sync_needed = true;
+        self.notify(
+            Notice::info(format!(
+                "{} loaded into a sampler; edit its notes in the Piano Roll",
+                asset.name
+            )),
+            now,
+        );
     }
 
     /// Pattern selector, new/rename, length and loop toggle.
@@ -843,7 +1378,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                     .range(1..=jdance_domain::MAX_PATTERN_STEPS)
                     .suffix(" steps"),
             )
-            .on_hover_text("Pattern length; clips keep their repeat counts");
+            .on_hover_text("Pattern length; playlist clips keep their length (looped clips repeat the new length)");
         if r.changed() && steps != current_len {
             self.set_pattern_length(self.current_pattern, steps, false, now);
         }
@@ -854,7 +1389,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             .on_hover_text("Loop the region set with Shift+drag on the playlist ruler (default: whole arrangement)")
             .changed()
         {
-            let end = self.project.playlist.arrangement_end(&self.project.patterns).max(3_840);
+            let end = self.project.arrangement_end_ticks().max(3_840);
             let range = self.project.playlist.loop_range.or(Some((0, end)));
             self.apply(Edit::SetLoop { range, enabled: looping }, false, now);
         }
@@ -929,6 +1464,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 .playlist
                 .lane(id)
                 .map(|l| (l.name.clone(), Some(Some(l.color)), l.color)),
+            RenameTarget::Asset(id) => p.asset(id).map(|a| (a.name.clone(), None, [0; 3])),
         };
         if let Some((text, color, default_color)) = found {
             self.rename = Some(RenameDialog {
@@ -952,19 +1488,13 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                     self.undo(now);
                 }
             }
-            A::AddSample(path) => self.add_sample_channel(&path, now),
+            A::OpenFile(path) => {
+                self.sample_editor = Some(sample_editor::SampleEditor::new(
+                    sample_editor::Target::File(path),
+                ));
+            }
             A::AddInstrument(d) => self.add_instrument(d, now),
         }
-    }
-
-    fn add_sample_channel(&mut self, path: &Path, now: f64) {
-        let name = path
-            .file_stem()
-            .map_or_else(|| "Sample".into(), |s| s.to_string_lossy().into_owned());
-        let sample = jdance_domain::SampleRef {
-            path: path.to_string_lossy().into_owned(),
-        };
-        self.add_channel(name, Some(sample), now);
     }
 
     fn add_channel(&mut self, name: String, sample: Option<jdance_domain::SampleRef>, now: f64) {
@@ -1150,6 +1680,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                     RenameTarget::Track(id) => Edit::RenameTrack(id, name),
                     RenameTarget::Pattern(id) => Edit::RenamePattern(id, name),
                     RenameTarget::Lane(id) => Edit::RenameLane(id, name),
+                    RenameTarget::Asset(id) => Edit::RenameAsset(id, name),
                 });
             }
             match (target, color) {
@@ -1398,6 +1929,7 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
                 });
         }
         let mut pl_out = playlist::PlaylistOutput::default();
+        let mut project_actions = Vec::new();
         let mut piano_out = piano::PianoOutput::default();
         if let Some(id) = out.open_piano.take() {
             self.piano = Some(piano::PianoRoll::new(id));
@@ -1432,9 +1964,29 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
                 _ => {
                     let playhead = transport.position_ticks.filter(|_| self.song_mode);
                     let lanes = automation::lane_infos(&self.project, &mut self.host);
-                    pl_out = self
-                        .playlist_view
-                        .show(ui, &self.project, &lanes, playhead, self.snap);
+                    let dir = self.path.as_deref().and_then(Path::parent);
+                    ui.horizontal_top(|ui| {
+                        ui.vertical(|ui| {
+                            project_actions = self.project_browser.show(
+                                ui,
+                                &self.project,
+                                self.playlist_view.source,
+                            );
+                        });
+                        ui.separator();
+                        ui.vertical(|ui| {
+                            pl_out = self.playlist_view.show(
+                                ui,
+                                &self.project,
+                                &lanes,
+                                playhead,
+                                self.snap,
+                                self.current_pattern,
+                                &mut self.host,
+                                dir,
+                            );
+                        });
+                    });
                 }
             }
         });
@@ -1464,9 +2016,18 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
         if pl_out.end_gesture {
             self.history.end_gesture();
         }
+        if let Some(h) = pl_out.hint.take() {
+            self.notify(Notice::info(h), now);
+        }
         for action in pl_out.actions {
             self.playlist_action(action, now);
         }
+        for action in project_actions {
+            self.project_action(action, now);
+        }
+        self.finish_imports(now);
+        self.confirm_delete_dialog(&ctx, now);
+        self.sample_editor_window(&ctx, now);
         for (edit, merging) in out.edits.into_iter().chain(mix.edits) {
             self.apply(edit, merging, now);
         }
@@ -1589,4 +2150,43 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
     }
+}
+
+/// A clip of the whole `asset` at `start` project frames.
+fn audio_clip_for(
+    asset: &jdance_domain::AudioAsset,
+    id: ClipId,
+    lane: LaneId,
+    start: u64,
+) -> jdance_domain::AudioClip {
+    jdance_domain::AudioClip {
+        id,
+        lane,
+        asset: asset.id,
+        start,
+        source_in: 0,
+        source_out: asset.frames,
+        gain: 1.0,
+        muted: false,
+        fade_in: 0,
+        fade_out: 0,
+    }
+}
+
+/// A new lane named `name` at the end of the playlist, as an edit.
+fn new_lane_edit(p: &mut Project, name: String) -> (LaneId, Edit) {
+    let id = LaneId(p.ids.next());
+    let n = p.playlist.lanes.len();
+    let edit = Edit::AddLane {
+        lane: jdance_domain::Lane {
+            id,
+            name,
+            color: jdance_domain::LANE_COLORS[n % jdance_domain::LANE_COLORS.len()],
+            muted: false,
+            solo: false,
+            audio_track: TrackId::MASTER,
+        },
+        index: n,
+    };
+    (id, edit)
 }

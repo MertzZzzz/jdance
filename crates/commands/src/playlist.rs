@@ -7,8 +7,8 @@
 
 use crate::{Edit, EditError, History};
 use jdance_domain::{
-    ClipId, LANE_COLORS, Lane, LaneId, MAX_PATTERN_STEPS, Pattern, PatternClip, PatternId,
-    Playlist, Project, Step, TICKS_PER_STEP,
+    AudioAsset, AudioClip, ClipId, LANE_COLORS, Lane, LaneId, MAX_PATTERN_STEPS, Pattern,
+    PatternClip, PatternId, Playlist, Project, Step, TICKS_PER_STEP,
 };
 
 fn arrangement_err(m: String) -> EditError {
@@ -203,14 +203,108 @@ pub(crate) fn apply(edit: &Edit, p: &mut Project) -> Result<Edit, EditError> {
                 lane: old.1,
             })
         }
-        Edit::SetClipRepeat(id, n) => {
-            if *n == 0 || *n > jdance_domain::MAX_REPEAT {
-                return Err(EditError::OutOfRange(f64::from(*n)));
+        Edit::SetClipShape {
+            id,
+            start,
+            offset,
+            duration,
+            looped,
+        } => {
+            if *duration == 0 || *duration > jdance_domain::MAX_CLIP_TICKS {
+                return Err(EditError::OutOfRange(*duration as f64));
+            }
+            if *offset > jdance_domain::MAX_CLIP_TICKS {
+                return Err(EditError::OutOfRange(*offset as f64));
+            }
+            if *start > jdance_domain::MAX_START_TICKS {
+                return Err(EditError::OutOfRange(*start as f64));
             }
             let c = clip_mut(p, *id)?;
-            Ok(Edit::SetClipRepeat(
+            let old = Edit::SetClipShape {
+                id: *id,
+                start: c.start,
+                offset: c.offset,
+                duration: c.duration,
+                looped: c.looped,
+            };
+            (c.start, c.offset, c.duration, c.looped) = (*start, *offset, *duration, *looped);
+            Ok(old)
+        }
+        Edit::AddAsset(asset) => {
+            if p.asset(asset.id).is_some() {
+                return Err(arrangement_err(format!("asset {} exists", asset.id.0)));
+            }
+            asset.validate().map_err(arrangement_err)?;
+            p.assets.push(asset.clone());
+            Ok(Edit::RemoveAsset(asset.id))
+        }
+        Edit::RemoveAsset(id) => {
+            let used = p.asset_usage(*id);
+            if used > 0 {
+                return Err(arrangement_err(format!(
+                    "the audio file is used by {used} clip(s)"
+                )));
+            }
+            let i = p
+                .assets
+                .iter()
+                .position(|a| a.id == *id)
+                .ok_or_else(|| arrangement_err(format!("asset {} does not exist", id.0)))?;
+            Ok(Edit::AddAsset(p.assets.remove(i)))
+        }
+        Edit::RenameAsset(id, name) => {
+            let a = p
+                .assets
+                .iter_mut()
+                .find(|a| a.id == *id)
+                .ok_or_else(|| arrangement_err(format!("asset {} does not exist", id.0)))?;
+            Ok(Edit::RenameAsset(
                 *id,
-                std::mem::replace(&mut c.repeat, *n),
+                std::mem::replace(&mut a.name, name.clone()),
+            ))
+        }
+        Edit::AddAudioClip(clip) => {
+            if p.playlist.audio_clip(clip.id).is_some() || p.playlist.clip(clip.id).is_some() {
+                return Err(arrangement_err(format!("clip {} exists", clip.id.0)));
+            }
+            p.playlist.audio_clips.push(*clip);
+            if let Err(e) = p.validate_arrangement() {
+                p.playlist.audio_clips.pop();
+                return Err(arrangement_err(e));
+            }
+            Ok(Edit::RemoveAudioClip(clip.id))
+        }
+        Edit::RemoveAudioClip(id) => {
+            let i = p
+                .playlist
+                .audio_clips
+                .iter()
+                .position(|c| c.id == *id)
+                .ok_or_else(|| arrangement_err(format!("clip {} does not exist", id.0)))?;
+            Ok(Edit::AddAudioClip(p.playlist.audio_clips.remove(i)))
+        }
+        Edit::SetAudioClip(clip) => {
+            let c = p
+                .playlist
+                .audio_clip_mut(clip.id)
+                .ok_or_else(|| arrangement_err(format!("clip {} does not exist", clip.id.0)))?;
+            let old = std::mem::replace(c, *clip);
+            if let Err(e) = p.validate_arrangement() {
+                *p.playlist.audio_clip_mut(clip.id).expect("just replaced") = old;
+                return Err(arrangement_err(e));
+            }
+            Ok(Edit::SetAudioClip(old))
+        }
+        Edit::SetLaneAudioTrack(id, track) => {
+            if !p.mixer.has_track(*track) {
+                return Err(EditError::Routing(
+                    jdance_domain::RoutingError::UnknownTrack(*track),
+                ));
+            }
+            let l = lane_mut(p, *id)?;
+            Ok(Edit::SetLaneAudioTrack(
+                *id,
+                std::mem::replace(&mut l.audio_track, *track),
             ))
         }
         Edit::SetClipMuted(id, m) => {
@@ -287,6 +381,7 @@ pub fn add_lane(history: &mut History, p: &mut Project) -> Result<LaneId, EditEr
                 color: LANE_COLORS[n % LANE_COLORS.len()],
                 muted: false,
                 solo: false,
+                audio_track: jdance_domain::TrackId::MASTER,
             },
             index: n,
         },
@@ -294,7 +389,7 @@ pub fn add_lane(history: &mut History, p: &mut Project) -> Result<LaneId, EditEr
     Ok(id)
 }
 
-/// Creates a one-repeat clip of `pattern` on `lane` at `start` ticks.
+/// Creates a looped clip, one repetition long, of `pattern` on `lane` at `start` ticks.
 pub fn add_clip(
     history: &mut History,
     p: &mut Project,
@@ -302,6 +397,10 @@ pub fn add_clip(
     pattern: PatternId,
     start: u64,
 ) -> Result<ClipId, EditError> {
+    let len = p
+        .pattern(pattern)
+        .ok_or(EditError::NoSuchPattern(pattern))?
+        .length_ticks();
     let id = ClipId(p.ids.next());
     history.execute(
         p,
@@ -310,15 +409,18 @@ pub fn add_clip(
             lane,
             pattern,
             start,
-            repeat: 1,
+            offset: 0,
+            duration: len,
+            looped: true,
             muted: false,
         }),
     )?;
     Ok(id)
 }
 
-/// Duplicates clips right after the end of the selection, preserving
-/// their relative layout; new clip IDs, same patterns. One undo step.
+/// Duplicates clips (pattern and audio) right after the end of the
+/// selection, preserving their relative layout; new clip IDs, same
+/// patterns and files. One undo step.
 pub fn duplicate_clips(
     history: &mut History,
     p: &mut Project,
@@ -328,16 +430,25 @@ pub fn duplicate_clips(
         .iter()
         .filter_map(|id| p.playlist.clip(*id).copied())
         .collect();
-    if clips.is_empty() {
-        return Ok(Vec::new());
-    }
-    let first = clips.iter().map(|c| c.start).min().unwrap_or(0);
-    let end = clips
+    let audio: Vec<AudioClip> = ids
         .iter()
-        .filter_map(|c| p.pattern(c.pattern).map(|pat| c.interval(pat).1))
-        .max()
-        .unwrap_or(first);
-    let offset = end - first;
+        .filter_map(|id| p.playlist.audio_clip(*id).copied())
+        .collect();
+    // Selection span in ticks over both kinds.
+    let spans: Vec<(f64, f64)> = clips
+        .iter()
+        .map(|c| (c.start as f64, c.interval().1 as f64))
+        .chain(audio.iter().filter_map(|c| p.audio_clip_ticks(c)))
+        .collect();
+    let (Some(first), Some(end)) = (
+        spans.iter().map(|s| s.0).reduce(f64::min),
+        spans.iter().map(|s| s.1).reduce(f64::max),
+    ) else {
+        return Ok(Vec::new());
+    };
+    let offset = (end - first).ceil().max(1.0) as u64;
+    let fpt = jdance_domain::frames_per_tick(p.tempo_bpm, p.timebase_rate);
+    let frames = (offset as f64 * fpt).round() as u64;
     let mut edits = Vec::new();
     let mut new_ids = Vec::new();
     for c in clips {
@@ -346,6 +457,15 @@ pub fn duplicate_clips(
         edits.push(Edit::AddClip(PatternClip {
             id,
             start: c.start + offset,
+            ..c
+        }));
+    }
+    for c in audio {
+        let id = ClipId(p.ids.next());
+        new_ids.push(id);
+        edits.push(Edit::AddAudioClip(AudioClip {
+            id,
+            start: c.start + frames,
             ..c
         }));
     }
@@ -374,6 +494,150 @@ pub fn make_unique(
     };
     history.execute(p, Edit::MakeUnique { clip, pattern })?;
     Ok(id)
+}
+
+/// Which clip edge a resize drags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Edge {
+    Left,
+    Right,
+}
+
+/// Pattern clip resized so `edge` lands on `tick` (spec 0.2.0 §4): the
+/// right edge changes the duration; the left edge moves the start and the
+/// offset together, keeping the end and what is already visible. Without
+/// looping the clip stays inside the pattern. Returns `(start, offset,
+/// duration)`.
+pub fn pattern_clip_edge(
+    clip: &PatternClip,
+    pattern_len: u64,
+    edge: Edge,
+    tick: i64,
+) -> (u64, u64, u64) {
+    let len = pattern_len.max(1) as i64;
+    let (start, offset, dur) = (clip.start as i64, clip.offset as i64, clip.duration as i64);
+    let end = start + dur;
+    match edge {
+        Edge::Right => {
+            let mut new_end = tick.max(start + 1);
+            if !clip.looped {
+                new_end = new_end.min(start + (len - offset).max(1));
+            }
+            (clip.start, clip.offset, (new_end - start) as u64)
+        }
+        Edge::Left => {
+            // Not looped: cannot reveal before the pattern start.
+            let earliest = if clip.looped { 0 } else { start - offset };
+            let new_start = tick.clamp(earliest.max(0), end - 1);
+            let mut new_offset = offset + (new_start - start);
+            if clip.looped {
+                new_offset = new_offset.rem_euclid(len);
+            }
+            (
+                new_start as u64,
+                new_offset as u64,
+                (end - new_start) as u64,
+            )
+        }
+    }
+}
+
+/// Audio clip resized so `edge` lands on project frame `at` (spec 0.2.0
+/// §4): the right edge moves `source_out` (up to the file end), the left
+/// edge moves `source_in` and the start together, keeping the end. No
+/// stretching; at least one source frame stays.
+pub fn audio_clip_edge(
+    clip: &AudioClip,
+    asset: &AudioAsset,
+    timebase: u32,
+    edge: Edge,
+    at: i64,
+) -> AudioClip {
+    let ratio = f64::from(asset.sample_rate.max(1)) / f64::from(timebase.max(1));
+    let start = clip.start as i64;
+    match edge {
+        Edge::Right => {
+            let src = ((at - start) as f64 * ratio).round() as i64;
+            let out =
+                (clip.source_in as i64 + src).clamp(clip.source_in as i64 + 1, asset.frames as i64);
+            AudioClip {
+                source_out: out as u64,
+                ..*clip
+            }
+        }
+        Edge::Left => {
+            let delta = ((at - start) as f64 * ratio).round() as i64;
+            let new_in = (clip.source_in as i64 + delta).clamp(0, clip.source_out as i64 - 1);
+            let moved = ((new_in - clip.source_in as i64) as f64 / ratio).round() as i64;
+            AudioClip {
+                source_in: new_in as u64,
+                start: (start + moved).max(0) as u64,
+                ..*clip
+            }
+        }
+    }
+}
+
+/// Splits a pattern clip at `tick` (spec 0.2.0 §8): the left part keeps
+/// the ID, the right part (`new_id`) continues the same pattern position.
+/// `None` at or outside the edges.
+pub fn slice_pattern_clip(
+    clip: &PatternClip,
+    pattern_len: u64,
+    tick: u64,
+    new_id: ClipId,
+) -> Option<(PatternClip, PatternClip)> {
+    let (a, b) = clip.interval();
+    if tick <= a || tick >= b {
+        return None;
+    }
+    let left = PatternClip {
+        duration: tick - a,
+        ..*clip
+    };
+    let mut offset = clip.offset + (tick - a);
+    if clip.looped {
+        offset %= pattern_len.max(1);
+    }
+    let right = PatternClip {
+        id: new_id,
+        start: tick,
+        offset,
+        duration: b - tick,
+        ..*clip
+    };
+    Some((left, right))
+}
+
+/// Splits an audio clip at project frame `at`: both parts share one
+/// source frame boundary (no frame lost or doubled) and the same asset.
+/// `None` at or outside the edges.
+pub fn slice_audio_clip(
+    clip: &AudioClip,
+    asset: &AudioAsset,
+    timebase: u32,
+    at: u64,
+    new_id: ClipId,
+) -> Option<(AudioClip, AudioClip)> {
+    let ratio = f64::from(asset.sample_rate.max(1)) / f64::from(timebase.max(1));
+    if at <= clip.start {
+        return None;
+    }
+    let boundary = clip.source_in + ((at - clip.start) as f64 * ratio).round() as u64;
+    if boundary <= clip.source_in || boundary >= clip.source_out {
+        return None;
+    }
+    let left = AudioClip {
+        source_out: boundary,
+        ..*clip
+    };
+    let right = AudioClip {
+        id: new_id,
+        start: clip.start + left.length(asset, timebase),
+        source_in: boundary,
+        ..*clip
+    };
+    Some((left, right))
 }
 
 #[cfg(test)]
@@ -405,10 +669,20 @@ mod tests {
             },
         )
         .unwrap();
-        h.execute(&mut p, Edit::SetClipRepeat(c, 4)).unwrap();
+        let shape = |duration| Edit::SetClipShape {
+            id: c,
+            start: 7_680,
+            offset: 0,
+            duration,
+            looped: true,
+        };
+        h.execute(&mut p, shape(4 * 3840)).unwrap();
         let clip = *p.playlist.clip(c).unwrap();
-        assert_eq!((clip.start, clip.lane, clip.repeat), (7_680, lane2, 4));
-        assert!(h.execute(&mut p, Edit::SetClipRepeat(c, 0)).is_err());
+        assert_eq!(
+            (clip.start, clip.lane, clip.duration),
+            (7_680, lane2, 4 * 3840)
+        );
+        assert!(h.execute(&mut p, shape(0)).is_err());
         h.undo(&mut p).unwrap();
         h.undo(&mut p).unwrap();
         h.undo(&mut p).unwrap();
@@ -514,7 +788,17 @@ mod tests {
         )
         .unwrap();
         let c = add_clip(&mut h, &mut p, lane, pat, 0).unwrap();
-        h.execute(&mut p, Edit::SetClipRepeat(c, 3)).unwrap();
+        h.execute(
+            &mut p,
+            Edit::SetClipShape {
+                id: c,
+                start: 0,
+                offset: 0,
+                duration: 3 * 3840,
+                looped: true,
+            },
+        )
+        .unwrap();
         let shorten = |truncate| Edit::SetPatternLength {
             pattern: pat,
             steps: 8,
@@ -531,7 +815,11 @@ mod tests {
         );
         h.execute(&mut p, shorten(true)).unwrap();
         assert_eq!(p.pattern(pat).unwrap().length_steps, 8);
-        assert_eq!(p.playlist.clip(c).unwrap().repeat, 3, "repeat count kept");
+        assert_eq!(
+            p.playlist.clip(c).unwrap().duration,
+            3 * 3840,
+            "the clip keeps its length; it now repeats the shorter pattern"
+        );
         // Undo restores the truncated step in the same step.
         h.undo(&mut p).unwrap();
         assert!(p.pattern(pat).unwrap().step(ch, 12).unwrap().on);
@@ -565,5 +853,160 @@ mod tests {
             h.execute(&mut p, Edit::RemovePattern(second)).is_err(),
             "last pattern stays"
         );
+    }
+    #[test]
+    fn audio_assets_clips_and_lane_routing() {
+        let (mut p, mut h, _, lane) = setup();
+        let asset = jdance_domain::AudioAsset {
+            id: jdance_domain::AssetId(p.ids.next()),
+            name: "loop".into(),
+            path: "assets/loop.wav".into(),
+            hash: 1,
+            size: 100,
+            sample_rate: 48_000,
+            channels: 2,
+            frames: 48_000,
+        };
+        h.execute(&mut p, Edit::AddAsset(asset.clone())).unwrap();
+        let clip = jdance_domain::AudioClip {
+            id: ClipId(p.ids.next()),
+            lane,
+            asset: asset.id,
+            start: 0,
+            source_in: 0,
+            source_out: 48_000,
+            gain: 1.0,
+            muted: false,
+            fade_in: 0,
+            fade_out: 0,
+        };
+        h.execute(&mut p, Edit::AddAudioClip(clip)).unwrap();
+        // Trimming past the file end is rejected and changes nothing.
+        let long = jdance_domain::AudioClip {
+            source_out: 48_001,
+            ..clip
+        };
+        assert!(h.execute(&mut p, Edit::SetAudioClip(long)).is_err());
+        assert_eq!(p.playlist.audio_clip(clip.id), Some(&clip));
+        assert!(
+            h.execute(&mut p, Edit::RemoveAsset(asset.id)).is_err(),
+            "a used file cannot be removed"
+        );
+        assert_eq!(
+            p.arrangement_end_ticks(),
+            2080,
+            "1 s at 130 BPM = 2080 ticks"
+        );
+        // Lane audio routed to a track; removing the track falls back to
+        // the master, undo restores the route.
+        let t = crate::add_track(&mut h, &mut p, "Bus").unwrap();
+        h.execute(&mut p, Edit::SetLaneAudioTrack(lane, t)).unwrap();
+        h.execute(&mut p, Edit::RemoveTrack(t)).unwrap();
+        assert_eq!(
+            p.playlist.lane(lane).unwrap().audio_track,
+            jdance_domain::TrackId::MASTER
+        );
+        h.undo(&mut p).unwrap();
+        assert_eq!(p.playlist.lane(lane).unwrap().audio_track, t);
+        while h.undo(&mut p).unwrap() {}
+        assert!(p.assets.is_empty() && p.playlist.audio_clips.is_empty());
+    }
+
+    #[test]
+    fn pattern_clip_edges_and_slice() {
+        let pat = Pattern::new(PatternId(1), "A");
+        let len = pat.length_ticks(); // 3840
+        let c = PatternClip::repeating(ClipId(1), LaneId(2), &pat, 3840, 2);
+        // Right edge: any positive duration, partial last repetition.
+        assert_eq!(
+            pattern_clip_edge(&c, len, Edge::Right, 3840 + 5000),
+            (3840, 0, 5000)
+        );
+        assert_eq!(
+            pattern_clip_edge(&c, len, Edge::Right, 0),
+            (3840, 0, 1),
+            "at least 1 tick"
+        );
+        // Left edge right: start and offset move, end stays.
+        assert_eq!(
+            pattern_clip_edge(&c, len, Edge::Left, 3840 + 960),
+            (4800, 960, 7680 - 960)
+        );
+        // Left edge left of the pattern start, looped: normalized phase.
+        assert_eq!(
+            pattern_clip_edge(&c, len, Edge::Left, 3840 - 960),
+            (2880, 2880, 7680 + 960)
+        );
+        // Not looped: bounded by the pattern.
+        let once = PatternClip {
+            looped: false,
+            duration: 3840,
+            ..c
+        };
+        assert_eq!(
+            pattern_clip_edge(&once, len, Edge::Left, 0),
+            (3840, 0, 3840)
+        );
+        assert_eq!(
+            pattern_clip_edge(&once, len, Edge::Right, 99_999),
+            (3840, 0, 3840)
+        );
+
+        let (l, r) = slice_pattern_clip(&c, len, 3840 + 4800, ClipId(9)).unwrap();
+        assert_eq!((l.id, l.start, l.duration), (c.id, 3840, 4800));
+        assert_eq!(
+            (r.id, r.start, r.offset, r.duration),
+            (ClipId(9), 8640, 960, 2880)
+        );
+        assert_eq!(r.pattern, c.pattern, "same pattern, unchanged");
+        assert!(
+            slice_pattern_clip(&c, len, 3840, ClipId(9)).is_none(),
+            "edge: no-op"
+        );
+    }
+
+    #[test]
+    fn audio_clip_edges_and_slice_share_one_boundary() {
+        let asset = AudioAsset {
+            id: jdance_domain::AssetId(1),
+            name: "a".into(),
+            path: "a.wav".into(),
+            hash: 0,
+            size: 0,
+            sample_rate: 44_100,
+            channels: 1,
+            frames: 44_100,
+        };
+        let c = AudioClip {
+            id: ClipId(1),
+            lane: LaneId(2),
+            asset: asset.id,
+            start: 48_000,
+            source_in: 11_025,
+            source_out: 33_075,
+            gain: 1.0,
+            muted: false,
+            fade_in: 0,
+            fade_out: 0,
+        };
+        // Right edge reveals up to the file end, never past it.
+        let r = audio_clip_edge(&c, &asset, 48_000, Edge::Right, 10_000_000);
+        assert_eq!(r.source_out, 44_100);
+        assert_eq!(r.start, c.start);
+        // Left edge left: reveals earlier content, keeps the end.
+        let l = audio_clip_edge(&c, &asset, 48_000, Edge::Left, 48_000 - 12_000);
+        assert_eq!((l.source_in, l.start), (0, 36_000));
+        assert_eq!(l.interval(&asset, 48_000).1, c.interval(&asset, 48_000).1);
+        // Left edge right trims and moves the start.
+        let t = audio_clip_edge(&c, &asset, 48_000, Edge::Left, 48_000 + 4_800);
+        assert_eq!((t.source_in, t.start), (11_025 + 4_410, 52_800));
+
+        let at = 48_000 + 12_000;
+        let (a, b) = slice_audio_clip(&c, &asset, 48_000, at, ClipId(5)).unwrap();
+        assert_eq!(a.source_out, b.source_in, "one boundary");
+        assert_eq!((a.source_in, b.source_out), (c.source_in, c.source_out));
+        assert_eq!(b.start, a.start + a.length(&asset, 48_000));
+        assert_eq!((a.asset, b.asset), (c.asset, c.asset));
+        assert!(slice_audio_clip(&c, &asset, 48_000, c.start, ClipId(5)).is_none());
     }
 }

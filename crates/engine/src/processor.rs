@@ -587,7 +587,13 @@ impl EngineProcessor {
                     cursor = offset;
                     trigger(snap, voices, voice_serial, feedback, &e);
                 }
-                done += (seg_end - p) as usize;
+                // Audio clips of this segment, straight into their buses.
+                let seg = (seg_end - p) as usize;
+                for c in &snap.audio_clips {
+                    let (l, r) = inputs.get_mut(c.track, done + seg);
+                    c.render_add(p, &mut l[done..], &mut r[done..]);
+                }
+                done += seg;
                 match wrap {
                     Some((a, b)) if seg_end == b => {
                         // Loop wrap: instrument voices end with a short

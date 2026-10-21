@@ -53,14 +53,14 @@ fn project() -> Project {
     p.channels.push(c);
     p.patterns[0].row_mut(id).steps[0].on = true;
     p.patterns[0].row_mut(id).steps[0].velocity = 1.0;
-    p.playlist.clips.push(PatternClip {
-        id: jdance_domain::ClipId(p.ids.next()),
-        lane: p.playlist.lanes[0].id,
-        pattern: p.patterns[0].id,
-        start: 0,
-        repeat: 1,
-        muted: false,
-    });
+    let clip = PatternClip::repeating(
+        jdance_domain::ClipId(p.ids.next()),
+        p.playlist.lanes[0].id,
+        &p.patterns[0],
+        0,
+        1,
+    );
+    p.playlist.clips.push(clip);
     let _: LaneId = p.playlist.lanes[0].id;
     p
 }

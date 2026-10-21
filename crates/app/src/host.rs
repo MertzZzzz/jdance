@@ -103,7 +103,14 @@ pub struct AudioHost {
     scan: Option<Receiver<Catalog>>,
     browser: BrowserFs,
     /// File waiting to load before its preview starts.
-    pending_preview: Option<PathBuf>,
+    /// File to preview once loaded, and the part of it (fractions).
+    pending_preview: Option<(PathBuf, (f64, f64))>,
+    /// Background imports: results and the next ticket.
+    imports: (
+        std::sync::mpsc::Sender<ImportResult>,
+        std::sync::mpsc::Receiver<ImportResult>,
+    ),
+    next_import: u64,
 }
 
 impl std::fmt::Debug for AudioHost {
@@ -153,6 +160,8 @@ impl AudioHost {
             scan: None,
             browser: BrowserFs::new(),
             pending_preview: None,
+            imports: std::sync::mpsc::channel(),
+            next_import: 0,
         }
     }
 
@@ -349,7 +358,7 @@ impl Host for AudioHost {
             self.needs_compile = true;
         }
         self.browser.poll();
-        if let Some(path) = self.pending_preview.clone() {
+        if let Some((path, range)) = self.pending_preview.clone() {
             match self.samples.status(&path) {
                 Some(SampleStatus::Failed(e)) => {
                     self.pending_preview = None;
@@ -363,6 +372,18 @@ impl Host for AudioHost {
                         && buf.sample_rate == a.engine.sample_rate()
                     {
                         self.pending_preview = None;
+                        let buf = if range == (0.0, 1.0) {
+                            buf
+                        } else {
+                            let n = buf.len() as f64;
+                            let lo = (range.0.clamp(0.0, 1.0) * n) as usize;
+                            let hi = ((range.1.clamp(0.0, 1.0) * n) as usize).max(lo);
+                            std::sync::Arc::new(jdance_dsp::SampleBuffer {
+                                sample_rate: buf.sample_rate,
+                                left: buf.left[lo..hi].to_vec(),
+                                right: buf.right[lo..hi].to_vec(),
+                            })
+                        };
                         let _ = a.engine.preview(Some(buf));
                     }
                 }
@@ -446,10 +467,18 @@ impl Host for AudioHost {
         }
         self.project = project.clone();
         self.project_dir = project_dir.map(Path::to_path_buf);
+        let assets: Vec<SampleRef> = project
+            .assets
+            .iter()
+            .map(|a| SampleRef {
+                path: a.path.clone(),
+            })
+            .collect();
         let paths: Vec<PathBuf> = project
             .channels
             .iter()
             .filter_map(|c| c.sample())
+            .chain(&assets)
             .map(|s| self.resolve(s))
             .collect();
         for p in paths {
@@ -543,6 +572,24 @@ impl Host for AudioHost {
             stats: a.stream.stats().read(),
             state: a.stream.state(),
         })
+    }
+
+    fn import_audio(&mut self, path: &Path, project_dir: Option<&Path>) -> Option<u64> {
+        self.next_import += 1;
+        let ticket = self.next_import;
+        let tx = self.imports.0.clone();
+        let (path, dir) = (path.to_path_buf(), project_dir.map(Path::to_path_buf));
+        std::thread::Builder::new()
+            .name("jdance-import".into())
+            .spawn(move || {
+                let _ = tx.send((ticket, import_file(&path, dir.as_deref())));
+            })
+            .ok()?;
+        Some(ticket)
+    }
+
+    fn take_imports(&mut self) -> Vec<(u64, Result<jdance_ui::ImportedAudio, String>)> {
+        self.imports.1.try_iter().collect()
     }
 
     fn sample_status(
@@ -813,7 +860,7 @@ impl Host for AudioHost {
                     return;
                 }
                 self.samples.request(p);
-                self.pending_preview = Some(p.to_path_buf());
+                self.pending_preview = Some((p.to_path_buf(), (0.0, 1.0)));
             }
             None => {
                 self.pending_preview = None;
@@ -821,6 +868,13 @@ impl Host for AudioHost {
                     let _ = a.engine.preview(None);
                 }
             }
+        }
+    }
+
+    fn preview_range(&mut self, path: &Path, range: (f64, f64)) {
+        self.preview_file(Some(path));
+        if let Some(p) = &mut self.pending_preview {
+            p.1 = range;
         }
     }
 
@@ -849,4 +903,35 @@ impl Host for AudioHost {
     fn take_notices(&mut self) -> Vec<Notice> {
         std::mem::take(&mut self.notices)
     }
+}
+
+/// A finished background import: ticket and file or error.
+type ImportResult = (u64, Result<jdance_ui::ImportedAudio, String>);
+
+/// Reads (and copies into the project's `assets/` folder) one audio file
+/// for import; runs on a worker thread.
+fn import_file(path: &Path, dir: Option<&Path>) -> Result<jdance_ui::ImportedAudio, String> {
+    let info = jdance_persistence::inspect_audio(path).map_err(|e| e.to_string())?;
+    let stored = match dir {
+        Some(d) => {
+            jdance_persistence::copy_into_assets(path, d, info.hash).map_err(|e| e.to_string())?
+        }
+        None => path
+            .canonicalize()
+            .unwrap_or_else(|_| path.to_path_buf())
+            .to_string_lossy()
+            .into_owned(),
+    };
+    Ok(jdance_ui::ImportedAudio {
+        source: path.to_path_buf(),
+        path: stored,
+        name: path
+            .file_stem()
+            .map_or_else(|| "audio".into(), |s| s.to_string_lossy().into_owned()),
+        hash: info.hash,
+        size: info.size,
+        sample_rate: info.sample_rate,
+        channels: info.channels,
+        frames: info.frames,
+    })
 }
