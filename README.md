@@ -5,7 +5,9 @@
 piano roll, playlist, mixer). Код FL Studio не используется и не
 анализируется (см. [CR-002](docs/spec/amendment-02-details-and-plugin-hosting.md#13-clean-room-и-provenance)).
 
-Лицензия: **GPL-3.0-or-later** ([LICENSE](LICENSE)).
+Лицензия: **GPL-3.0-or-later** ([LICENSE](LICENSE)). Шрифты интерфейса —
+IBM Plex Sans и IBM Plex Mono под SIL Open Font License 1.1
+([crates/ui/assets/fonts/OFL.txt](crates/ui/assets/fonts/OFL.txt)).
 
 ## Статус
 

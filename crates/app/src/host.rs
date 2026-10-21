@@ -484,6 +484,7 @@ impl Host for AudioHost {
                 .then(|| (r.position as f64 / spt).round() as u64),
             loop_pos: (r.loop_len > 0).then(|| r.position as f32 / r.loop_len as f32),
             peak_load: r.peak_load,
+            overloads: r.overloads,
             voices: r.active_voices,
             dropped_commands: r.dropped_commands,
         }

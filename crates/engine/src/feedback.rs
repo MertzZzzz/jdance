@@ -85,6 +85,8 @@ pub struct EngineFeedback {
     renders: AtomicU64,
     /// Peak callback load since the last reading, as `f32` bits.
     peak_load: AtomicU32,
+    /// Blocks that took longer to render than their audio duration.
+    overloads: AtomicU64,
     dropped_commands: AtomicU64,
     deferred_snapshots: AtomicU64,
 }
@@ -101,6 +103,9 @@ pub struct FeedbackReading {
     pub renders: u64,
     /// Peak render time / audio duration of the block since last reading.
     pub peak_load: f32,
+    /// Blocks rendered slower than real time since the engine started
+    /// (each one likely caused a dropout).
+    pub overloads: u64,
     pub dropped_commands: u64,
     pub deferred_snapshots: u64,
 }
@@ -122,6 +127,9 @@ impl EngineFeedback {
 
     pub(crate) fn note_render(&self, load: f32) {
         self.renders.fetch_add(1, Relaxed);
+        if load > 1.0 {
+            self.overloads.fetch_add(1, Relaxed);
+        }
         let mut cur = self.peak_load.load(Relaxed);
         while f32::from_bits(cur) < load {
             match self
@@ -152,6 +160,7 @@ impl EngineFeedback {
             voice_steals: self.voice_steals.load(Relaxed),
             renders: self.renders.load(Relaxed),
             peak_load: f32::from_bits(self.peak_load.swap(0, Relaxed)),
+            overloads: self.overloads.load(Relaxed),
             dropped_commands: self.dropped_commands.load(Relaxed),
             deferred_snapshots: self.deferred_snapshots.load(Relaxed),
         }

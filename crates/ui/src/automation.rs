@@ -11,7 +11,7 @@ use jdance_domain::{
 };
 
 /// Orange used for automation marks and envelopes.
-pub(crate) const AUTOMATION_COLOR: Color32 = Color32::from_rgb(240, 150, 50);
+pub(crate) const AUTOMATION_COLOR: Color32 = crate::theme::TEAL;
 
 /// Automation changes requested from a control.
 #[derive(Debug, Clone, PartialEq)]

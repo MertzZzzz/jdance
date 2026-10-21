@@ -12,6 +12,8 @@ mod playlist;
 mod plugins;
 mod rack;
 mod settings;
+mod theme;
+mod toolbar;
 
 pub use host::{
     Host, LatencyInfo, MeterReadings, Notice, NoticeLevel, PluginParamView, SampleStatus,
@@ -25,8 +27,8 @@ use jdance_commands::{
 };
 use jdance_domain::{
     ChannelId, DEFAULT_EXPORT_TAIL_SECONDS, Effect, ExportFormat, ExportOptions, ExportRange,
-    LaneId, MAX_EXPORT_TAIL_SECONDS, MAX_TEMPO_BPM, MAX_VOLUME, MIN_TEMPO_BPM, PatternId,
-    PluginSlot, Project, TrackId,
+    LaneId, MAX_EXPORT_TAIL_SECONDS, MAX_TEMPO_BPM, MIN_TEMPO_BPM, PatternId, PluginSlot, Project,
+    TrackId,
 };
 use settings::SettingsWindow;
 use std::path::{Path, PathBuf};
@@ -72,7 +74,15 @@ pub struct JdanceApp<H: Host, S: ProjectStore> {
     settings: Option<SettingsWindow>,
     rename: Option<RenameDialog>,
     show_mixer: bool,
+    show_rack: bool,
+    show_playlist: bool,
     show_plugins: bool,
+    /// Position shown as time instead of bars.
+    time_display: bool,
+    /// Grid for the Playlist and the Piano Roll (ticks; 0 = off).
+    snap: u32,
+    tap: Option<toolbar::TapTempo>,
+    themed: bool,
     /// Pattern edited in the rack and used for new clips.
     current_pattern: PatternId,
     song_mode: bool,
@@ -124,7 +134,13 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             settings,
             rename: None,
             show_mixer: true,
+            show_rack: true,
+            show_playlist: true,
             show_plugins: false,
+            time_display: false,
+            snap: jdance_domain::TICKS_PER_STEP,
+            tap: None,
+            themed: false,
             current_pattern,
             song_mode,
             mode_sent: None,
@@ -459,9 +475,11 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
         }
     }
 
-    fn toolbar(&mut self, ui: &mut egui::Ui, now: f64) {
+    fn menu_bar(&mut self, ui: &mut egui::Ui, now: f64) {
         let ctx = ui.ctx().clone();
-        ui.horizontal_wrapped(|ui| {
+        ui.horizontal(|ui| {
+            ui.style_mut().visuals.button_frame = false;
+            ui.label(egui::RichText::new(APP_NAME).font(theme::strong(13.0)));
             ui.menu_button("File", |ui| {
                 if ui.button("New").clicked() {
                     self.guarded(Pending::New, &ctx, now);
@@ -506,26 +524,59 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                     self.redo(now);
                 }
             });
-            ui.toggle_value(&mut self.show_mixer, "Mixer");
-            ui.separator();
-            ui.selectable_value(&mut self.song_mode, false, "Pattern")
-                .on_hover_text("Play loops the current pattern");
-            ui.selectable_value(&mut self.song_mode, true, "Song")
-                .on_hover_text("Play the playlist arrangement");
-            self.pattern_controls(ui, now);
-            if ui.button("Audio settings").clicked() {
-                self.settings = Some(SettingsWindow::new(&self.host));
-            }
-            ui.toggle_value(&mut self.show_plugins, "Plugins");
-            ui.separator();
+            ui.menu_button("View", |ui| {
+                ui.toggle_value(&mut self.show_rack, "Channel Rack");
+                ui.toggle_value(&mut self.show_playlist, "Playlist");
+                ui.toggle_value(&mut self.show_mixer, "Mixer");
+                ui.separator();
+                ui.toggle_value(&mut self.show_plugins, "Plugins");
+                if ui.button("Tap Tempo").clicked() {
+                    self.tap.get_or_insert_with(toolbar::TapTempo::default);
+                    ui.close();
+                }
+            });
+            ui.menu_button("Options", |ui| {
+                if ui.button("Audio settings…").clicked() {
+                    self.settings = Some(SettingsWindow::new(&self.host));
+                    ui.close();
+                }
+                if ui.button("Plugins…").clicked() {
+                    self.show_plugins = true;
+                    ui.close();
+                }
+            });
+            let name = self.path.as_ref().and_then(|p| p.file_name()).map_or_else(
+                || "Untitled".to_owned(),
+                |n| n.to_string_lossy().into_owned(),
+            );
+            let dirty = if self.history.is_dirty() { " •" } else { "" };
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(egui::RichText::new(format!("{name}{dirty}")).color(theme::MUTED));
+            });
+        });
+    }
 
-            let playing = self.host.transport().playing;
-            if ui
-                .selectable_label(playing, if playing { "Stop" } else { "Play" })
-                .on_hover_text("Space")
+    fn toolbar(&mut self, ui: &mut egui::Ui, now: f64) {
+        let transport = self.host.transport();
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            // Transport.
+            let playing = transport.playing;
+            if theme::icon_button(ui, theme::Icon::Play, playing, "Play")
+                .on_hover_text("Play / pause (Space)")
                 .clicked()
             {
                 self.toggle_play();
+            }
+            if theme::icon_button(ui, theme::Icon::Stop, false, "Stop")
+                .on_hover_text("Stop; when already stopped, return to the song start")
+                .clicked()
+            {
+                if playing {
+                    self.host.stop();
+                } else {
+                    self.host.seek_ticks(0);
+                }
             }
             if ui
                 .button("Panic")
@@ -534,67 +585,170 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             {
                 self.host.panic();
             }
-
-            ui.label("Tempo");
+            ui.separator();
+            // Mode.
+            ui.selectable_value(&mut self.song_mode, false, "Pattern")
+                .on_hover_text("Play loops the current pattern");
+            ui.selectable_value(&mut self.song_mode, true, "Song")
+                .on_hover_text("Play the playlist arrangement");
+            ui.separator();
+            // Position.
+            let ticks = transport.position_ticks.unwrap_or(0);
+            let text = if self.time_display {
+                toolbar::time_text(ticks, self.project.tempo_bpm)
+            } else {
+                toolbar::bars_text(ticks)
+            };
+            if ui
+                .add(
+                    egui::Button::new(egui::RichText::new(text).font(theme::mono(18.0)))
+                        .fill(theme::FIELD)
+                        .min_size(egui::vec2(130.0, 30.0)),
+                )
+                .on_hover_text("Click to switch between bars and time")
+                .clicked()
+            {
+                self.time_display = !self.time_display;
+            }
+            // Tempo.
             let mut tempo = self.project.tempo_bpm;
-            let r = ui.add(
-                egui::DragValue::new(&mut tempo)
-                    .range(MIN_TEMPO_BPM..=MAX_TEMPO_BPM)
-                    .speed(0.5)
-                    .fixed_decimals(1)
-                    .suffix(" BPM"),
-            );
+            let r = ui
+                .add(
+                    egui::DragValue::new(&mut tempo)
+                        .range(MIN_TEMPO_BPM..=MAX_TEMPO_BPM)
+                        .speed(0.5)
+                        .fixed_decimals(3)
+                        .suffix(" BPM"),
+                )
+                .on_hover_text("Drag or type; one drag is one undo step");
             if r.changed() && tempo != self.project.tempo_bpm {
                 self.apply(Edit::SetTempo(tempo), true, now);
             }
             if r.drag_stopped() || r.lost_focus() {
                 self.history.end_gesture();
             }
-
-            ui.label("Master");
-            let mut master = self.project.mixer.master.volume;
-            let r = ui.add(egui::Slider::new(&mut master, 0.0..=MAX_VOLUME).show_value(false));
-            if r.changed() {
-                self.apply(Edit::SetMasterVolume(master), true, now);
+            if ui.button("Tap").on_hover_text("Tap Tempo").clicked() {
+                self.tap.get_or_insert_with(toolbar::TapTempo::default);
             }
-            if r.drag_stopped() {
-                self.history.end_gesture();
+            ui.separator();
+            self.pattern_controls(ui, now);
+            ui.separator();
+            ui.label(egui::RichText::new("Snap").color(theme::MUTED));
+            egui::ComboBox::from_id_salt("snap")
+                .width(90.0)
+                .selected_text(toolbar::snap_name(self.snap))
+                .show_ui(ui, |ui| {
+                    for (v, name) in toolbar::SNAPS {
+                        ui.selectable_value(&mut self.snap, v, name);
+                    }
+                })
+                .response
+                .on_hover_text("Grid for the Playlist and the Piano Roll");
+            ui.separator();
+            ui.toggle_value(&mut self.show_rack, "Rack");
+            let mut piano = self.piano.is_some();
+            if ui
+                .toggle_value(&mut piano, "Piano")
+                .on_hover_text(
+                    "Open the Piano Roll for the first channel; \
+                     use a channel's Piano button for another",
+                )
+                .changed()
+            {
+                self.piano = match (piano, self.project.channels.first()) {
+                    (true, Some(c)) => Some(piano::PianoRoll::new(c.id)),
+                    _ => None,
+                };
             }
+            ui.toggle_value(&mut self.show_playlist, "Playlist");
+            ui.toggle_value(&mut self.show_mixer, "Mixer");
+            ui.separator();
+            // Performance.
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                let load = transport.peak_load.clamp(0.0, 1.0);
+                let pct = transport.peak_load * 100.0;
+                let text = if transport.overloads > 0 {
+                    egui::RichText::new(format!("DSP {pct:.0}% · {} late", transport.overloads))
+                        .color(theme::RED)
+                } else {
+                    egui::RichText::new(format!("DSP {pct:.0}%"))
+                };
+                ui.label(text.font(theme::mono(11.0))).on_hover_text(
+                    "Late: buffers that took longer to process than to play; \
+                     each one likely caused a dropout",
+                );
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(90.0, 5.0), egui::Sense::hover());
+                ui.painter().rect_filled(rect, 2.0, theme::RAISED);
+                let mut fill = rect;
+                fill.set_width(rect.width() * load);
+                let color = if load > 0.85 {
+                    theme::RED
+                } else if load > 0.6 {
+                    theme::AMBER
+                } else {
+                    theme::GREEN
+                };
+                ui.painter().rect_filled(fill, 2.0, color);
+            })
+            .response
+            .on_hover_text("Audio processing time per buffer, as a share of the buffer's duration");
         });
     }
 
     fn status_bar(&self, ui: &mut egui::Ui) {
         let t = self.host.transport();
-        ui.horizontal_wrapped(|ui| {
-            match self.host.stream() {
-                Some(s) => {
-                    let state = match &s.state {
-                        jdance_audio_api::StreamState::Running => "running".to_owned(),
-                        jdance_audio_api::StreamState::Failed(e) => format!("FAILED: {e}"),
-                    };
-                    let buffer = match (s.stats.min_frames, s.stats.max_frames) {
-                        (Some(a), Some(b)) if a == b => format!("{a} frames"),
-                        (Some(a), Some(b)) => format!("{a}–{b} frames"),
-                        _ => "—".into(),
-                    };
-                    ui.label(format!(
-                        "{} · {} · {} Hz · buffer {buffer} · {state}",
-                        s.info.backend, s.info.device_name, s.info.sample_rate
-                    ));
-                }
-                None => {
-                    ui.colored_label(ui.visuals().warn_fg_color, "No audio device open");
-                }
-            }
-            ui.separator();
-            ui.label(format!("CPU {:.0}%", t.peak_load * 100.0));
-            ui.label(format!("Voices {}", t.voices));
+        ui.horizontal(|ui| {
+            let changes = if self.history.is_dirty() {
+                egui::RichText::new("Unsaved changes").color(theme::WARN)
+            } else {
+                egui::RichText::new("All changes saved").color(theme::OK)
+            };
+            ui.label(changes.size(11.0));
+            ui.label(
+                egui::RichText::new(format!("Voices {}", t.voices))
+                    .size(11.0)
+                    .color(theme::MUTED),
+            );
             if t.dropped_commands > 0 {
                 ui.colored_label(
-                    ui.visuals().warn_fg_color,
+                    theme::WARN,
                     format!("Dropped commands {}", t.dropped_commands),
                 );
             }
+            ui.with_layout(
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| match self.host.stream() {
+                    Some(s) => {
+                        let state = match &s.state {
+                            jdance_audio_api::StreamState::Running => String::new(),
+                            jdance_audio_api::StreamState::Failed(e) => format!(" · FAILED: {e}"),
+                        };
+                        let buffer = match (s.stats.min_frames, s.stats.max_frames) {
+                            (Some(a), Some(b)) if a == b => format!("{a} frames"),
+                            (Some(a), Some(b)) => format!("{a}–{b} frames"),
+                            _ => "—".into(),
+                        };
+                        let ms = s.stats.last_frames.map_or(String::new(), |f| {
+                            format!(
+                                " · {:.1} ms",
+                                f64::from(f) * 1000.0 / f64::from(s.info.sample_rate)
+                            )
+                        });
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{} · {} · {} Hz · {buffer}{ms}{state}",
+                                s.info.backend, s.info.device_name, s.info.sample_rate
+                            ))
+                            .font(theme::mono(11.0)),
+                        );
+                    }
+                    None => {
+                        ui.colored_label(theme::WARN, "No audio device open");
+                    }
+                },
+            );
         });
     }
 
@@ -640,7 +794,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
         let (current_name, current_len) = (current.name.clone(), current.length_steps);
         let mut selected = self.current_pattern;
         egui::ComboBox::from_id_salt("pattern")
-            .width(120.0)
+            .width(110.0)
             .selected_text(current_name)
             .show_ui(ui, |ui| {
                 for p in &self.project.patterns {
@@ -934,8 +1088,33 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
         self.handle_close_request(&ctx);
         self.shortcuts(&ctx, now);
 
-        egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui, now));
-        egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
+        if !self.themed {
+            theme::install(&ctx);
+            self.themed = true;
+        }
+        let bar = |fill| {
+            egui::Frame::new()
+                .fill(fill)
+                .inner_margin(egui::Margin::symmetric(12, 4))
+        };
+        egui::Panel::top("menu")
+            .frame(bar(theme::SIDEBAR))
+            .show(ui, |ui| self.menu_bar(ui, now));
+        egui::Panel::top("toolbar")
+            .frame(bar(theme::BAR).inner_margin(egui::Margin::symmetric(12, 8)))
+            .show(ui, |ui| self.toolbar(ui, now));
+        egui::Panel::bottom("status")
+            .frame(bar(theme::SIDEBAR))
+            .show(ui, |ui| self.status_bar(ui));
+        if let Some(mut tap) = self.tap.take() {
+            let (apply, open) = tap.window(&ctx, now);
+            if let Some(bpm) = apply {
+                self.apply(Edit::SetTempo((bpm * 1000.0).round() / 1000.0), false, now);
+            }
+            if open {
+                self.tap = Some(tap);
+            }
+        }
         let mut mix = mixer::MixerOutput::default();
         if self.show_mixer {
             let latency = self.host.latency();
@@ -958,21 +1137,23 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
                 });
         }
         let mut out = rack::RackOutput::default();
-        egui::Panel::top("rack")
-            .resizable(true)
-            .default_size(170.0)
-            .min_size(60.0)
-            .show(ui, |ui| {
-                let pattern_mode = !self.song_mode;
-                out = rack::show(
-                    ui,
-                    &self.project,
-                    self.current_pattern,
-                    &self.host,
-                    self.project_dir(),
-                    pattern_mode,
-                );
-            });
+        if self.show_rack {
+            egui::Panel::top("rack")
+                .resizable(true)
+                .default_size(170.0)
+                .min_size(60.0)
+                .show(ui, |ui| {
+                    let pattern_mode = !self.song_mode;
+                    out = rack::show(
+                        ui,
+                        &self.project,
+                        self.current_pattern,
+                        &self.host,
+                        self.project_dir(),
+                        pattern_mode,
+                    );
+                });
+        }
         let mut pl_out = playlist::PlaylistOutput::default();
         let mut piano_out = piano::PianoOutput::default();
         if let Some(id) = out.open_piano.take() {
@@ -994,12 +1175,22 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
                         .loop_pos
                         .filter(|_| transport.playing && !self.song_mode)
                         .map(|p| p * pattern.length_ticks() as f32);
-                    piano_out = roll.show(ui, &self.project, pattern, playhead);
+                    piano_out = roll.show(ui, &self.project, pattern, playhead, self.snap);
+                }
+                _ if !self.show_playlist => {
+                    ui.centered_and_justified(|ui| {
+                        ui.label(
+                            egui::RichText::new("Playlist hidden · View → Playlist or the toolbar's Playlist button")
+                                .color(theme::MUTED),
+                        );
+                    });
                 }
                 _ => {
                     let playhead = transport.position_ticks.filter(|_| self.song_mode);
                     let lanes = automation::lane_infos(&self.project, &mut self.host);
-                    pl_out = self.playlist_view.show(ui, &self.project, &lanes, playhead);
+                    pl_out = self
+                        .playlist_view
+                        .show(ui, &self.project, &lanes, playhead, self.snap);
                 }
             }
         });

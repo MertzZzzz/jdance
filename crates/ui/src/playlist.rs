@@ -57,6 +57,8 @@ pub(crate) struct PlaylistView {
     selection: BTreeSet<ClipId>,
     drag: Option<Drag>,
     context_clip: Option<ClipId>,
+    /// Snap grid in ticks (1 = off), from the toolbar.
+    grid: u64,
     /// Automation lane and point under the last right-click.
     context_auto: Option<(AutomationId, Option<usize>)>,
 }
@@ -68,6 +70,7 @@ impl Default for PlaylistView {
             selection: BTreeSet::new(),
             drag: None,
             context_clip: None,
+            grid: u64::from(TICKS_PER_STEP),
             context_auto: None,
         }
     }
@@ -93,7 +96,7 @@ pub(crate) struct PlaylistOutput {
 }
 
 fn color(c: [u8; 3]) -> Color32 {
-    Color32::from_rgb(c[0], c[1], c[2])
+    crate::theme::rgb(c)
 }
 
 fn snap(ticks: i64, grid: u64) -> i64 {
@@ -167,7 +170,9 @@ impl PlaylistView {
         project: &Project,
         lanes: &[LaneInfo],
         playhead: Option<u64>,
+        snap: u32,
     ) -> PlaylistOutput {
+        self.grid = u64::from(snap.max(1));
         let mut out = PlaylistOutput::default();
         self.retain_existing(project);
 
@@ -336,6 +341,7 @@ impl PlaylistView {
         out: &mut PlaylistOutput,
     ) {
         let pl = &project.playlist;
+        let grid = self.grid;
         let ppt = self.px_per_tick();
         let end = pl.arrangement_end(&project.patterns);
         let bars = (end / BAR_TICKS + 8).max(16);
@@ -511,7 +517,7 @@ impl PlaylistView {
         // Current drag offsets for preview and commit.
         let (dt, dl, drepeat) = match (self.drag, pointer) {
             (Some(d), Some(p)) => {
-                let dt = snap(((p.x - d.origin.x) / ppt) as i64, u64::from(TICKS_PER_STEP));
+                let dt = snap(((p.x - d.origin.x) / ppt) as i64, grid);
                 let dl = ((p.y - d.origin.y) / ROW_H).round() as i64;
                 let drepeat = match d.kind {
                     DragKind::Resize(id) => pl
@@ -558,11 +564,7 @@ impl PlaylistView {
             let pt = *lane.points.get(k)?;
             let row = auto_row(auto.iter().position(|l| l.id == lane.id)?);
             let raw = pt.tick as i64 + ((p.x - d.origin.x) / ppt) as i64;
-            let t = if alt {
-                raw
-            } else {
-                snap(raw, u64::from(TICKS_PER_STEP))
-            };
+            let t = if alt { raw } else { snap(raw, grid) };
             let lo = k.checked_sub(1).map_or(0, |j| lane.points[j].tick);
             let hi = lane.points.get(k + 1).map_or(u64::MAX, |n| n.tick);
             Some(AutoPoint {
@@ -636,9 +638,8 @@ impl PlaylistView {
             && let Some(p) = response.interact_pointer_pos()
         {
             if p.y < origin.y + RULER_H {
-                out.actions.push(PlaylistAction::Seek(
-                    snap(tick_at(p.x), u64::from(TICKS_PER_STEP)).max(0) as u64,
-                ));
+                out.actions
+                    .push(PlaylistAction::Seek(snap(tick_at(p.x), grid).max(0) as u64));
             } else {
                 match hit(p) {
                     Some((id, _)) => {
@@ -666,12 +667,7 @@ impl PlaylistView {
                 }),
                 None => {
                     let raw = tick_at(p.x);
-                    let tick = if alt {
-                        raw
-                    } else {
-                        snap(raw, u64::from(TICKS_PER_STEP))
-                    }
-                    .max(0) as u64;
+                    let tick = if alt { raw } else { snap(raw, grid) }.max(0) as u64;
                     let value = value_at_y(auto_row(i), p.y);
                     // New points take the curve of the segment they split.
                     let at = lane.points.partition_point(|q| q.tick <= tick);

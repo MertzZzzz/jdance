@@ -39,6 +39,8 @@ pub struct TransportStatus {
     /// Playhead inside the pattern loop, `0.0..1.0`; `None` if unknown.
     pub loop_pos: Option<f32>,
     pub peak_load: f32,
+    /// Buffers processed slower than real time since the engine started.
+    pub overloads: u64,
     pub voices: u32,
     pub dropped_commands: u64,
 }

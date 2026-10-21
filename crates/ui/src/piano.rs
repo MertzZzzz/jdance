@@ -95,7 +95,9 @@ impl PianoRoll {
         project: &Project,
         pattern: &Pattern,
         playhead_tick: Option<f32>,
+        snap: u32,
     ) -> PianoOutput {
+        self.snap = snap;
         let mut out = PianoOutput::default();
         let channel_name = project
             .channel(self.channel)
@@ -109,22 +111,6 @@ impl PianoRoll {
         ui.horizontal(|ui| {
             ui.strong(format!("Piano roll · {channel_name} · {}", pattern.name));
             ui.separator();
-            ui.label("Snap");
-            egui::ComboBox::from_id_salt("piano_snap")
-                .selected_text(match self.snap {
-                    0 => "Off",
-                    s if s == TICKS_PER_STEP * 4 => "Beat",
-                    s if s == TICKS_PER_STEP => "Step",
-                    s if s == TICKS_PER_STEP / 2 => "1/2 step",
-                    _ => "1/4 step",
-                })
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.snap, TICKS_PER_STEP * 4, "Beat");
-                    ui.selectable_value(&mut self.snap, TICKS_PER_STEP, "Step");
-                    ui.selectable_value(&mut self.snap, TICKS_PER_STEP / 2, "1/2 step");
-                    ui.selectable_value(&mut self.snap, TICKS_PER_STEP / 4, "1/4 step");
-                    ui.selectable_value(&mut self.snap, 0, "Off");
-                });
             ui.label("Zoom");
             ui.add(egui::Slider::new(&mut self.zoom, 8.0..=96.0).show_value(false));
             ui.weak(format!("{} note(s)", notes.len()));
