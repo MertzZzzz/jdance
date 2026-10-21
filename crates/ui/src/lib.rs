@@ -14,6 +14,7 @@ mod rack;
 mod settings;
 mod theme;
 mod toolbar;
+mod widgets;
 
 pub use host::{
     Host, LatencyInfo, MeterReadings, Notice, NoticeLevel, PluginParamView, SampleStatus,
@@ -56,6 +57,11 @@ pub(crate) enum RenameTarget {
 struct RenameDialog {
     target: RenameTarget,
     text: String,
+    /// Explicit color, or `None` for the palette default; absent for
+    /// patterns.
+    color: Option<Option<[u8; 3]>>,
+    /// The color shown when `color` is the default.
+    default_color: [u8; 3],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,6 +94,9 @@ pub struct JdanceApp<H: Host, S: ProjectStore> {
     song_mode: bool,
     mode_sent: Option<TransportMode>,
     playlist_view: playlist::PlaylistView,
+    rack_view: rack::RackView,
+    /// Channels waiting for the delete confirmation.
+    delete_channels: Option<Vec<ChannelId>>,
     /// Piano roll shown instead of the playlist.
     piano: Option<piano::PianoRoll>,
     /// Instrument channel whose parameter window is open.
@@ -145,6 +154,8 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             song_mode,
             mode_sent: None,
             playlist_view: playlist::PlaylistView::default(),
+            rack_view: rack::RackView::default(),
+            delete_channels: None,
             piano: None,
             instrument_params: None,
             pending_length: None,
@@ -678,8 +689,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                     "Late: buffers that took longer to process than to play; \
                      each one likely caused a dropout",
                 );
-                let (rect, _) =
-                    ui.allocate_exact_size(egui::vec2(90.0, 5.0), egui::Sense::hover());
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(90.0, 5.0), egui::Sense::hover());
                 ui.painter().rect_filled(rect, 2.0, theme::RAISED);
                 let mut fill = rect;
                 fill.set_width(rect.width() * load);
@@ -887,14 +897,37 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
     }
 
     fn start_rename(&mut self, target: RenameTarget) {
-        let text = match target {
-            RenameTarget::Channel(id) => self.project.channel(id).map(|c| c.name.clone()),
-            RenameTarget::Track(id) => self.project.mixer.track(id).map(|t| t.name.clone()),
-            RenameTarget::Pattern(id) => self.project.pattern(id).map(|p| p.name.clone()),
-            RenameTarget::Lane(id) => self.project.playlist.lane(id).map(|l| l.name.clone()),
+        let p = &self.project;
+        let found = match target {
+            RenameTarget::Channel(id) => p.channel_index(id).map(|i| {
+                let c = &p.channels[i];
+                (
+                    c.name.clone(),
+                    Some(c.color),
+                    jdance_domain::color_or_default(c.color, i),
+                )
+            }),
+            RenameTarget::Track(id) => p.mixer.track(id).map(|t| {
+                let i = p.mixer.tracks.iter().position(|x| x.id == id).unwrap_or(0);
+                (
+                    t.name.clone(),
+                    Some(t.color),
+                    jdance_domain::color_or_default(t.color, i),
+                )
+            }),
+            RenameTarget::Pattern(id) => p.pattern(id).map(|x| (x.name.clone(), None, [0; 3])),
+            RenameTarget::Lane(id) => p
+                .playlist
+                .lane(id)
+                .map(|l| (l.name.clone(), Some(Some(l.color)), l.color)),
         };
-        if let Some(text) = text {
-            self.rename = Some(RenameDialog { target, text });
+        if let Some((text, color, default_color)) = found {
+            self.rename = Some(RenameDialog {
+                target,
+                text,
+                color,
+                default_color,
+            });
         }
     }
 
@@ -974,33 +1007,154 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
         let mut commit = false;
         let mut cancel = false;
         egui::Modal::new(egui::Id::unique("rename")).show(ctx, |ui| {
-            ui.heading("Rename");
-            let r = ui.text_edit_singleline(&mut dialog.text);
+            ui.set_width(320.0);
+            let title = if dialog.color.is_some() {
+                "Rename and color"
+            } else {
+                "Rename"
+            };
+            ui.heading(title);
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new("Name").color(theme::MUTED));
+            let r =
+                ui.add(egui::TextEdit::singleline(&mut dialog.text).desired_width(f32::INFINITY));
             r.request_focus();
             if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                 commit = true;
             }
+            if let Some(color) = &mut dialog.color {
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("Color").color(theme::MUTED));
+                let current = color.unwrap_or(dialog.default_color);
+                ui.horizontal_wrapped(|ui| {
+                    for c in jdance_domain::PALETTE {
+                        let (rect, resp) =
+                            ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::click());
+                        ui.painter().rect_filled(rect, 5.0, theme::rgb(c));
+                        if c == current {
+                            ui.painter().rect_stroke(
+                                rect.expand(2.0),
+                                6.0,
+                                egui::Stroke::new(2.0, theme::TEXT),
+                                egui::StrokeKind::Outside,
+                            );
+                        }
+                        if resp.clicked() {
+                            *color = Some(c);
+                        }
+                    }
+                });
+                ui.add_space(4.0);
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(160.0, 28.0), egui::Sense::hover());
+                ui.painter().rect_filled(rect, 6.0, theme::RAISED);
+                ui.painter().rect_filled(
+                    egui::Rect::from_min_size(rect.min, egui::vec2(4.0, rect.height())),
+                    egui::CornerRadius {
+                        nw: 6,
+                        sw: 6,
+                        ne: 0,
+                        se: 0,
+                    },
+                    theme::rgb(current),
+                );
+                ui.painter().text(
+                    rect.left_center() + egui::vec2(12.0, 0.0),
+                    egui::Align2::LEFT_CENTER,
+                    &dialog.text,
+                    egui::FontId::proportional(13.0),
+                    theme::TEXT,
+                );
+            }
+            ui.add_space(8.0);
             ui.horizontal(|ui| {
-                commit |= ui.button("OK").clicked();
                 cancel |= ui.button("Cancel").clicked();
+                commit |= ui.button("Apply").clicked();
             });
             cancel |= ui.input(|i| i.key_pressed(Key::Escape));
         });
         if commit {
             let name = dialog.text.trim().to_owned();
-            let target = dialog.target;
+            let (target, color) = (dialog.target, dialog.color.flatten());
             self.rename = None;
+            let mut edits = Vec::new();
             if !name.is_empty() {
-                let edit = match target {
+                edits.push(match target {
                     RenameTarget::Channel(id) => Edit::RenameChannel(id, name),
                     RenameTarget::Track(id) => Edit::RenameTrack(id, name),
                     RenameTarget::Pattern(id) => Edit::RenamePattern(id, name),
                     RenameTarget::Lane(id) => Edit::RenameLane(id, name),
-                };
-                self.apply(edit, false, now);
+                });
+            }
+            match (target, color) {
+                (RenameTarget::Channel(id), Some(_)) => {
+                    edits.push(Edit::SetChannelColor(id, color));
+                }
+                (RenameTarget::Track(id), Some(_)) => edits.push(Edit::SetTrackColor(id, color)),
+                (RenameTarget::Lane(id), Some(c)) => edits.push(Edit::SetLaneColor(id, c)),
+                _ => {}
+            }
+            if !edits.is_empty() {
+                self.apply(Edit::Batch(edits), false, now);
             }
         } else if cancel {
             self.rename = None;
+        }
+    }
+
+    /// Confirms deleting channels and names what goes with them (§5).
+    fn delete_channels_dialog(&mut self, ctx: &egui::Context, now: f64) {
+        let Some(ids) = &self.delete_channels else {
+            return;
+        };
+        let names: Vec<String> = ids
+            .iter()
+            .filter_map(|id| self.project.channel(*id).map(|c| c.name.clone()))
+            .collect();
+        let (patterns, lanes) = ids.iter().fold((0, 0), |(a, b), id| {
+            let (p, l) = self.project.channel_usage(*id);
+            (a + p, b + l)
+        });
+        let mut confirm = false;
+        let mut cancel = false;
+        egui::Modal::new(egui::Id::unique("delete_channels")).show(ctx, |ui| {
+            ui.set_width(380.0);
+            let title = if names.len() == 1 {
+                format!("Delete channel \"{}\"?", names[0])
+            } else {
+                format!("Delete {} channels?", names.len())
+            };
+            ui.heading(title);
+            if patterns + lanes > 0 {
+                ui.label("This also removes:");
+                if patterns > 0 {
+                    ui.label(format!("• steps and notes in {patterns} pattern(s)"));
+                }
+                if lanes > 0 {
+                    ui.label(format!("• {lanes} automation lane(s) of the instrument"));
+                }
+            } else {
+                ui.label(
+                    egui::RichText::new("The channel has no steps, notes or automation.")
+                        .color(theme::MUTED),
+                );
+            }
+            ui.label(egui::RichText::new("Undo restores all of it.").color(theme::MUTED));
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                cancel |= ui.button("Cancel").clicked();
+                confirm |= ui
+                    .button(egui::RichText::new("Delete").color(theme::ERROR))
+                    .clicked();
+            });
+            cancel |= ui.input(|i| i.key_pressed(Key::Escape));
+        });
+        if confirm {
+            let edits = ids.iter().map(|id| Edit::RemoveChannel(*id)).collect();
+            self.delete_channels = None;
+            self.apply(Edit::Batch(edits), false, now);
+        } else if cancel {
+            self.delete_channels = None;
         }
     }
 
@@ -1140,16 +1294,17 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
         if self.show_rack {
             egui::Panel::top("rack")
                 .resizable(true)
-                .default_size(170.0)
+                .default_size(230.0)
                 .min_size(60.0)
                 .show(ui, |ui| {
                     let pattern_mode = !self.song_mode;
-                    out = rack::show(
+                    let dir = self.path.as_deref().and_then(Path::parent);
+                    out = self.rack_view.show(
                         ui,
                         &self.project,
                         self.current_pattern,
                         &self.host,
-                        self.project_dir(),
+                        dir,
                         pattern_mode,
                     );
                 });
@@ -1238,6 +1393,15 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
             self.host
                 .toggle_plugin_editor(jdance_domain::PluginTarget::Channel(id), &title);
         }
+        for id in std::mem::take(&mut out.clone) {
+            match jdance_commands::clone_channel(&mut self.history, &mut self.project, id) {
+                Ok(_) => self.sync_needed = true,
+                Err(e) => self.notify(Notice::error(e.to_string()), now),
+            }
+        }
+        if !out.delete.is_empty() {
+            self.delete_channels = Some(std::mem::take(&mut out.delete));
+        }
         if let Some(id) = out.show_params {
             self.instrument_params = Some(id);
         }
@@ -1316,6 +1480,7 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
             self.automation_request(request, now);
         }
         self.rename_dialog(&ctx, now);
+        self.delete_channels_dialog(&ctx, now);
         self.length_dialog(&ctx, now);
         self.export_dialog(&ctx);
         let mode = if self.song_mode {

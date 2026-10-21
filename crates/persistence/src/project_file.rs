@@ -14,7 +14,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 pub const FORMAT_TAG: &str = "jdance-project";
-pub const CURRENT_FORMAT_VERSION: u32 = 9;
+pub const CURRENT_FORMAT_VERSION: u32 = 10;
 pub const PROJECT_EXTENSION: &str = "jdance";
 
 /// Saves `project` to `path` atomically. Sample paths inside the project
@@ -138,6 +138,11 @@ fn migrate(version: u32, mut project: Value) -> Result<Value, PersistError> {
     if v == 8 {
         // v9 added automation lanes (absent = none).
         v = 9;
+    }
+    if v == 9 {
+        // v10 added optional channel and mixer track colors (absent =
+        // palette by position).
+        v = 10;
     }
     match v {
         CURRENT_FORMAT_VERSION => Ok(project),

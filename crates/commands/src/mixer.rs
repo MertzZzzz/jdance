@@ -137,6 +137,13 @@ pub(crate) fn apply(edit: &Edit, p: &mut Project) -> Result<Edit, EditError> {
                 std::mem::replace(&mut t.solo, *solo),
             ))
         }
+        Edit::SetTrackColor(id, color) => {
+            let t = track_mut(p, *id)?;
+            Ok(Edit::SetTrackColor(
+                *id,
+                std::mem::replace(&mut t.color, *color),
+            ))
+        }
         Edit::RenameTrack(id, name) => {
             let t = track_mut(p, *id)?;
             Ok(Edit::RenameTrack(

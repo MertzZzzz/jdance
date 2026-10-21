@@ -49,6 +49,9 @@ pub struct MixerTrack {
     pub main_out: TrackId,
     pub sends: Vec<Send>,
     pub inserts: Vec<Insert>,
+    /// Display color; `None` = from [`crate::PALETTE`] by position.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<[u8; 3]>,
 }
 
 impl MixerTrack {
@@ -63,6 +66,7 @@ impl MixerTrack {
             main_out: TrackId::MASTER,
             sends: Vec::new(),
             inserts: Vec::new(),
+            color: None,
         }
     }
 

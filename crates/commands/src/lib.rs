@@ -76,6 +76,10 @@ pub enum Edit {
     SetChannelPan(ChannelId, f32),
     SetChannelMuted(ChannelId, bool),
     RenameChannel(ChannelId, String),
+    /// `None` = palette color by position.
+    SetChannelColor(ChannelId, Option<[u8; 3]>),
+    /// Moves a channel to `index` (clamped) in the rack.
+    MoveChannel(ChannelId, usize),
     SetChannelSample(ChannelId, Option<SampleRef>),
     SetMasterVolume(f32),
     SetChannelTrack(ChannelId, TrackId),
@@ -86,6 +90,7 @@ pub enum Edit {
     SetTrackMuted(TrackId, bool),
     SetTrackSolo(TrackId, bool),
     RenameTrack(TrackId, String),
+    SetTrackColor(TrackId, Option<[u8; 3]>),
     SetSendLevel(SendId, f32),
     SetInsertBypass(InsertId, bool),
     SetInsertEffect(InsertId, Effect),
@@ -210,6 +215,8 @@ impl Edit {
             Edit::SetChannelPan(..) => "Change channel pan",
             Edit::SetChannelMuted(..) => "Mute channel",
             Edit::RenameChannel(..) => "Rename channel",
+            Edit::SetChannelColor(..) => "Change channel color",
+            Edit::MoveChannel(..) => "Move channel",
             Edit::SetChannelSample(..) => "Change sample",
             Edit::SetMasterVolume(_) => "Change master volume",
             Edit::SetChannelTrack(..) => "Route channel",
@@ -218,6 +225,7 @@ impl Edit {
             Edit::SetTrackMuted(..) => "Mute track",
             Edit::SetTrackSolo(..) => "Solo track",
             Edit::RenameTrack(..) => "Rename track",
+            Edit::SetTrackColor(..) => "Change track color",
             Edit::SetSendLevel(..) => "Change send level",
             Edit::SetInsertBypass(..) => "Bypass effect",
             Edit::SetInsertEffect(..) => "Change effect",
@@ -451,6 +459,20 @@ impl Edit {
                     *id,
                     std::mem::replace(&mut ch.name, name.clone()),
                 ))
+            }
+            Edit::SetChannelColor(id, color) => {
+                let ch = p.channel_mut(*id).ok_or(EditError::NoSuchChannel(*id))?;
+                Ok(Edit::SetChannelColor(
+                    *id,
+                    std::mem::replace(&mut ch.color, *color),
+                ))
+            }
+            Edit::MoveChannel(id, index) => {
+                let from = p.channel_index(*id).ok_or(EditError::NoSuchChannel(*id))?;
+                let ch = p.channels.remove(from);
+                let to = (*index).min(p.channels.len());
+                p.channels.insert(to, ch);
+                Ok(Edit::MoveChannel(*id, from))
             }
             Edit::SetChannelSample(id, sample) => {
                 let ch = p.channel_mut(*id).ok_or(EditError::NoSuchChannel(*id))?;
@@ -706,6 +728,41 @@ pub fn add_sampler_channel(
         },
     )?;
     Ok(id)
+}
+
+/// Copies channel `id` with its steps and notes in every pattern, right
+/// after the original. Automation stays with the original.
+pub fn clone_channel(
+    history: &mut History,
+    p: &mut Project,
+    id: ChannelId,
+) -> Result<ChannelId, EditError> {
+    let index = p.channel_index(id).ok_or(EditError::NoSuchChannel(id))?;
+    let new_id = ChannelId(p.ids.next());
+    let mut channel = p.channels[index].clone();
+    channel.id = new_id;
+    channel.name = format!("{} copy", channel.name);
+    let rows = p
+        .patterns
+        .iter()
+        .filter_map(|pat| {
+            pat.row(id).map(|r| {
+                let mut r = r.clone();
+                r.channel = new_id;
+                (pat.id, r)
+            })
+        })
+        .collect();
+    history.execute(
+        p,
+        Edit::AddChannel {
+            channel,
+            index: index + 1,
+            rows,
+            automation: Vec::new(),
+        },
+    )?;
+    Ok(new_id)
 }
 
 /// Allocates an ID and appends a channel played by a plugin instrument.
@@ -1015,5 +1072,40 @@ mod tests {
         );
         h.undo(&mut p).unwrap();
         assert!(p.automation.is_empty());
+    }
+
+    #[test]
+    fn channels_move_clone_and_recolor() {
+        let (mut p, mut h, kick, pat) = setup();
+        let snare = add_sampler_channel(&mut h, &mut p, "Snare").unwrap();
+        h.execute(
+            &mut p,
+            Edit::SetStep {
+                pattern: pat,
+                channel: kick,
+                index: 3,
+                step: Step {
+                    on: true,
+                    velocity: 0.5,
+                },
+            },
+        )
+        .unwrap();
+        let copy = clone_channel(&mut h, &mut p, kick).unwrap();
+        let order: Vec<_> = p.channels.iter().map(|c| c.id).collect();
+        assert_eq!(order, [kick, copy, snare]);
+        assert_eq!(p.channel(copy).unwrap().name, "Kick copy");
+        assert!(p.pattern(pat).unwrap().step(copy, 3).unwrap().on);
+        h.execute(&mut p, Edit::MoveChannel(snare, 0)).unwrap();
+        assert_eq!(p.channels[0].id, snare);
+        h.execute(&mut p, Edit::SetChannelColor(kick, Some([1, 2, 3])))
+            .unwrap();
+        assert_eq!(p.channel(kick).unwrap().color, Some([1, 2, 3]));
+        h.undo(&mut p).unwrap();
+        h.undo(&mut p).unwrap();
+        h.undo(&mut p).unwrap();
+        let order: Vec<_> = p.channels.iter().map(|c| c.id).collect();
+        assert_eq!(order, [kick, snare]);
+        assert_eq!(p.channel(kick).unwrap().color, None);
     }
 }

@@ -92,6 +92,26 @@ impl Project {
         self.automation.iter().find(|l| l.id == id)
     }
 
+    /// What deleting channel `id` would take with it: patterns where it
+    /// has active steps or notes, and automation lanes of its instrument.
+    pub fn channel_usage(&self, id: ChannelId) -> (usize, usize) {
+        let patterns = self
+            .patterns
+            .iter()
+            .filter(|p| {
+                p.row(id)
+                    .is_some_and(|r| r.steps.iter().any(|s| s.on) || !r.notes.is_empty())
+            })
+            .count();
+        let target = PluginTarget::Channel(id);
+        let lanes = self
+            .automation
+            .iter()
+            .filter(|l| matches!(&l.target, AutomationTarget::PluginParam { target: t, .. } if *t == target))
+            .count();
+        (patterns, lanes)
+    }
+
     /// The lane controlling `target`, if any (one lane per target).
     pub fn lane_for(&self, target: &AutomationTarget) -> Option<&AutomationLane> {
         self.automation.iter().find(|l| l.target == *target)
@@ -190,6 +210,26 @@ pub struct Channel {
     pub muted: bool,
     /// Mixer track this channel plays into (MIX-001).
     pub track: TrackId,
+    /// Display color; `None` = from [`PALETTE`] by position.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<[u8; 3]>,
+}
+
+/// Default colors for channels and mixer tracks, used in order.
+pub const PALETTE: [[u8; 3]; 8] = [
+    [0xC9, 0x77, 0x4F],
+    [0x4F, 0x8F, 0xC9],
+    [0x5F, 0xA8, 0x6B],
+    [0xB5, 0x65, 0xA7],
+    [0xC9, 0xA9, 0x4F],
+    [0x4F, 0xB3, 0xAE],
+    [0xC9, 0x6F, 0x6F],
+    [0x8F, 0x8F, 0xD6],
+];
+
+/// The explicit color or the palette entry for position `index`.
+pub fn color_or_default(color: Option<[u8; 3]>, index: usize) -> [u8; 3] {
+    color.unwrap_or(PALETTE[index % PALETTE.len()])
 }
 
 impl Channel {
@@ -202,6 +242,7 @@ impl Channel {
             pan: 0.0,
             muted: false,
             track: TrackId::MASTER,
+            color: None,
         }
     }
 
