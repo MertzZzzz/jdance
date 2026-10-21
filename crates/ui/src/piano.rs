@@ -10,6 +10,7 @@
 //! plays the key. Every drag is one undo step; only visible notes are
 //! drawn.
 
+use crate::icons::{self, Glyph};
 use crate::piano_dialogs::{Dialog, Props};
 use crate::toolbar::{SNAPS, bars_text, snap_name};
 use crate::{Host, theme};
@@ -35,28 +36,37 @@ const SELECTED: Color32 = Color32::from_rgb(0x7D, 0xBB, 0xFF);
 pub(crate) enum Tool {
     Draw,
     Paint,
-    Select,
     Delete,
+    Slice,
+    Select,
 }
 
 impl Tool {
-    const ALL: [Self; 4] = [Self::Draw, Self::Paint, Self::Select, Self::Delete];
+    const ALL: [Self; 5] = [
+        Self::Draw,
+        Self::Paint,
+        Self::Delete,
+        Self::Slice,
+        Self::Select,
+    ];
 
-    fn name(self) -> &'static str {
+    fn glyph(self) -> Glyph {
         match self {
-            Self::Draw => "Draw",
-            Self::Paint => "Paint",
-            Self::Select => "Select",
-            Self::Delete => "Delete",
+            Self::Draw => Glyph::Draw,
+            Self::Paint => Glyph::Paint,
+            Self::Delete => Glyph::Delete,
+            Self::Slice => Glyph::Slice,
+            Self::Select => Glyph::Select,
         }
     }
 
     fn hint(self) -> &'static str {
         match self {
-            Self::Draw => "Click: add a note · drag: add and set its length (D)",
-            Self::Paint => "Drag: add a note on every grid cell (P)",
-            Self::Select => "Drag: select with a frame · Shift adds (S)",
-            Self::Delete => "Click or drag over notes to delete them (X)",
+            Self::Draw => "Draw (P): click adds a note, drag sets its length; edges resize",
+            Self::Paint => "Paint (B): drag adds a note on every grid cell",
+            Self::Delete => "Delete (D): click or drag over notes",
+            Self::Slice => "Slice (C): click a note to cut it in two (both retrigger)",
+            Self::Select => "Select (E): drag a frame · Shift adds",
         }
     }
 }
@@ -64,7 +74,10 @@ impl Tool {
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum DragKind {
     Move,
+    /// Right edge: the length changes.
     Resize,
+    /// Left edge: start and length change, the end stays.
+    ResizeLeft,
     /// Drawing a new note: its end follows the pointer.
     Create,
     Paint,
@@ -122,6 +135,8 @@ pub(crate) struct PianoRoll {
     hover_tick: Option<u32>,
     /// A clicked-in note sounds until this time.
     audition_until: f64,
+    /// Last cell (tick, key) of the current Paint gesture.
+    last_paint: Option<(u32, u8)>,
 }
 
 #[derive(Debug, Default)]
@@ -158,6 +173,42 @@ fn length_text(ticks: u32) -> String {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Edge {
+    Left,
+    Right,
+}
+
+/// Which resize edge `x` is on; narrow notes keep a body zone.
+fn edge_of(r: &Rect, x: f32) -> Option<Edge> {
+    let zone = EDGE_GRAB.min(r.width() / 3.0);
+    if x - r.left() < zone {
+        Some(Edge::Left)
+    } else if r.right() - x < zone {
+        Some(Edge::Right)
+    } else {
+        None
+    }
+}
+
+/// `n` cut at `tick` into two notes with the same key and velocity; `None`
+/// at or outside its edges.
+fn slice_note(n: Note, tick: u32) -> Option<(Note, Note)> {
+    (tick > n.start && tick < n.end()).then(|| {
+        (
+            Note {
+                length: tick - n.start,
+                ..n
+            },
+            Note {
+                start: tick,
+                length: n.end() - tick,
+                ..n
+            },
+        )
+    })
+}
+
 fn indices(notes: &[Note], selection: &[Note]) -> Vec<usize> {
     notes
         .iter()
@@ -187,6 +238,7 @@ impl PianoRoll {
             scrolled: false,
             hover_tick: None,
             audition_until: 0.0,
+            last_paint: None,
         }
     }
 
@@ -246,7 +298,7 @@ impl PianoRoll {
         notes: &[Note],
         out: &mut PianoOutput,
     ) {
-        ui.horizontal_wrapped(|ui| {
+        ui.horizontal(|ui| {
             ui.label(RichText::new("Piano Roll").font(theme::strong(14.0)));
             egui::ComboBox::from_id_salt("piano_pattern")
                 .selected_text(&pattern.name)
@@ -284,16 +336,10 @@ impl PianoRoll {
                 .on_hover_text("Channel");
             ui.separator();
             for t in Tool::ALL {
-                if ui
-                    .selectable_label(self.tool == t, t.name())
-                    .on_hover_text(t.hint())
-                    .clicked()
-                {
+                if icons::tool_button(ui, t.glyph(), self.tool == t, t.hint()).clicked() {
                     self.tool = t;
                 }
             }
-            ui.add_enabled(false, egui::Button::new("Slice"))
-                .on_disabled_hover_text("Slice: a later stage");
             ui.separator();
             ui.label(RichText::new("SNAP").size(11.0).color(theme::MUTED));
             let mut snap = self.snap;
@@ -321,42 +367,43 @@ impl PianoRoll {
             };
             let any = !notes.is_empty();
             let mut chosen = None;
-            let mut open = |ui: &mut egui::Ui, label: &str, d: Dialog, enabled: bool| {
-                if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
-                    chosen = Some(d);
-                }
-            };
-            open(
-                ui,
-                "Quantize…",
-                Dialog::Quantize(Quantize {
-                    grid: self.snap.max(TICKS_PER_STEP / 4),
-                    ..Quantize::default()
-                }),
-                any,
-            );
-            open(ui, "Humanize…", Dialog::Humanize(Humanize::default()), any);
-            open(
-                ui,
-                "Transpose…",
-                Dialog::Transpose {
-                    semitones: 0,
-                    octaves: 0,
-                },
-                any,
-            );
             let scale = self.scale.unwrap_or(Scale {
                 tonic: 0,
                 mode: ScaleMode::Major,
             });
             let highlight = self.scale.is_some();
-            open(ui, "Scale…", Dialog::Scale { scale, highlight }, true);
-            open(
-                ui,
-                "Properties…",
-                Dialog::Properties(Props::of(&target)),
-                any,
-            );
+            let quantize = Quantize {
+                grid: self.snap.max(TICKS_PER_STEP / 4),
+                ..Quantize::default()
+            };
+            ui.menu_button("Tools", |ui| {
+                let mut open = |ui: &mut egui::Ui, label: &str, d: Dialog, enabled: bool| {
+                    if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+                        chosen = Some(d);
+                        ui.close();
+                    }
+                };
+                open(ui, "Quantize…", Dialog::Quantize(quantize), any);
+                open(ui, "Humanize…", Dialog::Humanize(Humanize::default()), any);
+                open(
+                    ui,
+                    "Transpose…",
+                    Dialog::Transpose {
+                        semitones: 0,
+                        octaves: 0,
+                    },
+                    any,
+                );
+                open(ui, "Scale…", Dialog::Scale { scale, highlight }, true);
+                open(
+                    ui,
+                    "Note properties…",
+                    Dialog::Properties(Props::of(&target)),
+                    any,
+                );
+            })
+            .response
+            .on_hover_text("Note tools: they work on the selection, or on every note");
             if let Some(d) = chosen {
                 self.dialog = Some(d);
             }
@@ -668,12 +715,11 @@ impl PianoRoll {
             if let Some(p) = pointer
                 && let Some(i) = hit(p)
             {
-                let cursor = if self.tool == Tool::Delete {
-                    egui::CursorIcon::NotAllowed
-                } else if note_rect(&notes[i]).right() - p.x < EDGE_GRAB {
-                    egui::CursorIcon::ResizeHorizontal
-                } else {
-                    egui::CursorIcon::Grab
+                let cursor = match (self.tool, edge_of(&note_rect(&notes[i]), p.x)) {
+                    (Tool::Delete, _) => egui::CursorIcon::NotAllowed,
+                    (Tool::Slice, _) => egui::CursorIcon::VerticalText,
+                    (_, Some(_)) => egui::CursorIcon::ResizeHorizontal,
+                    (_, None) => egui::CursorIcon::Grab,
                 };
                 ui.ctx().set_cursor_icon(cursor);
             }
@@ -704,6 +750,14 @@ impl PianoRoll {
                         new.remove(i);
                         let keep = self.selection.clone();
                         self.commit(&mut out, pattern, new, keep);
+                    }
+                    (Some(i), Tool::Slice) => {
+                        if let Some((a, b)) = slice_note(notes[i], self.snap_tick(to_tick(p.x))) {
+                            let mut new = notes.clone();
+                            new[i] = a;
+                            new.push(b);
+                            self.commit(&mut out, pattern, new, vec![a, b]);
+                        }
                     }
                     (Some(i), _) if shift => {
                         let n = notes[i];
@@ -765,19 +819,23 @@ impl PianoRoll {
                 let kind = match hit(p) {
                     _ if ctrl => DragKind::Frame { add: shift },
                     Some(_) if self.tool == Tool::Delete => DragKind::Erase,
-                    Some(i) if note_rect(&notes[i]).right() - p.x < EDGE_GRAB => DragKind::Resize,
-                    Some(_) => DragKind::Move,
+                    Some(_) if self.tool == Tool::Slice => DragKind::Frame { add: shift },
+                    Some(i) => match edge_of(&note_rect(&notes[i]), p.x) {
+                        Some(Edge::Right) => DragKind::Resize,
+                        Some(Edge::Left) => DragKind::ResizeLeft,
+                        None => DragKind::Move,
+                    },
                     None => match self.tool {
                         Tool::Draw => DragKind::Create,
                         Tool::Paint => DragKind::Paint,
-                        Tool::Select => DragKind::Frame { add: shift },
+                        Tool::Select | Tool::Slice => DragKind::Frame { add: shift },
                         Tool::Delete => DragKind::Erase,
                     },
                 };
                 let mut original = notes.clone();
                 let mut dragged = Vec::new();
                 match kind {
-                    DragKind::Move | DragKind::Resize => {
+                    DragKind::Move | DragKind::Resize | DragKind::ResizeLeft => {
                         let n = notes[hit(p).expect("on a note")];
                         if !self.selection.contains(&n) {
                             self.selection = vec![n];
@@ -815,7 +873,7 @@ impl PianoRoll {
                 let dt = (p.x - d.start.x) / px_tick;
                 let dk = i32::from(to_key(p.y)) - i32::from(to_key(d.start.y));
                 match d.kind {
-                    DragKind::Move | DragKind::Resize | DragKind::Create => {
+                    DragKind::Move | DragKind::Resize | DragKind::ResizeLeft | DragKind::Create => {
                         let mut new = d.original.clone();
                         let mut moved = Vec::new();
                         for &j in &d.dragged {
@@ -825,6 +883,14 @@ impl PianoRoll {
                                 DragKind::Move => {
                                     n.start = self.snap_tick(o.start as f32 + dt);
                                     n.key = (i32::from(o.key) + dk).clamp(0, 127) as u8;
+                                }
+                                DragKind::ResizeLeft => {
+                                    let end = o.end();
+                                    let start = self
+                                        .snap_tick(o.start as f32 + dt)
+                                        .min(end.saturating_sub(1));
+                                    n.start = start;
+                                    n.length = end - start;
                                 }
                                 _ => {
                                     let end = self.snap_tick(o.end() as f32 + dt);
@@ -845,19 +911,33 @@ impl PianoRoll {
                         }
                     }
                     DragKind::Paint => {
+                        // Every cell from the last painted one to the
+                        // pointer: a fast move leaves no gaps.
                         let cell = self.snap_tick(to_tick(p.x));
                         let key = to_key(p.y);
-                        if p.x > grid.left()
-                            && notes.len() < MAX_NOTES_PER_ROW
-                            && !notes.iter().any(|n| n.key == key && n.start == cell)
-                        {
-                            let mut new = notes.clone();
-                            new.push(Note {
-                                start: cell,
-                                length: self.new_len.max(1),
-                                key,
-                                velocity: NEW_VELOCITY,
-                            });
+                        let from = self.last_paint.map_or(cell, |c| c.0);
+                        // The grid, or the note length when snapping is off.
+                        let step = if self.snap > 0 {
+                            self.snap
+                        } else {
+                            self.new_len.max(1)
+                        };
+                        let (lo, hi) = (from.min(cell), from.max(cell));
+                        let mut new = notes.clone();
+                        let mut t = lo;
+                        while t <= hi && new.len() < MAX_NOTES_PER_ROW && p.x > grid.left() {
+                            if !new.iter().any(|n| n.key == key && n.start == t) {
+                                new.push(Note {
+                                    start: t,
+                                    length: self.new_len.max(1),
+                                    key,
+                                    velocity: NEW_VELOCITY,
+                                });
+                            }
+                            t += step;
+                        }
+                        self.last_paint = Some((cell, key));
+                        if new.len() != notes.len() {
                             out.edits.push((self.set(pattern, new), true));
                             self.sound(host, Some(key));
                         }
@@ -882,6 +962,7 @@ impl PianoRoll {
                 }
             }
             if response.drag_stopped() && self.drag.take().is_some() {
+                self.last_paint = None;
                 out.end_gesture = true;
                 self.sound(host, None);
             }
@@ -1061,10 +1142,11 @@ impl PianoRoll {
         let key = |k| ui.input(|i| i.key_pressed(k) && i.modifiers.is_none());
         let shift_key = |k| ui.input(|i| i.key_pressed(k) && i.modifiers.shift_only());
         for (k, t) in [
-            (Key::D, Tool::Draw),
-            (Key::P, Tool::Paint),
-            (Key::S, Tool::Select),
-            (Key::X, Tool::Delete),
+            (Key::P, Tool::Draw),
+            (Key::B, Tool::Paint),
+            (Key::D, Tool::Delete),
+            (Key::C, Tool::Slice),
+            (Key::E, Tool::Select),
         ] {
             if key(k) {
                 self.tool = t;
@@ -1176,5 +1258,19 @@ mod tests {
         assert_eq!(length_text(480), "1/2 beat");
         assert_eq!(length_text(1200), "5 steps");
         assert_eq!(length_text(700), "700 ticks");
+    }
+
+    #[test]
+    fn slicing_keeps_key_velocity_and_both_parts() {
+        let n = Note {
+            start: 240,
+            length: 960,
+            key: 60,
+            velocity: 0.7,
+        };
+        let (a, b) = slice_note(n, 480).unwrap();
+        assert_eq!((a.start, a.length, b.start, b.length), (240, 240, 480, 720));
+        assert_eq!((a.key, b.key, a.velocity, b.velocity), (60, 60, 0.7, 0.7));
+        assert!(slice_note(n, 240).is_none() && slice_note(n, 1200).is_none());
     }
 }
