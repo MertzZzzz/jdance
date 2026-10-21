@@ -8,13 +8,21 @@
 //!   drag the right edge: change `repeat_count`; every drag is committed
 //!   once, on release, as a single undo step;
 //! - Delete removes, Ctrl/Cmd+D duplicates the selection;
-//! - ruler: click seeks; Shift+drag sets the loop region.
+//! - ruler: click seeks; Shift+drag sets the loop region;
+//! - automation lanes (ADR-014) below the pattern lanes, on the same
+//!   timeline: double-click adds a point (or deletes the one under the
+//!   pointer), drag moves a point (snapped to steps; Alt: free),
+//!   right-click a point for its curve and tension.
 
+use crate::automation::{AUTOMATION_COLOR, LaneInfo, value_text};
 use egui::{
     Align2, Color32, CornerRadius, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, pos2, vec2,
 };
 use jdance_commands::Edit;
-use jdance_domain::{ClipId, LaneId, MAX_REPEAT, PatternClip, Project, TICKS_PER_STEP};
+use jdance_domain::{
+    AutoPoint, AutomationId, AutomationLane, ClipId, Curve, LaneId, MAX_REPEAT, PatternClip,
+    Project, TICKS_PER_STEP,
+};
 use std::collections::BTreeSet;
 
 const ROW_H: f32 = 30.0;
@@ -22,12 +30,17 @@ const RULER_H: f32 = 20.0;
 const HEADER_W: f32 = 170.0;
 const EDGE_PX: f32 = 7.0;
 const BAR_TICKS: u64 = 3_840;
+const AUTO_H: f32 = 64.0;
+/// Vertical padding of the envelope inside an automation row.
+const AUTO_PAD: f32 = 6.0;
+const POINT_R: f32 = 4.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum DragKind {
     Move,
     Resize(ClipId),
     Loop(u64),
+    Point(AutomationId, usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -44,6 +57,8 @@ pub(crate) struct PlaylistView {
     selection: BTreeSet<ClipId>,
     drag: Option<Drag>,
     context_clip: Option<ClipId>,
+    /// Automation lane and point under the last right-click.
+    context_auto: Option<(AutomationId, Option<usize>)>,
 }
 
 impl Default for PlaylistView {
@@ -53,6 +68,7 @@ impl Default for PlaylistView {
             selection: BTreeSet::new(),
             drag: None,
             context_clip: None,
+            context_auto: None,
         }
     }
 }
@@ -70,6 +86,9 @@ pub(crate) enum PlaylistAction {
 #[derive(Debug, Default)]
 pub(crate) struct PlaylistOutput {
     pub edits: Vec<Edit>,
+    /// Edits of a continuous gesture (merged into one undo step).
+    pub gesture: Vec<Edit>,
+    pub end_gesture: bool,
     pub actions: Vec<PlaylistAction>,
 }
 
@@ -80,6 +99,56 @@ fn color(c: [u8; 3]) -> Color32 {
 fn snap(ticks: i64, grid: u64) -> i64 {
     let g = grid as i64;
     (ticks as f64 / g as f64).round() as i64 * g
+}
+
+fn with_points(lane: &AutomationLane, f: impl FnOnce(&mut Vec<AutoPoint>)) -> Edit {
+    let mut lane = lane.clone();
+    f(&mut lane.points);
+    Edit::SetAutomation {
+        id: lane.id,
+        lane: Some(lane),
+    }
+}
+
+/// Envelope polyline of `lane` in `row`, between `x0` and `x1` on screen.
+fn envelope_line(
+    lane: &AutomationLane,
+    row: Rect,
+    x_of: &impl Fn(u64) -> f32,
+    (x0, x1): (f32, f32),
+) -> Vec<Pos2> {
+    let y_of = |v: f32| row.bottom() - AUTO_PAD - v * (row.height() - 2.0 * AUTO_PAD);
+    let pts = &lane.points;
+    let (Some(first), Some(last)) = (pts.first(), pts.last()) else {
+        return Vec::new();
+    };
+    let mut line = vec![pos2(x0.min(x_of(first.tick)), y_of(first.value))];
+    for w in pts.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let (xa, xb) = (x_of(a.tick), x_of(b.tick));
+        line.push(pos2(xa, y_of(a.value)));
+        if xb < x0 || xa > x1 {
+            continue;
+        }
+        match a.curve {
+            Curve::Hold => line.push(pos2(xb, y_of(a.value))),
+            Curve::Linear => {}
+            Curve::Curve => {
+                let n = (((xb - xa) / 3.0).ceil() as usize).clamp(1, 256);
+                for k in 1..n {
+                    let t = k as f64 / n as f64;
+                    let w = jdance_domain::curve_weight(a.curve, a.tension, t) as f32;
+                    line.push(pos2(
+                        xa + (xb - xa) * t as f32,
+                        y_of(a.value + (b.value - a.value) * w),
+                    ));
+                }
+            }
+        }
+    }
+    line.push(pos2(x_of(last.tick), y_of(last.value)));
+    line.push(pos2(x1.max(x_of(last.tick)), y_of(last.value)));
+    line
 }
 
 impl PlaylistView {
@@ -96,6 +165,7 @@ impl PlaylistView {
         &mut self,
         ui: &mut egui::Ui,
         project: &Project,
+        lanes: &[LaneInfo],
         playhead: Option<u64>,
     ) -> PlaylistOutput {
         let mut out = PlaylistOutput::default();
@@ -115,7 +185,7 @@ impl PlaylistView {
             .id_salt("playlist-v")
             .show(ui, |ui| {
                 ui.horizontal_top(|ui| {
-                    self.lane_headers(ui, project, &mut out);
+                    self.lane_headers(ui, project, lanes, &mut out);
                     egui::ScrollArea::horizontal()
                         .id_salt("playlist-h")
                         .show(ui, |ui| {
@@ -153,7 +223,13 @@ impl PlaylistView {
         out
     }
 
-    fn lane_headers(&mut self, ui: &mut egui::Ui, project: &Project, out: &mut PlaylistOutput) {
+    fn lane_headers(
+        &mut self,
+        ui: &mut egui::Ui,
+        project: &Project,
+        lanes: &[LaneInfo],
+        out: &mut PlaylistOutput,
+    ) {
         ui.vertical(|ui| {
             ui.set_width(HEADER_W);
             ui.add_space(RULER_H);
@@ -204,6 +280,47 @@ impl PlaylistView {
                     }
                 });
             }
+            for info in lanes {
+                ui.horizontal_top(|ui| {
+                    ui.set_height(AUTO_H - ui.spacing().item_spacing.y);
+                    let color = if info.missing {
+                        ui.visuals().warn_fg_color
+                    } else {
+                        AUTOMATION_COLOR
+                    };
+                    let hover = if info.missing {
+                        "The automated object was removed; the lane is kept and has no effect"
+                            .to_owned()
+                    } else {
+                        format!(
+                            "{} · {}: applied during song playback",
+                            info.context, info.name
+                        )
+                    };
+                    ui.vertical(|ui| {
+                        ui.set_width(HEADER_W - 30.0);
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(&info.name).color(color))
+                                .truncate(),
+                        )
+                        .on_hover_text(hover);
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(&info.context).small().weak())
+                                .truncate(),
+                        );
+                    });
+                    if ui
+                        .small_button("x")
+                        .on_hover_text("Remove automation lane")
+                        .clicked()
+                    {
+                        out.edits.push(Edit::SetAutomation {
+                            id: info.id,
+                            lane: None,
+                        });
+                    }
+                });
+            }
             if ui.small_button("+ Lane").clicked() {
                 out.actions.push(PlaylistAction::AddLane);
             }
@@ -223,7 +340,8 @@ impl PlaylistView {
         let end = pl.arrangement_end(&project.patterns);
         let bars = (end / BAR_TICKS + 8).max(16);
         let width = bars as f32 * self.zoom;
-        let height = RULER_H + pl.lanes.len() as f32 * ROW_H;
+        let auto_y0 = RULER_H + pl.lanes.len() as f32 * ROW_H;
+        let height = auto_y0 + project.automation.len() as f32 * AUTO_H;
         let (rect, response) = ui.allocate_exact_size(vec2(width, height), Sense::click_and_drag());
         let painter = ui.painter_at(rect);
         let visuals = ui.visuals().clone();
@@ -243,6 +361,32 @@ impl PlaylistView {
                 Some(Rect::from_min_max(pos2(x0, y0), pos2(x1, y0 + ROW_H - 4.0)))
             };
         let lane_index = |id: LaneId| pl.lanes.iter().position(|l| l.id == id);
+        let auto = &project.automation;
+        let auto_row = |i: usize| {
+            let y = origin.y + auto_y0 + i as f32 * AUTO_H;
+            Rect::from_min_size(pos2(rect.left(), y), vec2(width, AUTO_H))
+        };
+        let auto_at = |y: f32| -> Option<usize> {
+            let i = ((y - origin.y - auto_y0) / AUTO_H).floor();
+            (i >= 0.0 && (i as usize) < auto.len()).then_some(i as usize)
+        };
+        let value_at_y = |row: Rect, y: f32| {
+            ((row.bottom() - AUTO_PAD - y) / (row.height() - 2.0 * AUTO_PAD)).clamp(0.0, 1.0)
+        };
+        let point_pos = |row: Rect, p: &AutoPoint| {
+            pos2(
+                x_of(p.tick),
+                row.bottom() - AUTO_PAD - p.value * (row.height() - 2.0 * AUTO_PAD),
+            )
+        };
+        // Point of automation row `i` under `p` (the last one wins).
+        let point_hit = |i: usize, p: Pos2| -> Option<usize> {
+            let row = auto_row(i);
+            auto[i]
+                .points
+                .iter()
+                .rposition(|pt| point_pos(row, pt).distance(p) <= POINT_R + 3.0)
+        };
 
         // Background, grid, ruler.
         painter.rect_filled(rect, CornerRadius::ZERO, visuals.extreme_bg_color);
@@ -255,6 +399,14 @@ impl PlaylistView {
                     visuals.faint_bg_color,
                 );
             }
+        }
+        for i in 0..auto.len() {
+            let row = auto_row(i);
+            painter.rect_filled(row, CornerRadius::ZERO, visuals.faint_bg_color);
+            painter.line_segment(
+                [row.left_top(), row.right_top()],
+                visuals.widgets.noninteractive.bg_stroke,
+            );
         }
         let beat_px = self.zoom / 4.0;
         for b in 0..=bars * 4 {
@@ -333,6 +485,13 @@ impl PlaylistView {
                         origin: p,
                     });
                 }
+            } else if let Some(i) = auto_at(p.y) {
+                if let Some(k) = point_hit(i, p) {
+                    self.drag = Some(Drag {
+                        kind: DragKind::Point(auto[i].id, k),
+                        origin: p,
+                    });
+                }
             } else if let Some((id, edge)) = hit(p) {
                 if !self.selection.contains(&id) {
                     if !shift {
@@ -390,6 +549,35 @@ impl PlaylistView {
             }
         };
 
+        // A dragged automation point stays between its neighbours.
+        let alt = ui.input(|i| i.modifiers.alt);
+        let moved_point = |lane: &AutomationLane, k: usize| -> Option<AutoPoint> {
+            let (Some(d), Some(p)) = (self.drag, pointer) else {
+                return None;
+            };
+            let pt = *lane.points.get(k)?;
+            let row = auto_row(auto.iter().position(|l| l.id == lane.id)?);
+            let raw = pt.tick as i64 + ((p.x - d.origin.x) / ppt) as i64;
+            let t = if alt {
+                raw
+            } else {
+                snap(raw, u64::from(TICKS_PER_STEP))
+            };
+            let lo = k.checked_sub(1).map_or(0, |j| lane.points[j].tick);
+            let hi = lane.points.get(k + 1).map_or(u64::MAX, |n| n.tick);
+            Some(AutoPoint {
+                tick: (t.max(0) as u64).clamp(lo, hi),
+                value: value_at_y(row, point_pos(row, &pt).y + (p.y - d.origin.y)),
+                ..pt
+            })
+        };
+        let dragged_point = match self.drag.map(|d| d.kind) {
+            Some(DragKind::Point(id, k)) => project
+                .automation_lane(id)
+                .and_then(|l| Some((id, k, moved_point(l, k)?))),
+            _ => None,
+        };
+
         if response.drag_stopped()
             && let Some(d) = self.drag.take()
         {
@@ -432,6 +620,14 @@ impl PlaylistView {
                         }
                     }
                 }
+                DragKind::Point(..) => {
+                    if let Some((id, k, moved)) = dragged_point
+                        && let Some(lane) = project.automation_lane(id)
+                        && lane.points[k] != moved
+                    {
+                        out.edits.push(with_points(lane, |pts| pts[k] = moved));
+                    }
+                }
                 DragKind::Move => {}
             }
         }
@@ -461,6 +657,43 @@ impl PlaylistView {
         }
         if response.double_clicked()
             && let Some(p) = response.interact_pointer_pos()
+            && let Some(i) = auto_at(p.y)
+        {
+            let lane = &auto[i];
+            out.edits.push(match point_hit(i, p) {
+                Some(k) => with_points(lane, |pts| {
+                    pts.remove(k);
+                }),
+                None => {
+                    let raw = tick_at(p.x);
+                    let tick = if alt {
+                        raw
+                    } else {
+                        snap(raw, u64::from(TICKS_PER_STEP))
+                    }
+                    .max(0) as u64;
+                    let value = value_at_y(auto_row(i), p.y);
+                    // New points take the curve of the segment they split.
+                    let at = lane.points.partition_point(|q| q.tick <= tick);
+                    let (curve, tension) = at.checked_sub(1).map_or((Curve::Linear, 0.0), |j| {
+                        (lane.points[j].curve, lane.points[j].tension)
+                    });
+                    with_points(lane, |pts| {
+                        pts.insert(
+                            at,
+                            AutoPoint {
+                                tick,
+                                value,
+                                curve,
+                                tension,
+                            },
+                        );
+                    })
+                }
+            });
+        }
+        if response.double_clicked()
+            && let Some(p) = response.interact_pointer_pos()
             && hit(p).is_none()
             && let Some(li) = lane_at(p.y)
         {
@@ -471,10 +704,9 @@ impl PlaylistView {
             });
         }
         if response.secondary_clicked() {
-            self.context_clip = response
-                .interact_pointer_pos()
-                .and_then(hit)
-                .map(|(id, _)| id);
+            let p = response.interact_pointer_pos();
+            self.context_auto = p.and_then(|p| auto_at(p.y).map(|i| (auto[i].id, point_hit(i, p))));
+            self.context_clip = p.and_then(hit).map(|(id, _)| id);
             if let Some(id) = self.context_clip
                 && !self.selection.contains(&id)
             {
@@ -482,47 +714,56 @@ impl PlaylistView {
                 self.selection.insert(id);
             }
         }
-        response.context_menu(|ui| {
-            let Some(id) = self.context_clip else {
-                ui.label("No clip here");
-                return;
-            };
-            let Some(clip) = pl.clip(id) else { return };
-            if ui
-                .button("Make unique")
-                .on_hover_text("Copy the pattern for this clip only")
-                .clicked()
-            {
-                out.actions.push(PlaylistAction::MakeUnique(id));
-                ui.close();
-            }
-            let label = if clip.muted { "Unmute" } else { "Mute" };
-            if ui.button(label).clicked() {
-                out.edits.push(Edit::Batch(
-                    self.selection
-                        .iter()
-                        .map(|c| Edit::SetClipMuted(*c, !clip.muted))
-                        .collect(),
-                ));
-                ui.close();
-            }
-            if ui.button("Duplicate").clicked() {
-                out.actions.push(PlaylistAction::Duplicate(
-                    self.selection.iter().copied().collect(),
-                ));
-                ui.close();
-            }
-            if ui.button("Delete").clicked() {
-                out.edits.push(Edit::Batch(
-                    self.selection
-                        .iter()
-                        .map(|c| Edit::RemoveClip(*c))
-                        .collect(),
-                ));
-                self.selection.clear();
-                ui.close();
-            }
-        });
+        // Stays open while the curve and tension are edited.
+        egui::Popup::context_menu(&response)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
+                if let Some((id, point)) = self.context_auto {
+                    if let Some(lane) = project.automation_lane(id) {
+                        automation_menu(ui, project, lane, point, out);
+                    }
+                    return;
+                }
+                let Some(id) = self.context_clip else {
+                    ui.label("No clip here");
+                    return;
+                };
+                let Some(clip) = pl.clip(id) else { return };
+                if ui
+                    .button("Make unique")
+                    .on_hover_text("Copy the pattern for this clip only")
+                    .clicked()
+                {
+                    out.actions.push(PlaylistAction::MakeUnique(id));
+                    ui.close();
+                }
+                let label = if clip.muted { "Unmute" } else { "Mute" };
+                if ui.button(label).clicked() {
+                    out.edits.push(Edit::Batch(
+                        self.selection
+                            .iter()
+                            .map(|c| Edit::SetClipMuted(*c, !clip.muted))
+                            .collect(),
+                    ));
+                    ui.close();
+                }
+                if ui.button("Duplicate").clicked() {
+                    out.actions.push(PlaylistAction::Duplicate(
+                        self.selection.iter().copied().collect(),
+                    ));
+                    ui.close();
+                }
+                if ui.button("Delete").clicked() {
+                    out.edits.push(Edit::Batch(
+                        self.selection
+                            .iter()
+                            .map(|c| Edit::RemoveClip(*c))
+                            .collect(),
+                    ));
+                    self.selection.clear();
+                    ui.close();
+                }
+            });
 
         // Clips (with drag preview).
         for c in &pl.clips {
@@ -572,6 +813,77 @@ impl PlaylistView {
                 },
             );
         }
+        // Automation envelopes (with drag preview).
+        let visible = ui.clip_rect();
+        let span = (
+            visible.left().max(rect.left()),
+            visible.right().min(rect.right()),
+        );
+        for (i, lane) in auto.iter().enumerate() {
+            let row = auto_row(i);
+            if !visible.intersects(row) {
+                continue;
+            }
+            let preview;
+            let lane = match dragged_point {
+                Some((id, k, moved)) if id == lane.id => {
+                    let mut l = lane.clone();
+                    l.points[k] = moved;
+                    preview = l;
+                    &preview
+                }
+                _ => lane,
+            };
+            let missing = !lane.target.exists(project);
+            let color = if missing {
+                visuals.weak_text_color()
+            } else {
+                AUTOMATION_COLOR
+            };
+            if lane.points.is_empty() {
+                painter.text(
+                    pos2(span.0 + 6.0, row.center().y),
+                    Align2::LEFT_CENTER,
+                    "No points: double-click to add",
+                    FontId::proportional(11.0),
+                    visuals.weak_text_color(),
+                );
+                continue;
+            }
+            painter.add(egui::Shape::line(
+                envelope_line(lane, row, &x_of, span),
+                Stroke::new(1.5, color),
+            ));
+            let first = lane
+                .points
+                .partition_point(|p| x_of(p.tick) < span.0 - POINT_R);
+            for (k, pt) in lane.points.iter().enumerate().skip(first) {
+                let c = point_pos(row, pt);
+                if c.x > span.1 + POINT_R {
+                    break;
+                }
+                let active = matches!(dragged_point, Some((id, j, _)) if id == lane.id && j == k);
+                painter.circle(
+                    c,
+                    POINT_R,
+                    if active {
+                        visuals.strong_text_color()
+                    } else {
+                        color
+                    },
+                    Stroke::new(1.0, Color32::from_black_alpha(160)),
+                );
+                if active {
+                    painter.text(
+                        c + vec2(8.0, -8.0),
+                        Align2::LEFT_BOTTOM,
+                        value_text(project, &lane.target, pt.value),
+                        FontId::proportional(11.0),
+                        visuals.strong_text_color(),
+                    );
+                }
+            }
+        }
         if let (
             Some(Drag {
                 kind: DragKind::Loop(a),
@@ -603,5 +915,122 @@ impl PlaylistView {
         {
             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
         }
+        if self.drag.is_none()
+            && let Some(p) = response.hover_pos()
+            && let Some(i) = auto_at(p.y)
+            && let Some(k) = point_hit(i, p)
+        {
+            let lane = &auto[i];
+            let pt = lane.points[k];
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+            painter.text(
+                point_pos(auto_row(i), &pt) + vec2(8.0, -8.0),
+                Align2::LEFT_BOTTOM,
+                value_text(project, &lane.target, pt.value),
+                FontId::proportional(11.0),
+                visuals.strong_text_color(),
+            );
+        }
+    }
+}
+
+/// Context menu of an automation lane, or of one of its points.
+fn automation_menu(
+    ui: &mut egui::Ui,
+    project: &Project,
+    lane: &AutomationLane,
+    point: Option<usize>,
+    out: &mut PlaylistOutput,
+) {
+    if let Some(k) = point
+        && let Some(pt) = lane.points.get(k).copied()
+    {
+        ui.label(value_text(project, &lane.target, pt.value));
+        ui.label("Curve to the next point");
+        for (curve, name) in [
+            (Curve::Linear, "Linear"),
+            (Curve::Curve, "Curve"),
+            (Curve::Hold, "Hold"),
+        ] {
+            if ui.radio(pt.curve == curve, name).clicked() && pt.curve != curve {
+                // A visible bend to start from.
+                let tension = if curve == Curve::Curve && pt.tension == 0.0 {
+                    0.5
+                } else {
+                    pt.tension
+                };
+                out.edits.push(with_points(lane, |pts| {
+                    pts[k].curve = curve;
+                    pts[k].tension = tension;
+                }));
+            }
+        }
+        if pt.curve == Curve::Curve {
+            let mut tension = pt.tension;
+            let r = ui.add(egui::Slider::new(&mut tension, -1.0..=1.0).text("Tension"));
+            if r.changed() {
+                out.gesture
+                    .push(with_points(lane, |pts| pts[k].tension = tension));
+            }
+            out.end_gesture |= r.drag_stopped() || r.lost_focus();
+        }
+        if ui.button("Delete point").clicked() {
+            out.edits.push(with_points(lane, |pts| {
+                pts.remove(k);
+            }));
+            ui.close();
+        }
+        ui.separator();
+    }
+    if ui.button("Remove lane").clicked() {
+        out.edits.push(Edit::SetAutomation {
+            id: lane.id,
+            lane: None,
+        });
+        ui.close();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jdance_domain::{AutomationTarget, TrackId};
+
+    fn pt(tick: u64, value: f32, curve: Curve) -> AutoPoint {
+        AutoPoint {
+            tick,
+            value,
+            curve,
+            tension: 0.0,
+        }
+    }
+
+    #[test]
+    fn envelope_shapes() {
+        let lane = AutomationLane {
+            id: AutomationId(1),
+            target: AutomationTarget::TrackPan(TrackId(1)),
+            points: vec![pt(100, 0.0, Curve::Hold), pt(200, 1.0, Curve::Linear)],
+        };
+        // Row of 2·AUTO_PAD + 100 px: value v sits at y = 106 - 100·v.
+        let row = Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 2.0 * AUTO_PAD + 100.0));
+        let x_of = |t: u64| t as f32;
+        let line = envelope_line(&lane, row, &x_of, (0.0, 500.0));
+        let y = |v: f32| AUTO_PAD + 100.0 - 100.0 * v;
+        assert_eq!(
+            line,
+            [
+                pos2(0.0, y(0.0)),
+                pos2(100.0, y(0.0)),
+                pos2(200.0, y(0.0)),
+                pos2(200.0, y(1.0)),
+                pos2(500.0, y(1.0)),
+            ]
+        );
+        let empty = AutomationLane {
+            points: Vec::new(),
+            ..lane
+        };
+        assert!(envelope_line(&empty, row, &x_of, (0.0, 500.0)).is_empty());
     }
 }

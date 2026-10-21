@@ -4,6 +4,7 @@
 //! The UI holds the document and the undo history, edits the document only
 //! through `jdance-commands`, and tells the [`Host`] when it changed.
 
+mod automation;
 mod host;
 mod mixer;
 mod piano;
@@ -736,6 +737,32 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
         }
     }
 
+    fn automation_request(&mut self, request: automation::AutomationRequest, now: f64) {
+        match request {
+            automation::AutomationRequest::Create { target, initial } => {
+                match jdance_commands::add_automation(
+                    &mut self.history,
+                    &mut self.project,
+                    target,
+                    initial,
+                ) {
+                    Ok(_) => {
+                        self.sync_needed = true;
+                        self.piano = None;
+                        self.notify(
+                            Notice::info("Automation lane added below the playlist lanes"),
+                            now,
+                        );
+                    }
+                    Err(e) => self.notify(Notice::error(e.to_string()), now),
+                }
+            }
+            automation::AutomationRequest::Remove(id) => {
+                self.apply(Edit::SetAutomation { id, lane: None }, false, now);
+            }
+        }
+    }
+
     fn mixer_action(&mut self, action: mixer::MixerAction, now: f64) {
         let result = match action {
             mixer::MixerAction::AddTrack => {
@@ -912,8 +939,14 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
                 .min_size(120.0)
                 .show(ui, |ui| {
                     egui::ScrollArea::vertical().show(ui, |ui| {
-                        mix =
-                            mixer::show(ui, &self.project.mixer, &latency, &meters, &mut self.host);
+                        mix = mixer::show(
+                            ui,
+                            &self.project.mixer,
+                            &self.project.automation,
+                            &latency,
+                            &meters,
+                            &mut self.host,
+                        );
                     });
                 });
         }
@@ -958,7 +991,8 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
                 }
                 _ => {
                     let playhead = transport.position_ticks.filter(|_| self.song_mode);
-                    pl_out = self.playlist_view.show(ui, &self.project, playhead);
+                    let lanes = automation::lane_infos(&self.project, &mut self.host);
+                    pl_out = self.playlist_view.show(ui, &self.project, &lanes, playhead);
                 }
             }
         });
@@ -974,6 +1008,12 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
         for edit in pl_out.edits {
             self.apply(edit, false, now);
         }
+        for edit in pl_out.gesture {
+            self.apply(edit, true, now);
+        }
+        if pl_out.end_gesture {
+            self.history.end_gesture();
+        }
         for action in pl_out.actions {
             self.playlist_action(action, now);
         }
@@ -988,6 +1028,9 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
         }
         for action in mix.actions {
             self.mixer_action(action, now);
+        }
+        for request in mix.automation {
+            self.automation_request(request, now);
         }
         if let Some(id) = out.toggle_editor {
             let title = self
@@ -1041,6 +1084,7 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
         if self.show_plugins {
             self.show_plugins = plugins::window(&ctx, &mut self.host);
         }
+        let mut instrument_automation = Vec::new();
         if let Some(id) = self.instrument_params {
             match self
                 .project
@@ -1049,6 +1093,7 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
             {
                 Some((ch, slot)) => {
                     let mut open = true;
+                    let automation = &self.project.automation;
                     egui::Window::new(format!("{} · parameters", ch.name))
                         .id(egui::Id::unique(("instrument_params", id.0)))
                         .open(&mut open)
@@ -1057,7 +1102,9 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
                                 ui,
                                 jdance_domain::PluginTarget::Channel(id),
                                 Some(slot),
+                                automation,
                                 &mut self.host,
+                                &mut instrument_automation,
                             );
                         });
                     if !open {
@@ -1066,6 +1113,9 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
                 }
                 None => self.instrument_params = None,
             }
+        }
+        for request in instrument_automation {
+            self.automation_request(request, now);
         }
         self.rename_dialog(&ctx, now);
         self.length_dialog(&ctx, now);

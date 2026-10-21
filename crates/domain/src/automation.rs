@@ -155,6 +155,45 @@ impl AutomationTarget {
         }
     }
 
+    /// The project's (non-automated) value of the target, normalized;
+    /// `None` if the target is gone or is a plugin parameter, whose value
+    /// lives in the plugin.
+    pub fn normalized(&self, p: &Project) -> Option<f32> {
+        let insert = |id: InsertId| {
+            p.mixer
+                .all_tracks()
+                .flat_map(|t| &t.inserts)
+                .find(|i| i.id == id)
+        };
+        Some(match self {
+            Self::TrackVolume(t) => p.mixer.track(*t)?.volume / MAX_VOLUME,
+            Self::TrackPan(t) => (p.mixer.track(*t)?.pan + 1.0) / 2.0,
+            Self::SendLevel(id) => {
+                p.mixer
+                    .all_tracks()
+                    .flat_map(|t| &t.sends)
+                    .find(|s| s.id == *id)?
+                    .level
+                    / MAX_SEND_LEVEL
+            }
+            Self::EffectParam { insert: id, param } => {
+                let ins = insert(*id)?;
+                ins.effect
+                    .kind
+                    .param(param)?
+                    .to_normalized(ins.effect.get(param))
+            }
+            Self::InsertBypass(id) => {
+                if insert(*id)?.bypass {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            Self::PluginParam { .. } => return None,
+        })
+    }
+
     /// Plain value for normalized `n` (ADR-014); `None` if the target is
     /// gone.
     pub fn plain(&self, p: &Project, n: f32) -> Option<f32> {

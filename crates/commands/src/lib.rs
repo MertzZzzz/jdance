@@ -12,10 +12,11 @@ pub use mixer::{add_insert, add_send, add_track};
 pub use playlist::{add_clip, add_lane, add_pattern, duplicate_clips, make_unique, steps_beyond};
 
 use jdance_domain::{
-    AutomationId, AutomationLane, AutomationTarget, Channel, ChannelId, ClipId, Effect, InsertId,
-    Lane, LaneId, LimiterSettings, MAX_CHANNELS, MAX_NOTES_PER_ROW, MAX_TEMPO_BPM, MAX_VOLUME,
-    MIN_TEMPO_BPM, Mixer, MixerTrack, Note, Pattern, PatternClip, PatternId, Playlist, Project,
-    RoutingError, SampleRef, SendId, Sidechain, Step, StepRow, TrackId, sort_notes, sort_points,
+    AutoPoint, AutomationId, AutomationLane, AutomationTarget, Channel, ChannelId, ClipId, Curve,
+    Effect, InsertId, Lane, LaneId, LimiterSettings, MAX_CHANNELS, MAX_NOTES_PER_ROW,
+    MAX_TEMPO_BPM, MAX_VOLUME, MIN_TEMPO_BPM, Mixer, MixerTrack, Note, Pattern, PatternClip,
+    PatternId, Playlist, Project, RoutingError, SampleRef, SendId, Sidechain, Step, StepRow,
+    TrackId, sort_notes, sort_points,
 };
 use thiserror::Error;
 
@@ -728,6 +729,40 @@ pub fn add_instrument_channel(
     Ok(id)
 }
 
+/// Creates the automation lane for `target` with one point at the song
+/// start holding `initial` (normalized), or returns the existing lane.
+pub fn add_automation(
+    history: &mut History,
+    p: &mut Project,
+    target: AutomationTarget,
+    initial: f32,
+) -> Result<AutomationId, EditError> {
+    if let Some(l) = p.lane_for(&target) {
+        return Ok(l.id);
+    }
+    if !target.exists(p) {
+        return Err(EditError::Arrangement("automation target not found".into()));
+    }
+    let id = AutomationId(p.ids.next());
+    history.execute(
+        p,
+        Edit::SetAutomation {
+            id,
+            lane: Some(AutomationLane {
+                id,
+                target,
+                points: vec![AutoPoint {
+                    tick: 0,
+                    value: initial.clamp(0.0, 1.0),
+                    curve: Curve::Linear,
+                    tension: 0.0,
+                }],
+            }),
+        },
+    )?;
+    Ok(id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -954,5 +989,31 @@ mod tests {
         h.execute(&mut p, Edit::SetTempo(90.0)).unwrap();
         assert!(!h.redo(&mut p).unwrap());
         assert_eq!(p.tempo_bpm, 90.0);
+    }
+
+    #[test]
+    fn add_automation_starts_from_the_current_value_once() {
+        let mut p = Project::new();
+        let mut h = History::default();
+        let t = add_track(&mut h, &mut p, "Bus").unwrap();
+        h.execute(&mut p, Edit::SetTrackPan(t, 0.5)).unwrap();
+        let target = AutomationTarget::TrackPan(t);
+        let n = target.normalized(&p).unwrap();
+        assert_eq!(n, 0.75);
+        let id = add_automation(&mut h, &mut p, target.clone(), n).unwrap();
+        assert_eq!(p.automation_lane(id).unwrap().points[0].value, 0.75);
+        assert_eq!(add_automation(&mut h, &mut p, target, 0.1).unwrap(), id);
+        assert_eq!(p.automation.len(), 1);
+        assert!(
+            add_automation(
+                &mut h,
+                &mut p,
+                AutomationTarget::TrackPan(TrackId(999)),
+                0.0
+            )
+            .is_err()
+        );
+        h.undo(&mut p).unwrap();
+        assert!(p.automation.is_empty());
     }
 }

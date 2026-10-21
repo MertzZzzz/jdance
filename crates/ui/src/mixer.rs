@@ -7,13 +7,14 @@
 //! parameter schema. Drawing only collects edits; routing menus offer
 //! only destinations that keep the graph acyclic (MIX-021).
 
+use crate::automation::{self, AutomationRequest};
 use crate::{Host, LatencyInfo, MeterReadings, PluginParamView};
 use egui::{Color32, CornerRadius, Rect, RichText, Sense, Stroke, StrokeKind, pos2, vec2};
 use jdance_commands::Edit;
 use jdance_domain::{
-    Effect, EffectKind, Insert, LimiterSettings, MAX_INSERTS_PER_TRACK, MAX_SEND_LEVEL,
-    MAX_SENDS_PER_TRACK, MAX_TRACKS, MAX_VOLUME, Mapping, Mixer, MixerTrack, ParamUnit,
-    PluginTarget, Sidechain, Tap, TrackId,
+    AutomationLane, AutomationTarget, Effect, EffectKind, Insert, LimiterSettings,
+    MAX_INSERTS_PER_TRACK, MAX_SEND_LEVEL, MAX_SENDS_PER_TRACK, MAX_TRACKS, MAX_VOLUME, Mapping,
+    Mixer, MixerTrack, ParamUnit, PluginTarget, Sidechain, Tap, TrackId,
 };
 use jdance_dsp::Processor;
 use jdance_plugin_api::PluginDescriptor;
@@ -36,6 +37,7 @@ pub(crate) struct MixerOutput {
     pub edits: Vec<(Edit, bool)>,
     pub end_gesture: bool,
     pub actions: Vec<MixerAction>,
+    pub automation: Vec<AutomationRequest>,
 }
 
 fn db_label(gain: f32) -> String {
@@ -88,6 +90,7 @@ fn meter(ui: &mut egui::Ui, height: f32, (l, r): (f32, f32)) {
 pub(crate) fn show(
     ui: &mut egui::Ui,
     mixer: &Mixer,
+    automation: &[AutomationLane],
     latency: &LatencyInfo,
     meters: &MeterReadings,
     host: &mut dyn Host,
@@ -110,7 +113,9 @@ pub(crate) fn show(
     egui::ScrollArea::horizontal().show(ui, |ui| {
         ui.horizontal_top(|ui| {
             for track in mixer.all_tracks() {
-                strip(ui, mixer, track, latency, meters, &plugins, host, &mut out);
+                strip(
+                    ui, mixer, automation, track, latency, meters, &plugins, host, &mut out,
+                );
                 ui.separator();
             }
             if mixer.tracks.len() < MAX_TRACKS && ui.button("+ Track").clicked() {
@@ -125,6 +130,7 @@ pub(crate) fn show(
 fn strip(
     ui: &mut egui::Ui,
     mixer: &Mixer,
+    automation: &[AutomationLane],
     t: &MixerTrack,
     latency: &LatencyInfo,
     meters: &MeterReadings,
@@ -175,7 +181,7 @@ fn strip(
 
         // Inserts come first in the signal flow.
         for (index, ins) in t.inserts.iter().enumerate() {
-            insert_ui(ui, mixer, t, ins, index, host, out);
+            insert_ui(ui, mixer, automation, t, ins, index, host, out);
         }
         if t.inserts.len() < MAX_INSERTS_PER_TRACK {
             ui.menu_button(
@@ -217,9 +223,17 @@ fn strip(
                     .vertical()
                     .show_value(false),
             );
-            if r.changed() {
+            if r.changed() && !automation::secondary_press(ui) {
                 out.edits.push((Edit::SetTrackVolume(t.id, vol), true));
             }
+            automation::attach(
+                ui,
+                &r,
+                automation,
+                AutomationTarget::TrackVolume(t.id),
+                t.volume / MAX_VOLUME,
+                &mut out.automation,
+            );
             out.end_gesture |= r.drag_stopped();
             let levels = if t.is_master() {
                 meters.output
@@ -237,12 +251,20 @@ fn strip(
                         "Balance {:+.0} (double-click to center)",
                         t.pan * 100.0
                     ));
-                if r.changed() {
+                if r.changed() && !automation::secondary_press(ui) {
                     out.edits.push((Edit::SetTrackPan(t.id, pan), true));
                 }
                 if r.double_clicked() {
                     out.edits.push((Edit::SetTrackPan(t.id, 0.0), false));
                 }
+                automation::attach(
+                    ui,
+                    &r,
+                    automation,
+                    AutomationTarget::TrackPan(t.id),
+                    (t.pan + 1.0) / 2.0,
+                    &mut out.automation,
+                );
                 out.end_gesture |= r.drag_stopped();
                 if let Some(l) = latency.track(t.id).filter(|l| *l > 0) {
                     ui.weak(format!("latency {}", latency.format(l)));
@@ -273,7 +295,7 @@ fn strip(
         }
 
         ui.separator();
-        sends_ui(ui, mixer, t, out);
+        sends_ui(ui, mixer, automation, t, out);
     });
 }
 
@@ -327,7 +349,13 @@ fn limiter_ui(ui: &mut egui::Ui, lim: &LimiterSettings, gain: f32, out: &mut Mix
     out.end_gesture |= stopped;
 }
 
-fn sends_ui(ui: &mut egui::Ui, mixer: &Mixer, t: &MixerTrack, out: &mut MixerOutput) {
+fn sends_ui(
+    ui: &mut egui::Ui,
+    mixer: &Mixer,
+    automation: &[AutomationLane],
+    t: &MixerTrack,
+    out: &mut MixerOutput,
+) {
     for s in &t.sends {
         ui.horizontal(|ui| {
             ui.label(format!("Send to {}", track_name(mixer, s.dest)));
@@ -341,9 +369,17 @@ fn sends_ui(ui: &mut egui::Ui, mixer: &Mixer, t: &MixerTrack, out: &mut MixerOut
             let r = ui
                 .add(egui::Slider::new(&mut level, 0.0..=MAX_SEND_LEVEL).show_value(false))
                 .on_hover_text(db_label(s.level));
-            if r.changed() {
+            if r.changed() && !automation::secondary_press(ui) {
                 out.edits.push((Edit::SetSendLevel(s.id, level), true));
             }
+            automation::attach(
+                ui,
+                &r,
+                automation,
+                AutomationTarget::SendLevel(s.id),
+                s.level / MAX_SEND_LEVEL,
+                &mut out.automation,
+            );
             out.end_gesture |= r.drag_stopped();
             let mut pre = s.pre_fader;
             if ui
@@ -374,9 +410,11 @@ fn sends_ui(ui: &mut egui::Ui, mixer: &Mixer, t: &MixerTrack, out: &mut MixerOut
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn insert_ui(
     ui: &mut egui::Ui,
     mixer: &Mixer,
+    automation: &[AutomationLane],
     t: &MixerTrack,
     ins: &Insert,
     index: usize,
@@ -386,13 +424,20 @@ fn insert_ui(
     ui.horizontal(|ui| {
         ui.label(RichText::new(ins.effect.name()).strong());
         let mut on = !ins.bypass;
-        if ui
+        let r = ui
             .toggle_value(&mut on, "On")
-            .on_hover_text("Bypass crossfades to dry; the effect's tail is dropped")
-            .changed()
-        {
+            .on_hover_text("Bypass crossfades to dry; the effect's tail is dropped");
+        if r.changed() {
             out.edits.push((Edit::SetInsertBypass(ins.id, !on), false));
         }
+        automation::attach(
+            ui,
+            &r,
+            automation,
+            AutomationTarget::InsertBypass(ins.id),
+            if ins.bypass { 1.0 } else { 0.0 },
+            &mut out.automation,
+        );
         if ins.sidechain.is_some() {
             ui.colored_label(Color32::from_rgb(120, 170, 235), "SC");
         }
@@ -443,10 +488,12 @@ fn insert_ui(
                     ui,
                     PluginTarget::Insert(ins.id),
                     ins.effect.plugin.as_ref(),
+                    automation,
                     host,
+                    &mut out.automation,
                 );
             } else {
-                params_ui(ui, ins, out);
+                params_ui(ui, ins, automation, out);
             }
             if ins.effect.accepts_sidechain() {
                 sidechain_ui(ui, mixer, t, ins, out);
@@ -460,7 +507,9 @@ pub(crate) fn plugin_params_ui(
     ui: &mut egui::Ui,
     target: PluginTarget,
     slot: Option<&jdance_domain::PluginSlot>,
+    automation: &[AutomationLane],
     host: &mut dyn Host,
+    requests: &mut Vec<AutomationRequest>,
 ) {
     if let Some(slot) = slot {
         ui.small(format!("{} {} · VST3", slot.vendor, slot.version));
@@ -490,7 +539,7 @@ pub(crate) fn plugin_params_ui(
                 .num_columns(2)
                 .show(ui, |ui| {
                     for p in &params {
-                        plugin_param_row(ui, target, p, host);
+                        plugin_param_row(ui, target, p, automation, host, requests);
                         ui.end_row();
                     }
                 });
@@ -501,7 +550,9 @@ fn plugin_param_row(
     ui: &mut egui::Ui,
     target: PluginTarget,
     p: &PluginParamView,
+    automation: &[AutomationLane],
     host: &mut dyn Host,
+    requests: &mut Vec<AutomationRequest>,
 ) {
     let name = if p.info.units.is_empty() {
         p.info.name.clone()
@@ -516,21 +567,33 @@ fn plugin_param_row(
     ui.horizontal(|ui| {
         let steps = p.info.step_count;
         let mut v = p.value;
-        let changed = if steps == 1 {
+        let r = if steps == 1 {
             let mut on = v >= 0.5;
             let r = ui.checkbox(&mut on, "");
             v = if on { 1.0 } else { 0.0 };
-            r.changed()
+            r
         } else if steps > 1 {
             let mut k = (v * f64::from(steps)).round() as u32;
             let r = ui.add(egui::Slider::new(&mut k, 0..=steps).show_value(false));
             v = f64::from(k) / f64::from(steps);
-            r.changed()
+            r
         } else {
             ui.add(egui::Slider::new(&mut v, 0.0..=1.0).show_value(false))
-                .changed()
         };
-        if changed {
+        if p.info.flags.automatable {
+            automation::attach(
+                ui,
+                &r,
+                automation,
+                AutomationTarget::PluginParam {
+                    target,
+                    param: p.info.id,
+                },
+                p.value as f32,
+                requests,
+            );
+        }
+        if r.changed() && !automation::secondary_press(ui) {
             host.set_plugin_param(target, p.info.id, v);
         }
         // The value text doubles as a text field (PLG-064).
@@ -570,7 +633,23 @@ fn plugin_param_row(
     });
 }
 
-fn params_ui(ui: &mut egui::Ui, ins: &Insert, out: &mut MixerOutput) {
+pub(crate) fn unit_suffix(unit: ParamUnit) -> &'static str {
+    match unit {
+        ParamUnit::Decibels => " dB",
+        ParamUnit::Hertz => " Hz",
+        ParamUnit::Milliseconds => " ms",
+        ParamUnit::Seconds => " s",
+        ParamUnit::Ratio => ":1",
+        ParamUnit::Fraction | ParamUnit::Q | ParamUnit::Toggle | ParamUnit::Choice => "",
+    }
+}
+
+fn params_ui(
+    ui: &mut egui::Ui,
+    ins: &Insert,
+    automation: &[AutomationLane],
+    out: &mut MixerOutput,
+) {
     let effect = &ins.effect;
     let mut edited: Option<Effect> = None;
     let mut stopped = false;
@@ -581,16 +660,7 @@ fn params_ui(ui: &mut egui::Ui, ins: &Insert, out: &mut MixerOutput) {
                 let current = effect.get(spec.id);
                 ui.label(spec.name);
                 let mut v = current;
-                let suffix = match spec.unit {
-                    ParamUnit::Decibels => " dB",
-                    ParamUnit::Hertz => " Hz",
-                    ParamUnit::Milliseconds => " ms",
-                    ParamUnit::Seconds => " s",
-                    ParamUnit::Ratio => ":1",
-                    ParamUnit::Fraction | ParamUnit::Q | ParamUnit::Toggle | ParamUnit::Choice => {
-                        ""
-                    }
-                };
+                let suffix = unit_suffix(spec.unit);
                 let r = match spec.mapping {
                     Mapping::Toggle => {
                         let mut b = v >= 0.5;
@@ -623,7 +693,18 @@ fn params_ui(ui: &mut egui::Ui, ins: &Insert, out: &mut MixerOutput) {
                     }
                 };
                 stopped |= r.drag_stopped() || r.lost_focus();
-                if v != current {
+                automation::attach(
+                    ui,
+                    &r,
+                    automation,
+                    AutomationTarget::EffectParam {
+                        insert: ins.id,
+                        param: spec.id.to_owned(),
+                    },
+                    spec.to_normalized(current),
+                    &mut out.automation,
+                );
+                if v != current && !automation::secondary_press(ui) {
                     edited = Some(
                         edited
                             .take()
