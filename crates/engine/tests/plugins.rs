@@ -151,7 +151,13 @@ fn compile(
         PlayMode::Pattern(first),
         |_| Some(Arc::clone(s)),
         &mut |id, sl| {
-            assert_eq!((id, sl.name.as_str()), (PLUGIN_INSERT, "Fake Delay"));
+            assert_eq!(
+                (id, sl.name.as_str()),
+                (
+                    jdance_domain::PluginTarget::Insert(PLUGIN_INSERT),
+                    "Fake Delay"
+                )
+            );
             plugin.take().map_or_else(PluginRt::missing, |f| f())
         },
     )

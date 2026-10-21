@@ -97,11 +97,7 @@ pub fn render_project(
         offline: true,
     };
     let mut instances = HashMap::new();
-    let tracks = std::iter::once(&project.mixer.master).chain(&project.mixer.tracks);
-    for ins in tracks.flat_map(|t| &t.inserts) {
-        let Some(slot) = &ins.effect.plugin else {
-            continue;
-        };
+    for (target, slot) in crate::plugins::plugin_slots(&project) {
         let created = match plugins {
             Some(p) => create_instance(p.catalog, p.modules, slot, &setup),
             None => Err("plugins are not available here".into()),
@@ -109,9 +105,16 @@ pub fn render_project(
         match created {
             // The controller half is not needed offline beyond creation.
             Ok((processor, controller)) => {
-                instances.insert(ins.id, (processor, controller));
+                instances.insert(target, (processor, controller));
             }
-            Err(e) => warnings.push(format!("plugin {} rendered as bypass: {e}", slot.name)),
+            Err(e) => warnings.push(format!(
+                "plugin {} rendered as {}: {e}",
+                slot.name,
+                match target {
+                    jdance_domain::PluginTarget::Insert(_) => "bypass",
+                    jdance_domain::PluginTarget::Channel(_) => "silence",
+                }
+            )),
         }
     }
     let mut samples: HashMap<PathBuf, Arc<SampleBuffer>> = HashMap::new();
@@ -498,5 +501,49 @@ mod tests {
         for (a, b) in o.audio.left.iter().zip(&unity.audio.left) {
             assert!((a - b * 0.5).abs() < 1e-7);
         }
+    }
+
+    #[test]
+    fn export_plays_instrument_channels() {
+        let (dir, mut p) = setup(0);
+        let (catalog, modules) = test_plugins();
+        let id = jdance_domain::ChannelId(p.ids.next());
+        p.channels.push(jdance_domain::Channel::new_instrument(
+            id,
+            "Synth",
+            plugin_slot(&catalog, "JD Test Synth"),
+        ));
+        p.patterns[0].row_mut(id).steps[4].on = true;
+        add_clip(&mut p, 0, 1);
+        let plugins = ExportPlugins {
+            catalog: &catalog,
+            modules: &modules,
+        };
+        let o = render_project(
+            &p,
+            Some(dir.path()),
+            RATE,
+            &opts(ExportRange::Song, 0.0),
+            Some(&plugins),
+        )
+        .unwrap();
+        assert!(o.warnings.is_empty(), "{:?}", o.warnings);
+        // Step 4 at 120 BPM starts at 24 000 samples and lasts one step.
+        let first = o.audio.left.iter().position(|v| v.abs() > 1e-6);
+        assert_eq!(first, Some(4 * 6_000 + 1), "sine starts at phase 0");
+        assert!(
+            o.audio.left[5 * 6_000 + 10..].iter().all(|v| *v == 0.0),
+            "gate ends"
+        );
+        let silent = render_project(
+            &p,
+            Some(dir.path()),
+            RATE,
+            &opts(ExportRange::Song, 0.0),
+            None,
+        )
+        .unwrap();
+        assert!(silent.warnings[0].contains("silence"));
+        assert!(silent.audio.left.iter().all(|v| *v == 0.0));
     }
 }

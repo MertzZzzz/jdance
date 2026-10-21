@@ -127,6 +127,26 @@ impl std::fmt::Display for PluginError {
 
 impl std::error::Error for PluginError {}
 
+/// A note event for an instrument, at a sample offset inside the block
+/// (PLG-033).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NoteEvent {
+    pub offset: u32,
+    /// Pairs a note-on with its note-off.
+    pub note_id: i32,
+    pub key: u8,
+    pub kind: NoteKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum NoteKind {
+    /// Velocity `0.0..=1.0`.
+    On {
+        velocity: f32,
+    },
+    Off,
+}
+
 /// Realtime part of a plugin instance, owned by the audio thread.
 ///
 /// Implementations do not allocate in [`PluginProcessor::process`]; the
@@ -141,6 +161,20 @@ pub trait PluginProcessor: Send {
         sidechain: Option<(&[f32], &[f32])>,
         transport: &Transport,
     );
+    /// Renders an instrument block into `left`/`right` (overwritten) with
+    /// `events` sorted by offset. Effects ignore the events and output
+    /// silence here.
+    fn process_instrument(
+        &mut self,
+        left: &mut [f32],
+        right: &mut [f32],
+        events: &[NoteEvent],
+        transport: &Transport,
+    ) {
+        let _ = (events, transport);
+        left.fill(0.0);
+        right.fill(0.0);
+    }
     /// Latency reported at activation, in samples.
     fn latency_samples(&self) -> u32;
     fn has_sidechain_input(&self) -> bool;

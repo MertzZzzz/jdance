@@ -7,7 +7,8 @@
 use crate::{Host, SampleStatus};
 use egui::{Color32, CornerRadius, Rect, Sense, Stroke, StrokeKind, vec2};
 use jdance_commands::Edit;
-use jdance_domain::{MAX_VOLUME, PatternId, Project, SampleRef, Step};
+use jdance_domain::{MAX_VOLUME, PatternId, PluginTarget, Project, SampleRef, Step};
+use jdance_plugin_api::PluginDescriptor;
 use std::path::Path;
 
 const STEP_SIZE: f32 = 22.0;
@@ -22,6 +23,11 @@ pub(crate) struct RackOutput {
     pub rename: Option<crate::RenameTarget>,
     /// Open the piano roll for this channel.
     pub open_piano: Option<jdance_domain::ChannelId>,
+    /// New instrument channels.
+    pub new_instruments: Vec<PluginDescriptor>,
+    /// Toggle the instrument's editor window / parameter window.
+    pub toggle_editor: Option<jdance_domain::ChannelId>,
+    pub show_params: Option<jdance_domain::ChannelId>,
 }
 
 pub(crate) fn show(
@@ -120,15 +126,34 @@ pub(crate) fn show(
                     }
                 });
 
-                // Drawn as a dot: the default fonts lack most symbol glyphs.
-                let color = match sample_status {
-                    None => ui.visuals().weak_text_color().gamma_multiply(0.4),
-                    Some(SampleStatus::Loading) => ui.visuals().weak_text_color(),
-                    Some(SampleStatus::Ready { .. }) => Color32::from_rgb(90, 190, 110),
-                    Some(SampleStatus::Failed(_)) => ui.visuals().error_fg_color,
-                };
-                let (dot, _) = ui.allocate_exact_size(vec2(10.0, STEP_SIZE), Sense::hover());
-                ui.painter().circle_filled(dot.center(), 3.5, color);
+                if let Some(slot) = ch.instrument() {
+                    let target = PluginTarget::Channel(ch.id);
+                    let open = host.plugin_editor_open(target);
+                    if ui
+                        .selectable_label(open, "Edit")
+                        .on_hover_text(format!("{} ({}) — editor window", slot.name, slot.vendor))
+                        .clicked()
+                    {
+                        out.toggle_editor = Some(ch.id);
+                    }
+                    if ui
+                        .small_button("Params")
+                        .on_hover_text("Plugin parameters")
+                        .clicked()
+                    {
+                        out.show_params = Some(ch.id);
+                    }
+                } else {
+                    // Drawn as a dot: the default fonts lack most symbol glyphs.
+                    let color = match sample_status {
+                        None => ui.visuals().weak_text_color().gamma_multiply(0.4),
+                        Some(SampleStatus::Loading) => ui.visuals().weak_text_color(),
+                        Some(SampleStatus::Ready { .. }) => Color32::from_rgb(90, 190, 110),
+                        Some(SampleStatus::Failed(_)) => ui.visuals().error_fg_color,
+                    };
+                    let (dot, _) = ui.allocate_exact_size(vec2(10.0, STEP_SIZE), Sense::hover());
+                    ui.painter().circle_filled(dot.center(), 3.5, color);
+                }
                 let notes = pattern.row(ch.id).map_or(0, |r| r.notes.len());
                 let label = if notes > 0 {
                     format!("Piano {notes}")
@@ -233,6 +258,21 @@ pub(crate) fn show(
                 out.new_channels
                     .push((format!("Channel {}", project.channels.len() + 1), None));
             }
+            ui.menu_button("+ Instrument", |ui| {
+                let list = host.plugin_instruments();
+                if list.is_empty() {
+                    ui.label("No VST3 instruments found. See Plugins.");
+                }
+                for d in list {
+                    if ui
+                        .button(format!("{} ({})", d.plugin.name, d.plugin.vendor))
+                        .clicked()
+                    {
+                        out.new_instruments.push(d);
+                        ui.close();
+                    }
+                }
+            });
             ui.weak(
                 "Drop WAV files here to add channels, or onto a channel to replace its sample.",
             );

@@ -10,7 +10,7 @@ use jdance_audio_api::{
     DeviceSettings, OutputStream, RenderCallback, StreamState,
 };
 use jdance_audio_cpal::CpalBackend;
-use jdance_domain::InsertId;
+use jdance_domain::PluginTarget;
 use jdance_domain::TrackId;
 use jdance_domain::{ExportOptions, Project, SampleRef};
 use jdance_engine::{
@@ -148,6 +148,20 @@ impl AudioHost {
             engine_generation: 0,
             scan: None,
         }
+    }
+
+    fn plugins_of_kind(&self, kind: PluginKind) -> Vec<PluginDescriptor> {
+        let mut v: Vec<_> = self
+            .plugins
+            .catalog
+            .plugins()
+            .filter(|d| d.kind == kind)
+            .cloned()
+            .collect();
+        v.sort_by(|a, b| {
+            (&a.plugin.vendor, &a.plugin.name).cmp(&(&b.plugin.vendor, &b.plugin.name))
+        });
+        v
     }
 
     /// Plugin folders: the standard ones plus the user's (PLG-020).
@@ -625,20 +639,14 @@ impl Host for AudioHost {
     }
 
     fn plugin_effects(&self) -> Vec<PluginDescriptor> {
-        let mut v: Vec<_> = self
-            .plugins
-            .catalog
-            .plugins()
-            .filter(|d| d.kind == PluginKind::Effect)
-            .cloned()
-            .collect();
-        v.sort_by(|a, b| {
-            (&a.plugin.vendor, &a.plugin.name).cmp(&(&b.plugin.vendor, &b.plugin.name))
-        });
-        v
+        self.plugins_of_kind(PluginKind::Effect)
     }
 
-    fn plugin_params(&mut self, insert: InsertId) -> Option<Vec<PluginParamView>> {
+    fn plugin_instruments(&self) -> Vec<PluginDescriptor> {
+        self.plugins_of_kind(PluginKind::Instrument)
+    }
+
+    fn plugin_params(&mut self, insert: PluginTarget) -> Option<Vec<PluginParamView>> {
         let c = self.plugins.controller(insert)?;
         Some(
             c.params()
@@ -655,24 +663,24 @@ impl Host for AudioHost {
         )
     }
 
-    fn set_plugin_param(&mut self, insert: InsertId, id: u32, value: f64) {
+    fn set_plugin_param(&mut self, insert: PluginTarget, id: u32, value: f64) {
         if let Some(c) = self.plugins.controller(insert) {
             c.set_param_normalized(id, value);
         }
     }
 
-    fn plugin_param_from_text(&mut self, insert: InsertId, id: u32, text: &str) -> Option<f64> {
+    fn plugin_param_from_text(&mut self, insert: PluginTarget, id: u32, text: &str) -> Option<f64> {
         self.plugins.controller(insert)?.param_from_text(id, text)
     }
 
-    fn toggle_plugin_editor(&mut self, insert: InsertId, title: &str) {
+    fn toggle_plugin_editor(&mut self, insert: PluginTarget, title: &str) {
         if let Err(e) = self.plugins.toggle_editor(insert, title) {
             self.notices
                 .push(Notice::warning(format!("Cannot open the editor: {e}")));
         }
     }
 
-    fn plugin_editor_open(&self, insert: InsertId) -> bool {
+    fn plugin_editor_open(&self, insert: PluginTarget) -> bool {
         self.plugins.editor_open(insert)
     }
 
@@ -680,16 +688,16 @@ impl Host for AudioHost {
         self.plugins.any_editor_open()
     }
 
-    fn plugin_held_back(&self, insert: InsertId) -> bool {
+    fn plugin_held_back(&self, insert: PluginTarget) -> bool {
         self.plugins.held_back(insert)
     }
 
-    fn retry_plugin(&mut self, insert: InsertId) {
+    fn retry_plugin(&mut self, insert: PluginTarget) {
         self.plugins.retry(insert);
         self.needs_compile = true;
     }
 
-    fn plugin_problem(&self, insert: InsertId) -> Option<String> {
+    fn plugin_problem(&self, insert: PluginTarget) -> Option<String> {
         self.plugins.problem(insert)
     }
 

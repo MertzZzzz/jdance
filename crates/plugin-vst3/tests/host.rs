@@ -63,7 +63,7 @@ fn run(p: &mut Vst3Processor, input: &[f32], sidechain: Option<&[f32]>) -> (Vec<
 }
 
 #[test]
-fn scan_lists_effect_classes() {
+fn scan_lists_classes_and_kinds() {
     let d = scan_in_process(bundle()).unwrap();
     let names: Vec<_> = d.iter().map(|d| d.plugin.name.as_str()).collect();
     assert_eq!(
@@ -72,11 +72,17 @@ fn scan_lists_effect_classes() {
             "JD Test Gain",
             "JD Test Latency",
             "JD Test Sidechain",
-            "JD Test Logger"
+            "JD Test Logger",
+            "JD Test Synth"
         ]
     );
     for x in &d {
-        assert_eq!(x.kind, PluginKind::Effect);
+        let kind = if x.plugin.name == "JD Test Synth" {
+            PluginKind::Instrument
+        } else {
+            PluginKind::Effect
+        };
+        assert_eq!(x.kind, kind);
         assert_eq!(x.plugin.vendor, "jdance tests");
         assert_eq!(x.plugin.version, "1.0.0");
         assert_eq!(x.plugin.class_id.len(), 32);
@@ -92,7 +98,7 @@ fn scan_lists_effect_classes() {
 fn out_of_process_scan_and_blocklist_reasons() {
     let scanner = Path::new(env!("CARGO_BIN_EXE_jdance-plugin-scanner"));
     match scan_out_of_process(scanner, bundle(), Duration::from_secs(30)) {
-        ScanOutcome::Ok(d) => assert_eq!(d.len(), 4),
+        ScanOutcome::Ok(d) => assert_eq!(d.len(), 5),
         f => panic!("{f:?}"),
     }
     let missing = bundle().with_file_name("Missing.vst3");
@@ -275,4 +281,57 @@ fn host_side_processing_does_not_allocate() {
         }
     });
     assert_eq!(violations(), 0);
+}
+
+/// Synth log entries (id, sample offset, key) from the component state.
+fn synth_log(c: &mut Vst3Controller) -> Vec<(u32, i32, u8)> {
+    let s = c.state().unwrap().component;
+    let n = u32::from_le_bytes(s[13..17].try_into().unwrap()) as usize;
+    (0..n)
+        .map(|i| {
+            let e = &s[17 + i * 16..17 + (i + 1) * 16];
+            (
+                u32::from_le_bytes(e[0..4].try_into().unwrap()),
+                i32::from_le_bytes(e[4..8].try_into().unwrap()),
+                f64::from_le_bytes(e[8..16].try_into().unwrap()) as u8,
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn instrument_receives_sample_accurate_notes() {
+    use jdance_plugin_api::{NoteEvent, NoteKind};
+    let d = descriptor("JD Test Synth");
+    // A small max block splits the 1000-sample call into chunks; offsets
+    // must be rebased per chunk.
+    let setup = ProcessSetupInfo {
+        max_block: 300,
+        ..SETUP
+    };
+    let (mut p, mut c) = instantiate(&module(), &d.plugin.class_id, &setup, None).unwrap();
+    let ev = |offset, key, kind| NoteEvent {
+        offset,
+        note_id: i32::from(key),
+        key,
+        kind,
+    };
+    let events = [
+        ev(10, 69, NoteKind::On { velocity: 1.0 }),
+        ev(310, 72, NoteKind::On { velocity: 0.5 }),
+        ev(650, 69, NoteKind::Off),
+    ];
+    let (mut l, mut r) = (vec![1.0; 1000], vec![1.0; 1000]);
+    p.process_instrument(&mut l, &mut r, &events, &Transport::default());
+    assert!(
+        l[..10].iter().all(|v| *v == 0.0),
+        "silence before the first note"
+    );
+    assert!(l[11..300].iter().any(|v| v.abs() > 0.1), "A4 sounds");
+    assert_eq!(l, r);
+    // Chunk-relative offsets: 10 in chunk 0, 10 in chunk 1, 50 in chunk 2.
+    assert_eq!(
+        synth_log(&mut c),
+        [(0x1000, 10, 69), (0x1000, 10, 72), (0x1001, 50, 69)]
+    );
 }

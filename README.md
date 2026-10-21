@@ -16,6 +16,7 @@ piano roll, playlist, mixer). Код FL Studio не используется и 
 - channel rack со step sequencer, несколько паттернов, WAV-сэмплы
   (drag-and-drop или меню);
 - piano roll: ноты с высотой, длительностью и velocity;
+- VST3-инструменты как каналы: ноты из steps и piano roll с точностью до сэмпла;
 - playlist: lanes, клипы паттернов с повторами, Pattern/Song режимы, loop;
 - mixer: треки, mute/solo, sends pre/post, до 8 эффектов на трек
   (Parametric EQ, Tempo Delay, Reverb, компрессор с sidechain), safety
@@ -29,7 +30,7 @@ piano roll, playlist, mixer). Код FL Studio не используется и 
 - экспорт в WAV (song или pattern, хвост эффектов 5 с по умолчанию) из
   меню и без аудиоустройства (`jdance render`).
 
-Ещё нет: ASIO-host, VST3-инструменты,
+Ещё нет: ASIO-host,
 автоматизация (см. план в [спецификации](docs/spec/)).
 
 ## Сборка

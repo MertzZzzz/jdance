@@ -14,7 +14,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 pub const FORMAT_TAG: &str = "jdance-project";
-pub const CURRENT_FORMAT_VERSION: u32 = 7;
+pub const CURRENT_FORMAT_VERSION: u32 = 8;
 pub const PROJECT_EXTENSION: &str = "jdance";
 
 /// Saves `project` to `path` atomically. Sample paths inside the project
@@ -130,6 +130,10 @@ fn migrate(version: u32, mut project: Value) -> Result<Value, PersistError> {
     if v == 6 {
         // v7 added piano-roll notes to step rows (absent = none).
         v = 7;
+    }
+    if v == 7 {
+        // v8 added instrument channels (`source.kind: "plugin"`).
+        v = 8;
     }
     match v {
         CURRENT_FORMAT_VERSION => Ok(project),
@@ -440,16 +444,16 @@ mod tests {
     #[test]
     fn rejects_semantically_broken_projects() {
         let p = sample_project("a.wav");
-        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 7, "project": p});
+        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 8, "project": p});
         v["project"]["channels"][0]["volume"] = serde_json::json!(50.0);
         assert!(matches!(
             parse_project(v.to_string().as_bytes()),
             Err(PersistError::Corrupt(_))
         ));
-        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 7, "project": p});
+        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 8, "project": p});
         v["project"]["patterns"][0]["rows"][0]["steps"] = serde_json::json!([]);
         assert!(parse_project(v.to_string().as_bytes()).is_err());
-        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 7, "project": p});
+        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 8, "project": p});
         v["project"]["ids"]["next"] = serde_json::json!(1);
         assert!(parse_project(v.to_string().as_bytes()).is_err());
     }
@@ -549,7 +553,7 @@ mod tests {
             pre_fader: false,
         });
         p.mixer.tracks = vec![a, b];
-        let v = serde_json::json!({"format": FORMAT_TAG, "format_version": 7, "project": p});
+        let v = serde_json::json!({"format": FORMAT_TAG, "format_version": 8, "project": p});
         let err = parse_project(v.to_string().as_bytes()).unwrap_err();
         assert!(err.to_string().contains("feedback loop"), "{err}");
     }

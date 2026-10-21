@@ -8,10 +8,10 @@
 //! previous snapshot by object ID without allocating, so edits do not
 //! cause clicks or reset delay lines.
 
-use crate::effect_rt::{EffectRt, InsertRt, PluginRt, SidechainRt};
+use crate::effect_rt::{EffectRt, InsertRt, InstrumentRt, PluginRt, SidechainRt};
 use jdance_domain::{
-    ChannelId, InsertId, MAX_CHANNELS, MixerTrack, PluginSlot, Project, ROOT_KEY, SampleRef,
-    SendId, TrackId,
+    ChannelId, MAX_CHANNELS, MixerTrack, PluginSlot, PluginTarget, Project, ROOT_KEY, SampleRef,
+    SendId, TICKS_PER_STEP, TrackId,
 };
 use jdance_dsp::{
     DelayLine, SafetyLimiter, SampleBuffer, Smoothed, StereoGain, balance_gains, pan_gains,
@@ -64,12 +64,12 @@ pub struct StepEvent {
     pub velocity: f32,
     /// MIDI key; steps play [`ROOT_KEY`].
     pub key: u8,
-    /// Gate length in samples, cut at the end of the pattern repetition;
-    /// 0 for steps (one-shot). One-shot samplers ignore it.
+    /// Gate length in samples (one step for steps), cut at the end of the
+    /// pattern repetition. One-shot samplers ignore it.
     pub length: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ChannelRt {
     pub id: ChannelId,
     /// `None` when the channel has no sample or it failed to load.
@@ -81,6 +81,8 @@ pub struct ChannelRt {
     /// Delay compensation on the channel → track edge.
     pub delay: DelayLine,
     pub muted: bool,
+    /// Plugin instrument instead of the sampler.
+    pub instrument: Option<InstrumentRt>,
 }
 
 #[derive(Debug)]
@@ -192,6 +194,9 @@ impl PlaybackSnapshot {
             if let Some(o) = old.channels.iter_mut().find(|o| o.id == ch.id) {
                 ch.gain.continue_from(&o.gain);
                 ch.delay.take_state(&mut o.delay);
+                if let (Some(n), Some(oi)) = (&mut ch.instrument, &mut o.instrument) {
+                    n.take_state(oi);
+                }
             }
         }
         for t in &mut self.tracks {
@@ -292,7 +297,7 @@ pub fn compile_full(
     sample_rate: u32,
     mode: PlayMode,
     samples: impl Fn(&SampleRef) -> Option<Arc<SampleBuffer>>,
-    plugins: &mut dyn FnMut(InsertId, &PluginSlot) -> PluginRt,
+    plugins: &mut dyn FnMut(PluginTarget, &PluginSlot) -> PluginRt,
 ) -> PlaybackSnapshot {
     let ramp = ramp_len(sample_rate);
     let mixer = &project.mixer;
@@ -312,6 +317,22 @@ pub fn compile_full(
     let mut in_lat = vec![0u32; order.len()];
     let mut out_lat = vec![0u32; order.len()];
     let mut pdc = Pdc { clamped: false };
+    // Instruments first: their latency delays their channel (MIX-030).
+    let mut instruments: Vec<Option<InstrumentRt>> = project
+        .channels
+        .iter()
+        .take(MAX_CHANNELS)
+        .map(|c| {
+            c.instrument()
+                .map(|slot| InstrumentRt::new(plugins(PluginTarget::Channel(c.id), slot)))
+        })
+        .collect();
+    for (c, inst) in project.channels.iter().zip(&instruments) {
+        if let Some(i) = inst {
+            let t = track_of(c.track);
+            in_lat[t] = in_lat[t].max(i.plugin.latency());
+        }
+    }
     let mut tracks: Vec<TrackRt> = Vec::with_capacity(order.len());
 
     for (ti, id) in order.iter().enumerate() {
@@ -320,7 +341,7 @@ pub fn compile_full(
         let mut inserts = Vec::with_capacity(t.inserts.len());
         for ins in &t.inserts {
             let effect = match &ins.effect.plugin {
-                Some(slot) => EffectRt::Plugin(plugins(ins.id, slot)),
+                Some(slot) => EffectRt::Plugin(plugins(PluginTarget::Insert(ins.id), slot)),
                 None => EffectRt::new(&ins.effect, sample_rate, project.tempo_bpm),
             };
             let sidechain_src = ins
@@ -404,10 +425,13 @@ pub fn compile_full(
         .channels
         .iter()
         .take(MAX_CHANNELS)
-        .map(|c| {
+        .enumerate()
+        .map(|(i, c)| {
             let track = track_of(c.track);
             let (l, r) = pan_gains(c.pan);
             let g = if c.muted { 0.0 } else { c.volume };
+            let instrument = instruments[i].take();
+            let own = instrument.as_ref().map_or(0, |x| x.plugin.latency());
             ChannelRt {
                 id: c.id,
                 sample: c
@@ -416,8 +440,9 @@ pub fn compile_full(
                     .filter(|s| s.sample_rate == sample_rate),
                 track,
                 gain: StereoGain::new((l * g, r * g), ramp),
-                delay: pdc.line(in_lat[track]),
+                delay: pdc.line(in_lat[track] - own),
                 muted: c.muted,
+                instrument,
             }
         })
         .collect();
@@ -540,12 +565,14 @@ fn push_pattern_events(
             let tick = base + i as u64 * u64::from(jdance_domain::TICKS_PER_STEP);
             let pos = to_sample(tick);
             if pos < limit {
+                // Instruments hold a step for one step; samplers ignore it.
+                let gate_end = to_sample(tick + u64::from(TICKS_PER_STEP));
                 out.push(StepEvent {
                     pos,
                     channel: ch_index,
                     velocity: step.velocity,
                     key: ROOT_KEY,
-                    length: 0,
+                    length: gate_end.saturating_sub(pos).max(1),
                 });
             }
         }

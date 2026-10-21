@@ -172,9 +172,25 @@ impl Channel {
         }
     }
 
+    /// A channel played by a plugin instrument (PLG-001).
+    pub fn new_instrument(id: ChannelId, name: impl Into<String>, plugin: PluginSlot) -> Self {
+        Self {
+            source: ChannelSource::Plugin { plugin },
+            ..Self::new_sampler(id, name)
+        }
+    }
+
     pub fn sample(&self) -> Option<&SampleRef> {
         match &self.source {
             ChannelSource::Sampler { sample } => sample.as_ref(),
+            ChannelSource::Plugin { .. } => None,
+        }
+    }
+
+    pub fn instrument(&self) -> Option<&PluginSlot> {
+        match &self.source {
+            ChannelSource::Plugin { plugin } => Some(plugin),
+            ChannelSource::Sampler { .. } => None,
         }
     }
 }
@@ -182,7 +198,21 @@ impl Channel {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ChannelSource {
-    Sampler { sample: Option<SampleRef> },
+    Sampler {
+        sample: Option<SampleRef>,
+    },
+    /// A VST3 instrument; notes come from steps and the piano roll.
+    Plugin {
+        plugin: PluginSlot,
+    },
+}
+
+/// What a plugin instance belongs to: an insert slot or an instrument
+/// channel. Keys the host's live instances.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PluginTarget {
+    Insert(InsertId),
+    Channel(ChannelId),
 }
 
 /// Reference to an audio file used by a sampler channel.

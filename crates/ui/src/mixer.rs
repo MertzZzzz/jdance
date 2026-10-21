@@ -12,8 +12,8 @@ use egui::{Color32, CornerRadius, Rect, RichText, Sense, Stroke, StrokeKind, pos
 use jdance_commands::Edit;
 use jdance_domain::{
     Effect, EffectKind, Insert, LimiterSettings, MAX_INSERTS_PER_TRACK, MAX_SEND_LEVEL,
-    MAX_SENDS_PER_TRACK, MAX_TRACKS, MAX_VOLUME, Mapping, Mixer, MixerTrack, ParamUnit, Sidechain,
-    Tap, TrackId,
+    MAX_SENDS_PER_TRACK, MAX_TRACKS, MAX_VOLUME, Mapping, Mixer, MixerTrack, ParamUnit,
+    PluginTarget, Sidechain, Tap, TrackId,
 };
 use jdance_dsp::Processor;
 use jdance_plugin_api::PluginDescriptor;
@@ -397,14 +397,14 @@ fn insert_ui(
             ui.colored_label(Color32::from_rgb(120, 170, 235), "SC");
         }
         if ins.effect.kind == EffectKind::Plugin {
-            let open = host.plugin_editor_open(ins.id);
+            let open = host.plugin_editor_open(PluginTarget::Insert(ins.id));
             if ui
                 .selectable_label(open, "Edit")
                 .on_hover_text("Open the plugin's own editor window")
                 .clicked()
             {
                 let title = format!("{} — {}", ins.effect.name(), t.name);
-                host.toggle_plugin_editor(ins.id, &title);
+                host.toggle_plugin_editor(PluginTarget::Insert(ins.id), &title);
             }
         }
         if index > 0
@@ -439,7 +439,12 @@ fn insert_ui(
                 eq_graph(ui, &ins.effect);
             }
             if ins.effect.kind == EffectKind::Plugin {
-                plugin_params_ui(ui, ins, host);
+                plugin_params_ui(
+                    ui,
+                    PluginTarget::Insert(ins.id),
+                    ins.effect.plugin.as_ref(),
+                    host,
+                );
             } else {
                 params_ui(ui, ins, out);
             }
@@ -451,20 +456,25 @@ fn insert_ui(
 
 /// Generic editor for a plugin (PLG-064): every parameter with the
 /// plugin's own value text. Read only while the plugin is not loaded.
-fn plugin_params_ui(ui: &mut egui::Ui, ins: &Insert, host: &mut dyn Host) {
-    if let Some(slot) = &ins.effect.plugin {
+pub(crate) fn plugin_params_ui(
+    ui: &mut egui::Ui,
+    target: PluginTarget,
+    slot: Option<&jdance_domain::PluginSlot>,
+    host: &mut dyn Host,
+) {
+    if let Some(slot) = slot {
         ui.small(format!("{} {} · VST3", slot.vendor, slot.version));
     }
-    let Some(params) = host.plugin_params(ins.id) else {
+    let Some(params) = host.plugin_params(target) else {
         let why = host
-            .plugin_problem(ins.id)
+            .plugin_problem(target)
             .unwrap_or_else(|| "not loaded".into());
         ui.colored_label(
             ui.visuals().warn_fg_color,
             format!("{why}. Audio passes through; the saved state is kept."),
         );
-        if host.plugin_held_back(ins.id) && ui.button("Load again").clicked() {
-            host.retry_plugin(ins.id);
+        if host.plugin_held_back(target) && ui.button("Load again").clicked() {
+            host.retry_plugin(target);
         }
         return;
     };
@@ -473,21 +483,26 @@ fn plugin_params_ui(ui: &mut egui::Ui, ins: &Insert, host: &mut dyn Host) {
         return;
     }
     egui::ScrollArea::vertical()
-        .id_salt(("plugin_params", ins.id.0))
+        .id_salt(("plugin_params", target))
         .max_height(240.0)
         .show(ui, |ui| {
-            egui::Grid::new(("plugin_grid", ins.id.0))
+            egui::Grid::new(("plugin_grid", target))
                 .num_columns(2)
                 .show(ui, |ui| {
                     for p in &params {
-                        plugin_param_row(ui, ins, p, host);
+                        plugin_param_row(ui, target, p, host);
                         ui.end_row();
                     }
                 });
         });
 }
 
-fn plugin_param_row(ui: &mut egui::Ui, ins: &Insert, p: &PluginParamView, host: &mut dyn Host) {
+fn plugin_param_row(
+    ui: &mut egui::Ui,
+    target: PluginTarget,
+    p: &PluginParamView,
+    host: &mut dyn Host,
+) {
     let name = if p.info.units.is_empty() {
         p.info.name.clone()
     } else {
@@ -516,10 +531,10 @@ fn plugin_param_row(ui: &mut egui::Ui, ins: &Insert, p: &PluginParamView, host: 
                 .changed()
         };
         if changed {
-            host.set_plugin_param(ins.id, p.info.id, v);
+            host.set_plugin_param(target, p.info.id, v);
         }
         // The value text doubles as a text field (PLG-064).
-        let id = egui::Id::unique(("plugin_text", ins.id.0, p.info.id));
+        let id = egui::Id::unique(("plugin_text", target, p.info.id));
         let edit_id = id.with("edit");
         let editing: Option<String> = ui.data(|d| d.get_temp(id));
         match editing {
@@ -542,9 +557,9 @@ fn plugin_param_row(ui: &mut egui::Ui, ins: &Insert, p: &PluginParamView, host: 
                 );
                 if r.lost_focus() {
                     if ui.input(|i| i.key_pressed(egui::Key::Enter))
-                        && let Some(v) = host.plugin_param_from_text(ins.id, p.info.id, &text)
+                        && let Some(v) = host.plugin_param_from_text(target, p.info.id, &text)
                     {
-                        host.set_plugin_param(ins.id, p.info.id, v);
+                        host.set_plugin_param(target, p.info.id, v);
                     }
                     ui.data_mut(|d| d.remove::<String>(id));
                 } else {

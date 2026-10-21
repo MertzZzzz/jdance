@@ -90,7 +90,11 @@ impl PluginRt {
         self.processor.is_some()
     }
 
-    fn take_state(&mut self, old: &mut PluginRt) {
+    pub fn latency(&self) -> u32 {
+        self.latency
+    }
+
+    pub(crate) fn take_state(&mut self, old: &mut PluginRt) {
         if self.carried && self.processor.is_none() {
             self.processor = old.processor.take();
         }
@@ -392,5 +396,118 @@ mod tests {
         let mut dr = vec![0.0; MAX_BLOCK];
         slot.process(&mut l, &mut r, (&mut dl, &mut dr), None, &T);
         assert_eq!(l.iter().position(|v| *v != 0.0), Some(48));
+    }
+}
+
+/// Notes per block and sounding notes per instrument channel.
+pub const MAX_INSTRUMENT_EVENTS: usize = 512;
+pub const MAX_SOUNDING_NOTES: usize = 256;
+
+/// A plugin instrument playing a channel (PLG-033): note-ons at their
+/// sample offsets, note-offs when the gate ends, and note-off for every
+/// sounding note on stop, seek and loop wrap. Storage is pre-allocated.
+#[derive(Debug)]
+pub struct InstrumentRt {
+    pub plugin: PluginRt,
+    events: Vec<jdance_plugin_api::NoteEvent>,
+    /// (timeline end position, key, note id) of sounding notes.
+    sounding: Vec<(u64, u8, i32)>,
+    next_id: i32,
+}
+
+impl InstrumentRt {
+    pub fn new(plugin: PluginRt) -> Self {
+        Self {
+            plugin,
+            events: Vec::with_capacity(MAX_INSTRUMENT_EVENTS),
+            sounding: Vec::with_capacity(MAX_SOUNDING_NOTES),
+            next_id: 0,
+        }
+    }
+
+    fn push(&mut self, e: jdance_plugin_api::NoteEvent) {
+        // A full list drops the event (RT-011).
+        if self.events.len() < self.events.capacity() {
+            self.events.push(e);
+        }
+    }
+
+    /// Note-offs for gates ending in `[from, to)` of the timeline, which
+    /// starts at block offset `offset`.
+    pub fn gates(&mut self, from: u64, to: u64, offset: usize) {
+        let mut i = 0;
+        while i < self.sounding.len() {
+            let (end, key, note_id) = self.sounding[i];
+            if end >= from && end < to {
+                self.push(jdance_plugin_api::NoteEvent {
+                    offset: (offset as u64 + end - from) as u32,
+                    note_id,
+                    key,
+                    kind: jdance_plugin_api::NoteKind::Off,
+                });
+                self.sounding.swap_remove(i);
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    /// A note-on at block `offset`, timeline `pos`, gate `length` samples.
+    pub fn note_on(&mut self, offset: usize, pos: u64, key: u8, velocity: f32, length: u64) {
+        if self.sounding.len() == self.sounding.capacity() {
+            return;
+        }
+        self.next_id = self.next_id.wrapping_add(1);
+        let note_id = self.next_id;
+        self.push(jdance_plugin_api::NoteEvent {
+            offset: offset as u32,
+            note_id,
+            key,
+            kind: jdance_plugin_api::NoteKind::On { velocity },
+        });
+        self.sounding.push((pos + length.max(1), key, note_id));
+    }
+
+    /// Note-off for every sounding note at block `offset` (stop, seek,
+    /// loop wrap, panic).
+    pub fn all_off(&mut self, offset: usize) {
+        while let Some((_, key, note_id)) = self.sounding.pop() {
+            self.push(jdance_plugin_api::NoteEvent {
+                offset: offset as u32,
+                note_id,
+                key,
+                kind: jdance_plugin_api::NoteKind::Off,
+            });
+        }
+    }
+
+    /// Renders the block into `l`/`r` (overwritten). Realtime-safe on the
+    /// host side.
+    pub fn render(&mut self, l: &mut [f32], r: &mut [f32], transport: &Transport) {
+        // Offs before ons at the same offset (retriggers).
+        self.events.sort_unstable_by_key(|e| {
+            (
+                e.offset,
+                matches!(e.kind, jdance_plugin_api::NoteKind::On { .. }),
+                e.note_id,
+            )
+        });
+        match &mut self.plugin.processor {
+            Some(p) => p.process_instrument(l, r, &self.events, transport),
+            None => {
+                l.fill(0.0);
+                r.fill(0.0);
+            }
+        }
+        self.events.clear();
+    }
+
+    pub fn take_state(&mut self, old: &mut InstrumentRt) {
+        self.plugin.take_state(&mut old.plugin);
+        if self.plugin.processor.is_some() && old.plugin.processor.is_none() {
+            // Same instance: keep its sounding notes.
+            std::mem::swap(&mut self.sounding, &mut old.sounding);
+            self.next_id = old.next_id;
+        }
     }
 }

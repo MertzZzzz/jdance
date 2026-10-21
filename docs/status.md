@@ -158,6 +158,23 @@
 | Piano roll с 10 000 нот: p95 ≤ 16.6 ms (BLD-020) | NOT RUN | рисуются только видимые ноты; замер на reference machine не проводился |
 | Ввод нот с клавиатуры компьютера | NOT RUN | |
 
+## Milestone P2 — часть 2: VST3-инструменты
+
+| Пункт | Статус | Артефакт / комментарий |
+|---|---|---|
+| Канал-инструмент (источник `plugin`), формат проекта v8 | PASS | `domain`, `persistence` |
+| Note on/off с `noteId`, velocity, sample offset; деление блока с пересчётом offset (PLG-033) | PASS | `instrument_receives_sample_accurate_notes` (тестовый синтезатор, журнал событий) |
+| Gate: шаг держится один шаг, нота — свою длину, обрезка концом повторения | PASS | `notes_and_steps_turn_on_and_off_on_time` |
+| Note-off всем звучащим нотам на loop wrap, Stop, seek, panic (PLG-033) | PASS | `loop_wrap_and_stop_turn_sounding_notes_off` |
+| Latency инструмента в PDC (MIX-030) | PASS | `instrument_latency_is_compensated_against_other_channels` |
+| RT-001 с инструментом и событиями | PASS | `instrument_rendering_does_not_allocate` |
+| Экземпляр создаётся из state, переживает пересборку снапшотов, state сохраняется в проекте | PASS | `instrument_channels_get_live_instances`, общий реестр `PluginTarget` |
+| Export с инструментами: отдельные offline-экземпляры; отсутствующий — тишина с предупреждением | PASS | `export_plays_instrument_channels` |
+| UI: «+ Instrument», Edit (окно плагина), Params (generic editor), steps и piano roll для инструмента | PASS (ручная) | Xvfb |
+| Pitch bend и CC через `IMidiMapping` (PLG-033) | NOT RUN | в piano roll ещё нет pitch bend/CC |
+| Note-off velocity | NOT RUN | всегда 0 |
+| Кнопка panic в UI | NOT RUN | команда в движке есть |
+
 ## Milestone 1A / 1B
 
 | Пункт | Статус |
@@ -170,4 +187,4 @@
 ## Известные ограничения текущей реализации
 
 - Ресемплинг сэмплов без anti-aliasing (BLD-041, ADR-012).
-- Автоматизация и VST3-инструменты не начаты.
+- Автоматизация не начата.

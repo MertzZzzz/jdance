@@ -7,7 +7,7 @@
 //! (see `jdance_engine::PluginRt`).
 
 use crate::config;
-use jdance_domain::{EffectKind, InsertId, PluginSlot, Project};
+use jdance_domain::{ChannelSource, EffectKind, PluginSlot, PluginTarget, Project};
 use jdance_engine::PluginRt;
 use jdance_plugin_api::{PluginController, PluginDescriptor, PluginState, ProcessSetupInfo};
 use jdance_plugin_vst3::{
@@ -215,12 +215,12 @@ struct Live {
 pub struct PluginHost {
     pub catalog: Catalog,
     pub modules: ModuleCache,
-    live: HashMap<InsertId, Live>,
+    live: HashMap<PluginTarget, Live>,
     /// Inserts whose plugin could not be created (reported once), with
     /// the reason.
-    failed: HashMap<(InsertId, String), String>,
+    failed: HashMap<(PluginTarget, String), String>,
     /// Fresh processors handed to the last compile.
-    handed: Vec<InsertId>,
+    handed: Vec<PluginTarget>,
     setup: ProcessSetupInfo,
 }
 
@@ -232,13 +232,23 @@ impl std::fmt::Debug for PluginHost {
     }
 }
 
-/// Plugin inserts of a project: (insert, slot).
-fn plugin_inserts(project: &Project) -> impl Iterator<Item = (InsertId, &PluginSlot)> {
-    std::iter::once(&project.mixer.master)
+/// Plugin slots of a project: inserts and instrument channels.
+pub fn plugin_slots(project: &Project) -> impl Iterator<Item = (PluginTarget, &PluginSlot)> {
+    let inserts = std::iter::once(&project.mixer.master)
         .chain(&project.mixer.tracks)
         .flat_map(|t| &t.inserts)
         .filter(|i| i.effect.kind == EffectKind::Plugin)
-        .filter_map(|i| i.effect.plugin.as_ref().map(|s| (i.id, s)))
+        .filter_map(|i| {
+            i.effect
+                .plugin
+                .as_ref()
+                .map(|s| (PluginTarget::Insert(i.id), s))
+        });
+    let channels = project
+        .channels
+        .iter()
+        .filter_map(|c| c.instrument().map(|s| (PluginTarget::Channel(c.id), s)));
+    inserts.chain(channels)
 }
 
 impl PluginHost {
@@ -283,7 +293,7 @@ impl PluginHost {
             sample_rate: f64::from(sample_rate),
             ..self.setup
         };
-        let wanted: HashMap<InsertId, &PluginSlot> = plugin_inserts(project).collect();
+        let wanted: HashMap<PluginTarget, &PluginSlot> = plugin_slots(project).collect();
         // Drop removed or replaced instances.
         self.live
             .retain(|id, l| wanted.get(id).is_some_and(|s| s.class_id == l.class_id));
@@ -364,7 +374,7 @@ impl PluginHost {
 
     /// The engine slot for `id`, used while compiling. A waiting instance
     /// goes into this snapshot; a sent one is carried over.
-    pub fn supply(&mut self, id: InsertId, generation: u64) -> PluginRt {
+    pub fn supply(&mut self, id: PluginTarget, generation: u64) -> PluginRt {
         match self.live.get_mut(&id) {
             Some(l) => match l.processor.take() {
                 Some(p) => {
@@ -380,7 +390,7 @@ impl PluginHost {
 
     /// A slot with the instance's latency but without the instance, for
     /// snapshots that are only measured (no engine).
-    pub fn latency_only(&self, id: InsertId) -> PluginRt {
+    pub fn latency_only(&self, id: PluginTarget) -> PluginRt {
         self.live
             .get(&id)
             .map_or_else(PluginRt::missing, |l| PluginRt::carried(l.latency))
@@ -405,9 +415,18 @@ impl PluginHost {
     /// exporting, PLG-070).
     pub fn capture_states(&mut self, project: &mut Project) {
         let tracks = std::iter::once(&mut project.mixer.master).chain(&mut project.mixer.tracks);
-        for ins in tracks.flat_map(|t| &mut t.inserts) {
-            let (Some(live), Some(slot)) = (self.live.get_mut(&ins.id), &mut ins.effect.plugin)
-            else {
+        let inserts = tracks
+            .flat_map(|t| &mut t.inserts)
+            .filter_map(|i| Some((PluginTarget::Insert(i.id), i.effect.plugin.as_mut()?)));
+        let channels = project
+            .channels
+            .iter_mut()
+            .filter_map(|c| match &mut c.source {
+                ChannelSource::Plugin { plugin } => Some((PluginTarget::Channel(c.id), plugin)),
+                ChannelSource::Sampler { .. } => None,
+            });
+        for (target, slot) in inserts.chain(channels) {
+            let Some(live) = self.live.get_mut(&target) else {
                 continue;
             };
             if let Ok(s) = live.controller.state() {
@@ -437,7 +456,7 @@ impl PluginHost {
 
     /// Opens or closes the plugin's own editor window. `Err` explains
     /// why it cannot open (no editor, no window system, plugin not loaded).
-    pub fn toggle_editor(&mut self, id: InsertId, title: &str) -> Result<(), String> {
+    pub fn toggle_editor(&mut self, id: PluginTarget, title: &str) -> Result<(), String> {
         let live = self
             .live
             .get_mut(&id)
@@ -455,7 +474,7 @@ impl PluginHost {
         }
     }
 
-    pub fn editor_open(&self, id: InsertId) -> bool {
+    pub fn editor_open(&self, id: PluginTarget) -> bool {
         self.live.get(&id).is_some_and(|l| l.editor.is_some())
     }
 
@@ -474,12 +493,12 @@ impl PluginHost {
         }
     }
 
-    pub fn controller(&mut self, id: InsertId) -> Option<&mut Vst3Controller> {
+    pub fn controller(&mut self, id: PluginTarget) -> Option<&mut Vst3Controller> {
         self.live.get_mut(&id).map(|l| &mut l.controller)
     }
 
     /// Whether the plugin in `id` is held back after a crash (PLG-025).
-    pub fn held_back(&self, id: InsertId) -> bool {
+    pub fn held_back(&self, id: PluginTarget) -> bool {
         self.failed
             .keys()
             .any(|(i, class)| *i == id && self.catalog.crashed.contains_key(class))
@@ -487,7 +506,7 @@ impl PluginHost {
 
     /// Allows a held-back plugin class to load again; the next sync
     /// tries it.
-    pub fn retry(&mut self, id: InsertId) {
+    pub fn retry(&mut self, id: PluginTarget) {
         let classes: Vec<String> = self
             .failed
             .keys()
@@ -501,7 +520,7 @@ impl PluginHost {
         let _ = self.catalog.save_cached();
     }
 
-    pub fn problem(&self, id: InsertId) -> Option<String> {
+    pub fn problem(&self, id: PluginTarget) -> Option<String> {
         if self.live.contains_key(&id) {
             return None;
         }
@@ -555,9 +574,10 @@ mod tests {
         );
 
         let mut p = Project::new();
-        let id = InsertId(p.ids.next());
+        let insert = jdance_domain::InsertId(p.ids.next());
+        let id = PluginTarget::Insert(insert);
         p.mixer.master.inserts.push(Insert {
-            id,
+            id: insert,
             bypass: false,
             effect: Effect::plugin(PluginSlot {
                 format: "vst3".into(),
@@ -582,5 +602,52 @@ mod tests {
         assert!(!host.held_back(id));
         assert!(!marker.exists(), "marker removed after a successful load");
         *config::TEST_DIR.lock().unwrap() = None;
+    }
+}
+
+#[cfg(test)]
+mod instrument_tests {
+    use super::*;
+    use jdance_domain::Channel;
+
+    #[test]
+    fn instrument_channels_get_live_instances() {
+        let bundle = jdance_test_support::test_plugin_bundle(jdance_plugin_vst3::bundle_binary);
+        let descriptors = jdance_plugin_vst3::scan_in_process(bundle).unwrap();
+        let synth = descriptors
+            .iter()
+            .find(|d| d.plugin.name == "JD Test Synth")
+            .unwrap()
+            .clone();
+        let mut catalog = Catalog::default();
+        catalog.modules.insert(
+            bundle.to_path_buf(),
+            ModuleEntry {
+                key: None,
+                result: ModuleResult::Ok(descriptors),
+            },
+        );
+        let mut host = PluginHost::with_catalog(catalog);
+        let mut p = Project::new();
+        let id = jdance_domain::ChannelId(p.ids.next());
+        p.channels.push(Channel::new_instrument(
+            id,
+            "Synth",
+            PluginSlot {
+                format: "vst3".into(),
+                class_id: synth.plugin.class_id.clone(),
+                name: synth.plugin.name.clone(),
+                vendor: synth.plugin.vendor.clone(),
+                version: synth.plugin.version.clone(),
+                category: synth.category.clone(),
+                component_state: Vec::new(),
+                controller_state: Vec::new(),
+            },
+        ));
+        let messages = host.sync(&p, 48_000, 1);
+        assert!(messages.is_empty(), "{messages:?}");
+        assert!(host.controller(PluginTarget::Channel(id)).is_some());
+        let rt = host.supply(PluginTarget::Channel(id), 1);
+        assert!(rt.has_instance());
     }
 }

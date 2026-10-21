@@ -79,6 +79,8 @@ pub struct JdanceApp<H: Host, S: ProjectStore> {
     playlist_view: playlist::PlaylistView,
     /// Piano roll shown instead of the playlist.
     piano: Option<piano::PianoRoll>,
+    /// Instrument channel whose parameter window is open.
+    instrument_params: Option<ChannelId>,
     /// Shortening that needs confirmation: (pattern, steps, dropped).
     pending_length: Option<(PatternId, u32, usize)>,
     notices: Vec<(Notice, f64)>,
@@ -127,6 +129,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             mode_sent: None,
             playlist_view: playlist::PlaylistView::default(),
             piano: None,
+            instrument_params: None,
             pending_length: None,
             notices: Vec::new(),
             pending: None,
@@ -986,6 +989,38 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
         for action in mix.actions {
             self.mixer_action(action, now);
         }
+        if let Some(id) = out.toggle_editor {
+            let title = self
+                .project
+                .channel(id)
+                .map_or_else(String::new, |c| c.name.clone());
+            self.host
+                .toggle_plugin_editor(jdance_domain::PluginTarget::Channel(id), &title);
+        }
+        if let Some(id) = out.show_params {
+            self.instrument_params = Some(id);
+        }
+        for d in std::mem::take(&mut out.new_instruments) {
+            let slot = PluginSlot {
+                format: "vst3".into(),
+                class_id: d.plugin.class_id,
+                name: d.plugin.name.clone(),
+                vendor: d.plugin.vendor,
+                version: d.plugin.version,
+                category: d.category,
+                component_state: Vec::new(),
+                controller_state: Vec::new(),
+            };
+            match jdance_commands::add_instrument_channel(
+                &mut self.history,
+                &mut self.project,
+                d.plugin.name,
+                slot,
+            ) {
+                Ok(_) => self.sync_needed = true,
+                Err(e) => self.notify(Notice::error(e.to_string()), now),
+            }
+        }
         for (name, sample) in out.new_channels {
             match add_sampler_channel(&mut self.history, &mut self.project, name) {
                 Ok(id) => {
@@ -1005,6 +1040,32 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
         }
         if self.show_plugins {
             self.show_plugins = plugins::window(&ctx, &mut self.host);
+        }
+        if let Some(id) = self.instrument_params {
+            match self
+                .project
+                .channel(id)
+                .and_then(|c| c.instrument().map(|s| (c, s)))
+            {
+                Some((ch, slot)) => {
+                    let mut open = true;
+                    egui::Window::new(format!("{} · parameters", ch.name))
+                        .id(egui::Id::unique(("instrument_params", id.0)))
+                        .open(&mut open)
+                        .show(&ctx, |ui| {
+                            mixer::plugin_params_ui(
+                                ui,
+                                jdance_domain::PluginTarget::Channel(id),
+                                Some(slot),
+                                &mut self.host,
+                            );
+                        });
+                    if !open {
+                        self.instrument_params = None;
+                    }
+                }
+                None => self.instrument_params = None,
+            }
         }
         self.rename_dialog(&ctx, now);
         self.length_dialog(&ctx, now);

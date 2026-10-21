@@ -8,8 +8,8 @@ use crate::com::{
 use crate::module::Vst3Module;
 use crate::uid;
 use jdance_plugin_api::{
-    ParamFlags, ParamInfo, PluginController, PluginError, PluginEvent, PluginProcessor,
-    PluginState, ProcessSetupInfo, Transport,
+    NoteEvent, NoteKind, ParamFlags, ParamInfo, PluginController, PluginError, PluginEvent,
+    PluginProcessor, PluginState, ProcessSetupInfo, Transport,
 };
 use std::ffi::c_void;
 use std::sync::Arc;
@@ -122,6 +122,7 @@ struct Buses {
     main_in: Option<usize>,
     aux_in: Option<usize>,
     main_out: usize,
+    has_events: bool,
 }
 
 unsafe fn configure_buses(
@@ -139,6 +140,7 @@ unsafe fn configure_buses(
             .then_some(info.busType)
     };
     let (inputs, outputs) = (count(audio, input), count(audio, output));
+    let has_events = count(event, input) > 0;
     if outputs == 0 {
         return Err(PluginError::Unsupported(
             "plugin has no audio output".into(),
@@ -159,9 +161,12 @@ unsafe fn configure_buses(
         for i in 0..outputs {
             component.activateBus(audio, output, i as i32, u8::from(i == main_out));
         }
+        // The first event input carries notes for instruments
+        // (PLG-031); other event buses stay off.
         for d in [input, output] {
             for i in 0..count(event, d) {
-                component.activateBus(event, d, i as i32, 0);
+                let on = d == input && i == 0;
+                component.activateBus(event, d, i as i32, u8::from(on));
             }
         }
     }
@@ -187,6 +192,7 @@ unsafe fn configure_buses(
         main_in,
         aux_in,
         main_out,
+        has_events,
     })
 }
 
@@ -367,6 +373,38 @@ pub fn instantiate(
     }
 }
 
+/// A note event in VST3 form, `base` samples into the block.
+fn vst_event(e: &NoteEvent, base: usize) -> Event {
+    let mut ev: Event = unsafe { std::mem::zeroed() };
+    ev.busIndex = 0;
+    ev.sampleOffset = (e.offset as usize).saturating_sub(base) as i32;
+    ev.flags = Event_::EventFlags_::kIsLive as u16;
+    match e.kind {
+        NoteKind::On { velocity } => {
+            ev.r#type = Event_::EventTypes_::kNoteOnEvent as u16;
+            ev.__field0.noteOn = NoteOnEvent {
+                channel: 0,
+                pitch: i16::from(e.key),
+                tuning: 0.0,
+                velocity,
+                length: 0,
+                noteId: e.note_id,
+            };
+        }
+        NoteKind::Off => {
+            ev.r#type = Event_::EventTypes_::kNoteOffEvent as u16;
+            ev.__field0.noteOff = NoteOffEvent {
+                channel: 0,
+                pitch: i16::from(e.key),
+                velocity: 0.0,
+                noteId: e.note_id,
+                tuning: 0.0,
+            };
+        }
+    }
+    ev
+}
+
 /// Realtime half (PLG-011). All buffers are allocated here (PLG-041).
 pub struct Vst3Processor {
     processor: ComPtr<IAudioProcessor>,
@@ -440,7 +478,7 @@ impl Vst3Processor {
             out_buses: Vec::with_capacity(buses.outputs),
             in_changes: ComWrapper::new(ParamChanges::new()),
             out_changes: ComWrapper::new(ParamChanges::new()),
-            events: ComWrapper::new(EventList),
+            events: ComWrapper::new(EventList::new()),
             context: unsafe { std::mem::zeroed() },
             continuous: 0,
             from_ui,
@@ -540,6 +578,7 @@ impl Vst3Processor {
         };
         let ok = unsafe { self.processor.process(&mut data) } == kResultOk;
         self.in_changes.clear();
+        self.events.clear();
         let to_ui = &mut self.to_ui;
         self.out_changes.for_each_last(|id, v| {
             // A full queue drops the update (RT-011); the next one wins.
@@ -586,6 +625,48 @@ impl PluginProcessor for Vst3Processor {
             if self.run(n) {
                 left[range.clone()].copy_from_slice(&self.output[0][..n]);
                 right[range].copy_from_slice(&self.output[1][..n]);
+            }
+            done += n;
+        }
+    }
+
+    fn process_instrument(
+        &mut self,
+        left: &mut [f32],
+        right: &mut [f32],
+        events: &[NoteEvent],
+        transport: &Transport,
+    ) {
+        let total = left.len().min(right.len());
+        while let Ok((id, v)) = self.from_ui.pop() {
+            if !self.in_changes.add(id, 0, v) {
+                break;
+            }
+        }
+        let mut done = 0;
+        let mut next = 0;
+        while done < total {
+            let n = (total - done).min(self.max_block);
+            for ch in 0..2 {
+                self.input[ch][..n].fill(0.0);
+                self.sidechain[ch][..n].fill(0.0);
+            }
+            self.silence[..n].fill(0.0);
+            // Events of this chunk, offsets relative to its start.
+            while let Some(e) = events.get(next).filter(|e| (e.offset as usize) < done + n) {
+                next += 1;
+                if self.buses.has_events {
+                    self.events.push(vst_event(e, done));
+                }
+            }
+            self.fill_context(transport, done);
+            let range = done..done + n;
+            if self.run(n) {
+                left[range.clone()].copy_from_slice(&self.output[0][..n]);
+                right[range].copy_from_slice(&self.output[1][..n]);
+            } else {
+                left[range.clone()].fill(0.0);
+                right[range].fill(0.0);
             }
             done += n;
         }

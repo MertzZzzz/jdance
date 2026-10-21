@@ -8,7 +8,7 @@ use jdance_audio_api::{
     ActiveStreamInfo, AudioError, BackendId, DeviceCapabilities, DeviceInfo, DeviceKey,
     DeviceSettings, StatsReading, StreamState,
 };
-use jdance_domain::{ExportOptions, InsertId, PatternId, Project, SampleRef, TrackId};
+use jdance_domain::{ExportOptions, PatternId, PluginTarget, Project, SampleRef, TrackId};
 use jdance_plugin_api::{ParamInfo, PluginDescriptor};
 use std::path::{Path, PathBuf};
 
@@ -195,19 +195,28 @@ pub trait Host {
     fn plugin_effects(&self) -> Vec<PluginDescriptor> {
         Vec::new()
     }
-    /// Parameters of the live instance in `insert`; `None` if the plugin
+    /// Instrument plugins from the last scan.
+    fn plugin_instruments(&self) -> Vec<PluginDescriptor> {
+        Vec::new()
+    }
+    /// Parameters of the live instance for `target`; `None` if the plugin
     /// is not loaded.
-    fn plugin_params(&mut self, _insert: InsertId) -> Option<Vec<PluginParamView>> {
+    fn plugin_params(&mut self, _target: PluginTarget) -> Option<Vec<PluginParamView>> {
         None
     }
-    fn set_plugin_param(&mut self, _insert: InsertId, _id: u32, _value: f64) {}
+    fn set_plugin_param(&mut self, _target: PluginTarget, _id: u32, _value: f64) {}
     /// The plugin's parse of a typed value, normalized.
-    fn plugin_param_from_text(&mut self, _insert: InsertId, _id: u32, _text: &str) -> Option<f64> {
+    fn plugin_param_from_text(
+        &mut self,
+        _target: PluginTarget,
+        _id: u32,
+        _text: &str,
+    ) -> Option<f64> {
         None
     }
     /// Opens or closes the plugin's own editor window (PLG-060).
-    fn toggle_plugin_editor(&mut self, _insert: InsertId, _title: &str) {}
-    fn plugin_editor_open(&self, _insert: InsertId) -> bool {
+    fn toggle_plugin_editor(&mut self, _target: PluginTarget, _title: &str) {}
+    fn plugin_editor_open(&self, _target: PluginTarget) -> bool {
         false
     }
     fn any_plugin_editor_open(&self) -> bool {
@@ -215,12 +224,12 @@ pub trait Host {
     }
     /// The plugin in `insert` crashed the application last time and is
     /// not loaded automatically (PLG-025).
-    fn plugin_held_back(&self, _insert: InsertId) -> bool {
+    fn plugin_held_back(&self, _target: PluginTarget) -> bool {
         false
     }
-    fn retry_plugin(&mut self, _insert: InsertId) {}
+    fn retry_plugin(&mut self, _target: PluginTarget) {}
     /// Why the plugin in `insert` is not loaded, if it is not.
-    fn plugin_problem(&self, _insert: InsertId) -> Option<String> {
+    fn plugin_problem(&self, _target: PluginTarget) -> Option<String> {
         None
     }
     /// Blocklisted modules with reasons (PLG-024).

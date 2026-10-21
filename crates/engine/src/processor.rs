@@ -221,6 +221,19 @@ impl EngineProcessor {
         for v in self.voices.iter_mut() {
             v.inner.release(len);
         }
+        self.instruments_off();
+    }
+
+    /// Note-off for every sounding instrument note, at the next block
+    /// start (PLG-033).
+    fn instruments_off(&mut self) {
+        if let Some(s) = &mut self.snapshot {
+            for ch in &mut s.channels {
+                if let Some(inst) = &mut ch.instrument {
+                    inst.all_off(0);
+                }
+            }
+        }
     }
 
     fn finish_stop(&mut self) {
@@ -271,11 +284,13 @@ impl EngineProcessor {
                     self.stopping = true;
                     self.play_after_stop = false;
                     self.out_fade.set_target(0.0);
+                    self.instruments_off();
                 }
                 Command::Panic => {
                     for v in self.voices.iter_mut() {
                         v.inner.stop();
                     }
+                    self.instruments_off();
                 }
                 Command::Seek(p) => {
                     // Notes that started before the new position are not
@@ -435,14 +450,28 @@ impl EngineProcessor {
                     Some((_, b)) => b.min(p + remaining),
                     None => p + remaining,
                 };
+                // Instrument gates ending in this segment.
+                for ch in snap.channels.iter_mut() {
+                    if let Some(inst) = &mut ch.instrument {
+                        inst.gates(p, seg_end, done);
+                    }
+                }
                 let first = snap.events.partition_point(|e| e.pos < p);
                 let mut k = first;
                 while let Some(e) = snap.events.get(k).copied().filter(|e| e.pos < seg_end) {
                     let offset = done + (e.pos - p) as usize;
+                    k += 1;
+                    if let Some(inst) = snap
+                        .channels
+                        .get_mut(e.channel)
+                        .and_then(|c| c.instrument.as_mut())
+                    {
+                        inst.note_on(offset, e.pos, e.key, e.velocity, e.length);
+                        continue;
+                    }
                     render_voices(snap, voices, channels, cursor, offset);
                     cursor = offset;
                     trigger(snap, voices, voice_serial, feedback, &e);
-                    k += 1;
                 }
                 done += (seg_end - p) as usize;
                 match wrap {
@@ -453,6 +482,11 @@ impl EngineProcessor {
                         cursor = done;
                         for v in voices.iter_mut() {
                             v.inner.release(release);
+                        }
+                        for ch in snap.channels.iter_mut() {
+                            if let Some(inst) = &mut ch.instrument {
+                                inst.all_off(done);
+                            }
                         }
                         p = a;
                     }
@@ -467,6 +501,13 @@ impl EngineProcessor {
                 && p >= snap.end + snap.end_tail;
         }
         render_voices(snap, voices, channels, cursor, n);
+        // Instruments render whole blocks, also while stopped (tails).
+        for (ci, ch) in snap.channels.iter_mut().enumerate() {
+            if let Some(inst) = &mut ch.instrument {
+                let (l, r) = channels.get_mut(ci, n);
+                inst.render(l, r, &transport);
+            }
+        }
 
         // 2. Channel gain and compensation, summed into bus inputs.
         for (ci, ch) in snap.channels.iter_mut().enumerate() {

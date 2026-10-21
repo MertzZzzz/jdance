@@ -51,9 +51,16 @@ enum Mode {
     Latency = 1,
     Sidechain = 2,
     Logger = 3,
+    Synth = 4,
 }
 
-const MODES: [Mode; 4] = [Mode::Gain, Mode::Latency, Mode::Sidechain, Mode::Logger];
+const MODES: [Mode; 5] = [
+    Mode::Gain,
+    Mode::Latency,
+    Mode::Sidechain,
+    Mode::Logger,
+    Mode::Synth,
+];
 
 impl Mode {
     fn name(self) -> &'static str {
@@ -62,6 +69,7 @@ impl Mode {
             Mode::Latency => "JD Test Latency",
             Mode::Sidechain => "JD Test Sidechain",
             Mode::Logger => "JD Test Logger",
+            Mode::Synth => "JD Test Synth",
         }
     }
 
@@ -77,7 +85,7 @@ impl Mode {
         match self {
             Mode::Gain => &[P_GAIN, P_BYPASS],
             Mode::Logger => &[P_GAIN, P_FIXED, P_OUT],
-            Mode::Latency | Mode::Sidechain => &[P_GAIN],
+            Mode::Latency | Mode::Sidechain | Mode::Synth => &[P_GAIN],
         }
     }
 }
@@ -137,7 +145,14 @@ struct Dsp {
     delay: [[f32; LATENCY]; 2],
     pos: usize,
     log: Vec<(ParamID, i32, f64)>,
+    /// Synth voices: (key, phase increment per sample, phase, amplitude).
+    voices: Vec<(u8, f64, f64, f32)>,
+    sample_rate: f64,
 }
+
+/// Synth event log entries use these ids: (id, offset, key).
+pub const LOG_NOTE_ON: u32 = 0x1000;
+pub const LOG_NOTE_OFF: u32 = 0x1001;
 
 struct Processor {
     mode: Mode,
@@ -162,6 +177,8 @@ impl Processor {
                 delay: [[0.0; LATENCY]; 2],
                 pos: 0,
                 log: Vec::with_capacity(LOG_CAPACITY),
+                voices: Vec::with_capacity(32),
+                sample_rate: 48_000.0,
             }),
         }
     }
@@ -171,7 +188,68 @@ impl Processor {
     }
 
     fn input_buses(&self) -> i32 {
-        if self.mode == Mode::Sidechain { 2 } else { 1 }
+        match self.mode {
+            Mode::Sidechain => 2,
+            Mode::Synth => 0,
+            _ => 1,
+        }
+    }
+}
+
+impl Processor {
+    /// Sine voices from note events; logs every event (offset, key).
+    unsafe fn synth(&self, data: &ProcessData, dsp: &mut Dsp, n: usize) {
+        let mut events = Vec::new();
+        if let Some(list) = unsafe { ComRef::from_raw(data.inputEvents) } {
+            for i in 0..unsafe { list.getEventCount() } {
+                let mut e: Event = unsafe { std::mem::zeroed() };
+                if unsafe { list.getEvent(i, &mut e) } == kResultOk {
+                    events.push(e);
+                }
+            }
+        }
+        let on = Event_::EventTypes_::kNoteOnEvent as u16;
+        let off = Event_::EventTypes_::kNoteOffEvent as u16;
+        let outs = if data.numOutputs > 0 && unsafe { (*data.outputs).numChannels } == 2 {
+            unsafe { std::slice::from_raw_parts((*data.outputs).__field0.channelBuffers32, 2) }
+        } else {
+            &[]
+        };
+        let gain = (2.0 * self.gain()) as f32;
+        let mut k = 0;
+        for i in 0..n {
+            while let Some(e) = events.get(k).filter(|e| e.sampleOffset as usize <= i) {
+                k += 1;
+                let (key, id) = if e.r#type == on {
+                    let note = unsafe { e.__field0.noteOn };
+                    let key = note.pitch.clamp(0, 127) as u8;
+                    let inc = 440.0 * 2f64.powf((f64::from(key) - 69.0) / 12.0) / dsp.sample_rate;
+                    if dsp.voices.len() < dsp.voices.capacity() {
+                        dsp.voices.push((key, inc, 0.0, note.velocity * 0.25));
+                    }
+                    (key, LOG_NOTE_ON)
+                } else if e.r#type == off {
+                    let key = unsafe { e.__field0.noteOff }.pitch.clamp(0, 127) as u8;
+                    if let Some(v) = dsp.voices.iter().position(|v| v.0 == key) {
+                        dsp.voices.remove(v);
+                    }
+                    (key, LOG_NOTE_OFF)
+                } else {
+                    continue;
+                };
+                if dsp.log.len() < LOG_CAPACITY {
+                    dsp.log.push((id, e.sampleOffset, f64::from(key)));
+                }
+            }
+            let mut y = 0.0f32;
+            for v in &mut dsp.voices {
+                y += (v.2 * std::f64::consts::TAU).sin() as f32 * v.3;
+                v.2 = (v.2 + v.1).fract();
+            }
+            for ch in outs {
+                unsafe { *ch.add(i) = y * gain };
+            }
+        }
     }
 }
 
@@ -214,6 +292,11 @@ impl IComponentTrait for Processor {
     }
 
     unsafe fn getBusCount(&self, media_type: MediaType, dir: BusDirection) -> i32 {
+        if media_type == MediaTypes_::kEvent as MediaType {
+            return i32::from(
+                self.mode == Mode::Synth && dir == BusDirections_::kInput as BusDirection,
+            );
+        }
         if media_type != MediaTypes_::kAudio as MediaType {
             return 0;
         }
@@ -231,6 +314,19 @@ impl IComponentTrait for Processor {
         index: i32,
         bus: *mut BusInfo,
     ) -> tresult {
+        if media_type == MediaTypes_::kEvent as MediaType {
+            if index != 0 || unsafe { self.getBusCount(media_type, dir) } == 0 {
+                return kInvalidArgument;
+            }
+            let bus = unsafe { &mut *bus };
+            bus.mediaType = media_type;
+            bus.direction = dir;
+            bus.channelCount = 1;
+            copy_wstring("Notes", &mut bus.name);
+            bus.busType = BusTypes_::kMain as BusType;
+            bus.flags = BusInfo_::BusFlags_::kDefaultActive as u32;
+            return kResultOk;
+        }
         if media_type != MediaTypes_::kAudio as MediaType
             || index < 0
             || index >= unsafe { self.getBusCount(media_type, dir) }
@@ -372,6 +468,9 @@ impl IAudioProcessorTrait for Processor {
         if setup.symbolicSampleSize != SymbolicSampleSizes_::kSample32 as i32 {
             return kResultFalse;
         }
+        if let Ok(mut d) = self.dsp.lock() {
+            d.sample_rate = setup.sampleRate;
+        }
         kResultOk
     }
 
@@ -416,6 +515,10 @@ impl IAudioProcessorTrait for Processor {
         }
 
         let n = data.numSamples as usize;
+        if self.mode == Mode::Synth {
+            unsafe { self.synth(data, &mut dsp, n) };
+            return kResultOk;
+        }
         if n == 0 || data.numInputs < 1 || data.numOutputs < 1 {
             return kResultOk;
         }
@@ -920,10 +1023,10 @@ impl IPluginFactory2Trait for Factory {
         } else {
             ComponentFlags_::kDistributable as u32
         };
-        let sub = if mode == Mode::Sidechain {
-            "Fx|Dynamics"
-        } else {
-            "Fx"
+        let sub = match mode {
+            Mode::Sidechain => "Fx|Dynamics",
+            Mode::Synth => "Instrument|Synth",
+            _ => "Fx",
         };
         copy_cstring(sub, &mut info.subCategories);
         copy_cstring("jdance tests", &mut info.vendor);

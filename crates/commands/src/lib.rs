@@ -400,7 +400,11 @@ impl Edit {
             }
             Edit::SetChannelSample(id, sample) => {
                 let ch = p.channel_mut(*id).ok_or(EditError::NoSuchChannel(*id))?;
-                let jdance_domain::ChannelSource::Sampler { sample: slot } = &mut ch.source;
+                let jdance_domain::ChannelSource::Sampler { sample: slot } = &mut ch.source else {
+                    return Err(EditError::Arrangement(
+                        "an instrument channel has no sample".into(),
+                    ));
+                };
                 Ok(Edit::SetChannelSample(
                     *id,
                     std::mem::replace(slot, sample.clone()),
@@ -642,6 +646,26 @@ pub fn add_sampler_channel(
         p,
         Edit::AddChannel {
             channel: Channel::new_sampler(id, name),
+            index,
+            rows: Vec::new(),
+        },
+    )?;
+    Ok(id)
+}
+
+/// Allocates an ID and appends a channel played by a plugin instrument.
+pub fn add_instrument_channel(
+    history: &mut History,
+    p: &mut Project,
+    name: impl Into<String>,
+    plugin: jdance_domain::PluginSlot,
+) -> Result<ChannelId, EditError> {
+    let id = ChannelId(p.ids.next());
+    let index = p.channels.len();
+    history.execute(
+        p,
+        Edit::AddChannel {
+            channel: Channel::new_instrument(id, name, plugin),
             index,
             rows: Vec::new(),
         },

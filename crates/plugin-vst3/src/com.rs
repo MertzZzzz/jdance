@@ -574,8 +574,35 @@ impl IParameterChangesTrait for ParamChanges {
     }
 }
 
-/// Empty event list for effects (instruments get note events in P2).
-pub struct EventList;
+/// Events per block; extra events are dropped (RT-011).
+pub const MAX_EVENTS: usize = 512;
+
+/// `IEventList` with fixed capacity: no allocation once built.
+pub struct EventList {
+    events: RefCell<Vec<Event>>,
+}
+
+impl EventList {
+    pub fn new() -> Self {
+        Self {
+            events: RefCell::new(Vec::with_capacity(MAX_EVENTS)),
+        }
+    }
+
+    pub fn clear(&self) {
+        self.events.borrow_mut().clear();
+    }
+
+    /// Host side; returns false when full.
+    pub fn push(&self, e: Event) -> bool {
+        let mut v = self.events.borrow_mut();
+        if v.len() == v.capacity() {
+            return false;
+        }
+        v.push(e);
+        true
+    }
+}
 
 impl Class for EventList {
     type Interfaces = (IEventList,);
@@ -583,14 +610,27 @@ impl Class for EventList {
 
 impl IEventListTrait for EventList {
     unsafe fn getEventCount(&self) -> i32 {
-        0
+        self.events.borrow().len() as i32
     }
 
-    unsafe fn getEvent(&self, _index: i32, _e: *mut Event) -> tresult {
-        kInvalidArgument
+    unsafe fn getEvent(&self, index: i32, e: *mut Event) -> tresult {
+        match self.events.borrow().get(index as usize) {
+            Some(ev) if !e.is_null() => {
+                unsafe { *e = *ev };
+                kResultOk
+            }
+            _ => kInvalidArgument,
+        }
     }
 
-    unsafe fn addEvent(&self, _e: *mut Event) -> tresult {
-        kResultFalse
+    unsafe fn addEvent(&self, e: *mut Event) -> tresult {
+        if e.is_null() {
+            return kInvalidArgument;
+        }
+        if self.push(unsafe { *e }) {
+            kResultOk
+        } else {
+            kResultFalse
+        }
     }
 }
