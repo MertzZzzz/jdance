@@ -76,25 +76,11 @@ fn structural(
     let routes = channel_tracks(p);
     let lanes = lane_tracks(p);
     let automation = p.automation.clone();
-    let existed: Vec<bool> = automation.iter().map(|l| l.target.exists(p)).collect();
     let result = f(p).and_then(|()| p.validate_routing().map_err(EditError::Routing));
     match result {
         Ok(()) => {
-            // Lanes of removed objects go with them (AUT-050); lanes that
-            // already had no target (missing plugin) stay.
-            let mut i = 0;
-            let p_ref: &Project = p;
-            let keep: Vec<bool> = p_ref
-                .automation
-                .iter()
-                .map(|l| {
-                    let k = !existed.get(i).copied().unwrap_or(false) || l.target.exists(p_ref);
-                    i += 1;
-                    k
-                })
-                .collect();
-            let mut k = keep.into_iter();
-            p.automation.retain(|_| k.next().unwrap_or(true));
+            // Automation sources of removed objects stay, shown as missing
+            // (AUT-050, spec 0.2.0 §10); undo reconnects them.
             Ok(Edit::RestoreMixer {
                 mixer: Box::new(mixer),
                 channel_tracks: routes,
@@ -409,7 +395,9 @@ mod tests {
         use jdance_domain::{AutoPoint, Curve};
         jdance_domain::AutomationLane {
             id: jdance_domain::AutomationId(0),
+            name: "A".into(),
             target,
+            length: 7680,
             points: vec![
                 AutoPoint {
                     tick: 3840,
@@ -444,30 +432,50 @@ mod tests {
         .unwrap();
         assert_eq!(p.automation[0].points[0].tick, 0, "sorted");
         assert_eq!(p.automation[0].id, id);
-        // One lane per target.
+        // Two sources may share a target; only their clips may not overlap.
         let other = AutomationId(p.ids.next());
+        h.execute(
+            &mut p,
+            Edit::SetAutomation {
+                id: other,
+                lane: Some(lane(AutomationTarget::TrackVolume(a))),
+            },
+        )
+        .unwrap();
+        let lane_id = p.playlist.lanes[0].id;
+        let clip = |id: u64, source, start| jdance_domain::AutomationClip {
+            id: jdance_domain::ClipId(id),
+            lane: lane_id,
+            source,
+            start,
+            offset: 0,
+            duration: 3840,
+            muted: false,
+        };
+        let (c1, c2) = (p.ids.next(), p.ids.next());
+        h.execute(&mut p, Edit::AddAutomationClip(clip(c1, id, 0)))
+            .unwrap();
+        let err = h
+            .execute(&mut p, Edit::AddAutomationClip(clip(c2, other, 1920)))
+            .unwrap_err();
+        assert!(format!("{err}").contains("overlap"), "{err}");
+        h.execute(&mut p, Edit::AddAutomationClip(clip(c2, other, 3840)))
+            .unwrap();
+        // A source used by clips stays.
         assert!(
-            h.execute(
-                &mut p,
-                Edit::SetAutomation {
-                    id: other,
-                    lane: Some(lane(AutomationTarget::TrackVolume(a))),
-                },
-            )
-            .is_err()
+            h.execute(&mut p, Edit::SetAutomation { id, lane: None })
+                .is_err()
         );
-        // A lane whose plugin is missing (no such insert) is kept.
-        let orphan = AutomationId(p.ids.next());
-        p.automation.push(jdance_domain::AutomationLane {
-            id: orphan,
-            ..lane(AutomationTarget::InsertBypass(InsertId(9999)))
-        });
-        h.execute(&mut p, Edit::RemoveTrack(a)).unwrap();
-        assert_eq!(p.automation.len(), 1, "the track's lane went with it");
-        assert_eq!(p.automation[0].id, orphan);
         h.undo(&mut p).unwrap();
-        assert_eq!(p.automation.len(), 2, "undo restores both");
-        assert!(p.automation_lane(id).is_some());
+        h.undo(&mut p).unwrap();
+        h.undo(&mut p).unwrap();
+        // Sources of a removed track stay, shown as missing; undo
+        // reconnects them.
+        h.execute(&mut p, Edit::RemoveTrack(a)).unwrap();
+        assert_eq!(p.automation.len(), 1);
+        assert!(!p.automation[0].target.exists(&p));
+        h.undo(&mut p).unwrap();
+        assert!(p.automation[0].target.exists(&p));
         // Remove the lane itself, then undo.
         h.execute(&mut p, Edit::SetAutomation { id, lane: None })
             .unwrap();

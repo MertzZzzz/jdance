@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Automation in the UI (ADR-014): "Automate" in the context menu of
-//! automatable controls, a mark on automated controls, lane labels and
-//! value texts for the envelope editor in the playlist.
+//! Automation in the UI (ADR-014, spec 0.2.0 §11): "Automate" in the
+//! context menu of automatable controls, a mark on automated controls,
+//! target labels and value texts.
 
 use crate::Host;
 use egui::{Color32, Response, Stroke, pos2};
@@ -16,11 +16,13 @@ pub(crate) const AUTOMATION_COLOR: Color32 = crate::theme::TEAL;
 /// Automation changes requested from a control.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum AutomationRequest {
-    /// New lane starting at the control's current normalized value.
+    /// New source starting at the control's current normalized value,
+    /// placed by a clip on a new lane.
     Create {
         target: AutomationTarget,
         initial: f32,
     },
+    Edit(AutomationId),
     Remove(AutomationId),
 }
 
@@ -52,8 +54,16 @@ pub(crate) fn attach(
     let resp = resp.interact(egui::Sense::click());
     resp.context_menu(|ui| match lane {
         Some(id) => {
-            ui.label("Automated: follows its lane during song playback");
-            if ui.button("Remove automation").clicked() {
+            ui.label("Automated: follows its clips during song playback");
+            if ui.button("Edit automation…").clicked() {
+                out.push(AutomationRequest::Edit(id));
+                ui.close();
+            }
+            if ui
+                .button("Remove automation")
+                .on_hover_text("Deletes the automation and its clips")
+                .clicked()
+            {
                 out.push(AutomationRequest::Remove(id));
                 ui.close();
             }
@@ -61,7 +71,7 @@ pub(crate) fn attach(
         None => {
             if ui
                 .button("Automate")
-                .on_hover_text("Create an envelope lane in the playlist")
+                .on_hover_text("Create an automation clip on a new Playlist lane")
                 .clicked()
             {
                 out.push(AutomationRequest::Create {
@@ -84,18 +94,6 @@ pub(crate) fn secondary_press(ui: &egui::Ui) -> bool {
     })
 }
 
-/// Header of a lane in the playlist.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct LaneInfo {
-    pub id: AutomationId,
-    /// What is automated, e.g. "Low gain".
-    pub name: String,
-    /// Where it lives, e.g. "Bass · Parametric EQ".
-    pub context: String,
-    /// The target no longer exists (AUT-050); the lane is kept.
-    pub missing: bool,
-}
-
 fn insert_of(p: &Project, id: jdance_domain::InsertId) -> Option<(&MixerTrack, &Insert)> {
     p.mixer
         .all_tracks()
@@ -108,28 +106,12 @@ fn plugin_param_name(host: &mut dyn Host, target: PluginTarget, param: u32) -> S
         .map_or_else(|| format!("Param {param}"), |p| p.info.name)
 }
 
-pub(crate) fn lane_infos(p: &Project, host: &mut dyn Host) -> Vec<LaneInfo> {
-    p.automation
-        .iter()
-        .map(|lane| {
-            let missing = !lane.target.exists(p);
-            let (name, context) = if missing {
-                ("Target not found".to_owned(), String::new())
-            } else {
-                label(p, &lane.target, host)
-            };
-            LaneInfo {
-                id: lane.id,
-                name,
-                context,
-                missing,
-            }
-        })
-        .collect()
-}
-
 /// (name, context) of an existing target.
-fn label(p: &Project, target: &AutomationTarget, host: &mut dyn Host) -> (String, String) {
+pub(crate) fn label(
+    p: &Project,
+    target: &AutomationTarget,
+    host: &mut dyn Host,
+) -> (String, String) {
     let track = |id| {
         p.mixer
             .track(id)
@@ -175,6 +157,23 @@ fn label(p: &Project, target: &AutomationTarget, host: &mut dyn Host) -> (String
             plugin_param_name(host, *pt, *param),
             p.channel(*c).map_or("?", |c| c.name.as_str()).to_owned(),
         ),
+        AutomationTarget::AudioClipGain(c) => (
+            "Clip gain".into(),
+            p.playlist
+                .audio_clip(*c)
+                .and_then(|c| p.asset(c.asset))
+                .map_or_else(|| "?".to_owned(), |a| a.name.clone()),
+        ),
+    }
+}
+
+/// A name for a new source of `target`, e.g. "Bass volume".
+pub(crate) fn source_name(p: &Project, target: &AutomationTarget, host: &mut dyn Host) -> String {
+    let (name, context) = label(p, target, host);
+    if context.is_empty() {
+        name
+    } else {
+        format!("{context} · {name}")
     }
 }
 
@@ -184,7 +183,9 @@ pub(crate) fn value_text(p: &Project, target: &AutomationTarget, n: f32) -> Stri
         return format!("{:.0}%", n * 100.0);
     };
     match target {
-        AutomationTarget::TrackVolume(_) | AutomationTarget::SendLevel(_) => {
+        AutomationTarget::TrackVolume(_)
+        | AutomationTarget::SendLevel(_)
+        | AutomationTarget::AudioClipGain(_) => {
             if v <= 0.0 {
                 "-inf dB".into()
             } else {

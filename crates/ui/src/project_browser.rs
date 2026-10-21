@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Project Browser left of the Playlist (spec 0.2.0 §10, UI-VIS §7.2):
-//! the project's patterns and audio files, not the disk. The selected item
+//! the project's patterns, audio files and automations, not the disk. The selected item
 //! is what Draw and Paint place; items drag into the Playlist;
 //! double-click opens the editor.
 
 use crate::playlist::Source;
-use crate::theme;
+use crate::{Host, theme};
 use egui::{RichText, Sense, Stroke, StrokeKind, vec2};
-use jdance_domain::{AssetId, PatternId, Project};
+use jdance_domain::{AssetId, AutomationId, PatternId, Project};
 
 pub(crate) const WIDTH: f32 = 180.0;
 
@@ -15,6 +15,7 @@ pub(crate) const WIDTH: f32 = 180.0;
 pub(crate) enum Tab {
     Patterns,
     Samples,
+    Automations,
 }
 
 /// Payload of a drag from the Project Browser.
@@ -36,6 +37,11 @@ pub(crate) enum ProjectAction {
     PreviewAsset(AssetId),
     LoadIntoSampler(AssetId),
     DeleteAsset(AssetId),
+    OpenAutomation(AutomationId),
+    RenameAutomation(AutomationId),
+    DuplicateAutomation(AutomationId),
+    /// Ask before deleting when clips use it.
+    DeleteAutomation(AutomationId),
 }
 
 #[derive(Debug)]
@@ -60,11 +66,17 @@ impl ProjectBrowser {
         ui: &mut egui::Ui,
         project: &Project,
         source: Option<Source>,
+        host: &mut dyn Host,
     ) -> Vec<ProjectAction> {
         let mut out = Vec::new();
         ui.set_width(WIDTH);
         ui.horizontal(|ui| {
-            for (tab, label) in [(Tab::Patterns, "Patterns"), (Tab::Samples, "Samples")] {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            for (tab, label) in [
+                (Tab::Patterns, "Patterns"),
+                (Tab::Samples, "Samples"),
+                (Tab::Automations, "Auto"),
+            ] {
                 if ui.selectable_label(self.tab == tab, label).clicked() {
                     self.tab = tab;
                 }
@@ -181,6 +193,67 @@ impl ProjectBrowser {
                         .clicked()
                     {
                         out.push(ProjectAction::ImportFiles);
+                    }
+                }
+                Tab::Automations => {
+                    if project.automation.is_empty() {
+                        ui.label(
+                            RichText::new(
+                                "No automation yet: right-click a mixer control or a clip and choose Automate",
+                            )
+                            .size(11.0)
+                            .color(theme::MUTED),
+                        );
+                    }
+                    for a in project.automation.iter().filter(|a| matches(&a.name)) {
+                        let uses = project.automation_usage(a.id);
+                        let src = Source::Automation(a.id);
+                        let missing = !a.target.exists(project);
+                        let target = if missing {
+                            "target not found".to_owned()
+                        } else {
+                            let (name, context) = crate::automation::label(project, &a.target, host);
+                            if context.is_empty() {
+                                name
+                            } else {
+                                format!("{context} · {name}")
+                            }
+                        };
+                        let count = if missing {
+                            format!("! {uses}")
+                        } else {
+                            format!("{uses}")
+                        };
+                        let resp = item(ui, &a.name, &count, source == Some(src));
+                        let resp = resp.on_hover_text(format!(
+                            "{target} · {} bars · used by {uses} clip(s)\nClick: place with Draw/Paint · drag into the Playlist · double-click: Automation Editor",
+                            a.length.div_ceil(3840)
+                        ));
+                        resp.dnd_set_drag_payload(ProjectItem(src));
+                        if resp.clicked() {
+                            out.push(ProjectAction::Select(src));
+                        }
+                        if resp.double_clicked() {
+                            out.push(ProjectAction::OpenAutomation(a.id));
+                        }
+                        resp.context_menu(|ui| {
+                            if ui.button("Open in Automation Editor").clicked() {
+                                out.push(ProjectAction::OpenAutomation(a.id));
+                                ui.close();
+                            }
+                            if ui.button("Rename…").clicked() {
+                                out.push(ProjectAction::RenameAutomation(a.id));
+                                ui.close();
+                            }
+                            if ui.button("Duplicate").clicked() {
+                                out.push(ProjectAction::DuplicateAutomation(a.id));
+                                ui.close();
+                            }
+                            if ui.button("Delete…").clicked() {
+                                out.push(ProjectAction::DeleteAutomation(a.id));
+                                ui.close();
+                            }
+                        });
                     }
                 }
             });

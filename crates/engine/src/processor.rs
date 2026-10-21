@@ -591,7 +591,7 @@ impl EngineProcessor {
                 let seg = (seg_end - p) as usize;
                 for c in &snap.audio_clips {
                     let (l, r) = inputs.get_mut(c.track, done + seg);
-                    c.render_add(p, &mut l[done..], &mut r[done..]);
+                    c.render_add(p, &mut l[done..], &mut r[done..], &snap.automation);
                 }
                 done += seg;
                 match wrap {
@@ -747,17 +747,17 @@ impl EngineProcessor {
                         if let Some(lane) = send_lane {
                             let at = timeline.pos_at(i);
                             let step = AUTOMATION_STEP as u64;
-                            if i == 0
-                                && starting
-                                && let Some(v) = automation[lane].plain_at(at)
-                            {
-                                send.gain.reset(v);
+                            let value =
+                                |pos| automation[lane].plain_at(pos).unwrap_or(send.base_level);
+                            if i == 0 && starting {
+                                send.gain.reset(value(at));
                             }
                             if at.is_multiple_of(step) || (i == 0 && starting) {
                                 let to_boundary = step - at % step;
-                                if let Some(v) = automation[lane].plain_at(at + to_boundary - 1) {
-                                    send.gain.set_target_over(v, to_boundary as u32);
-                                }
+                                send.gain.set_target_over(
+                                    value(at + to_boundary - 1),
+                                    to_boundary as u32,
+                                );
                             }
                         }
                         let g = send.gain.next_value();
@@ -925,10 +925,10 @@ fn process_inserts(
                 if !at.is_multiple_of(AUTOMATION_STEP as u64) && !(o == 0 && auto.starting) {
                     continue;
                 }
-                for &(index, lane, _) in &ins.auto_params {
-                    if let Some(v) = auto.automation[lane].plain_at(at)
-                        && events.len() < events.capacity()
-                    {
+                for &(index, lane, base) in &ins.auto_params {
+                    // Outside the clips: back to the manual value.
+                    let v = auto.automation[lane].plain_at(at).unwrap_or(base);
+                    if events.len() < events.capacity() {
                         events.push(ParamEvent {
                             frame: o as u32,
                             index,

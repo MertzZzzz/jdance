@@ -7,8 +7,8 @@
 
 use crate::{Edit, EditError, History};
 use jdance_domain::{
-    AudioAsset, AudioClip, ClipId, LANE_COLORS, Lane, LaneId, MAX_PATTERN_STEPS, Pattern,
-    PatternClip, PatternId, Playlist, Project, Step, TICKS_PER_STEP,
+    AudioAsset, AudioClip, AutomationClip, ClipId, LANE_COLORS, Lane, LaneId, MAX_PATTERN_STEPS,
+    Pattern, PatternClip, PatternId, Playlist, Project, Step, TICKS_PER_STEP,
 };
 
 fn arrangement_err(m: String) -> EditError {
@@ -143,8 +143,11 @@ pub(crate) fn apply(edit: &Edit, p: &mut Project) -> Result<Edit, EditError> {
                 .iter()
                 .position(|l| l.id == *id)
                 .ok_or_else(|| arrangement_err(format!("lane {} does not exist", id.0)))?;
-            p.playlist.lanes.remove(i);
-            p.playlist.clips.retain(|c| c.lane != *id);
+            let pl = &mut p.playlist;
+            pl.lanes.remove(i);
+            pl.clips.retain(|c| c.lane != *id);
+            pl.audio_clips.retain(|c| c.lane != *id);
+            pl.automation_clips.retain(|c| c.lane != *id);
             Ok(())
         }),
         Edit::RenameLane(id, name) => {
@@ -263,8 +266,44 @@ pub(crate) fn apply(edit: &Edit, p: &mut Project) -> Result<Edit, EditError> {
                 std::mem::replace(&mut a.name, name.clone()),
             ))
         }
+        Edit::AddAutomationClip(clip) => {
+            if p.playlist.has_clip(clip.id) {
+                return Err(arrangement_err(format!("clip {} exists", clip.id.0)));
+            }
+            p.playlist.automation_clips.push(*clip);
+            if let Err(e) = p.validate_arrangement() {
+                p.playlist.automation_clips.pop();
+                return Err(arrangement_err(e));
+            }
+            Ok(Edit::RemoveAutomationClip(clip.id))
+        }
+        Edit::RemoveAutomationClip(id) => {
+            let i = p
+                .playlist
+                .automation_clips
+                .iter()
+                .position(|c| c.id == *id)
+                .ok_or_else(|| arrangement_err(format!("clip {} does not exist", id.0)))?;
+            Ok(Edit::AddAutomationClip(
+                p.playlist.automation_clips.remove(i),
+            ))
+        }
+        Edit::SetAutomationClip(clip) => {
+            let i = p
+                .playlist
+                .automation_clips
+                .iter()
+                .position(|c| c.id == clip.id)
+                .ok_or_else(|| arrangement_err(format!("clip {} does not exist", clip.id.0)))?;
+            let old = std::mem::replace(&mut p.playlist.automation_clips[i], *clip);
+            if let Err(e) = p.validate_arrangement() {
+                p.playlist.automation_clips[i] = old;
+                return Err(arrangement_err(e));
+            }
+            Ok(Edit::SetAutomationClip(old))
+        }
         Edit::AddAudioClip(clip) => {
-            if p.playlist.audio_clip(clip.id).is_some() || p.playlist.clip(clip.id).is_some() {
+            if p.playlist.has_clip(clip.id) {
                 return Err(arrangement_err(format!("clip {} exists", clip.id.0)));
             }
             p.playlist.audio_clips.push(*clip);
@@ -370,23 +409,28 @@ pub fn add_pattern(
 
 /// Adds a lane at the end with the next default color.
 pub fn add_lane(history: &mut History, p: &mut Project) -> Result<LaneId, EditError> {
+    let name = format!("Lane {}", p.playlist.lanes.len() + 1);
+    let (id, edit) = new_lane_edit(p, name);
+    history.execute(p, edit)?;
+    Ok(id)
+}
+
+/// The edit adding a lane named `name` at the bottom (not executed).
+pub fn new_lane_edit(p: &mut Project, name: String) -> (LaneId, Edit) {
     let id = LaneId(p.ids.next());
     let n = p.playlist.lanes.len();
-    history.execute(
-        p,
-        Edit::AddLane {
-            lane: Lane {
-                id,
-                name: format!("Lane {}", n + 1),
-                color: LANE_COLORS[n % LANE_COLORS.len()],
-                muted: false,
-                solo: false,
-                audio_track: jdance_domain::TrackId::MASTER,
-            },
-            index: n,
+    let edit = Edit::AddLane {
+        lane: Lane {
+            id,
+            name,
+            color: LANE_COLORS[n % LANE_COLORS.len()],
+            muted: false,
+            solo: false,
+            audio_track: jdance_domain::TrackId::MASTER,
         },
-    )?;
-    Ok(id)
+        index: n,
+    };
+    (id, edit)
 }
 
 /// Creates a looped clip, one repetition long, of `pattern` on `lane` at `start` ticks.
@@ -434,11 +478,20 @@ pub fn duplicate_clips(
         .iter()
         .filter_map(|id| p.playlist.audio_clip(*id).copied())
         .collect();
-    // Selection span in ticks over both kinds.
+    let automation: Vec<AutomationClip> = ids
+        .iter()
+        .filter_map(|id| p.playlist.automation_clip(*id).copied())
+        .collect();
+    // Selection span in ticks over all kinds.
     let spans: Vec<(f64, f64)> = clips
         .iter()
         .map(|c| (c.start as f64, c.interval().1 as f64))
         .chain(audio.iter().filter_map(|c| p.audio_clip_ticks(c)))
+        .chain(
+            automation
+                .iter()
+                .map(|c| (c.start as f64, c.interval().1 as f64)),
+        )
         .collect();
     let (Some(first), Some(end)) = (
         spans.iter().map(|s| s.0).reduce(f64::min),
@@ -466,6 +519,15 @@ pub fn duplicate_clips(
         edits.push(Edit::AddAudioClip(AudioClip {
             id,
             start: c.start + frames,
+            ..c
+        }));
+    }
+    for c in automation {
+        let id = ClipId(p.ids.next());
+        new_ids.push(id);
+        edits.push(Edit::AddAutomationClip(AutomationClip {
+            id,
+            start: c.start + offset,
             ..c
         }));
     }

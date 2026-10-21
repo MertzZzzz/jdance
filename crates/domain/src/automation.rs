@@ -2,8 +2,8 @@
 //! Automation lanes on the song timeline (ADR-014, AUT-001..060).
 
 use crate::{
-    AutomationId, ChannelId, EffectKind, InsertId, MAX_SEND_LEVEL, MAX_VOLUME, PluginTarget,
-    Project, SendId, TrackId,
+    AutomationId, ChannelId, ClipId, EffectKind, InsertId, MAX_SEND_LEVEL, MAX_VOLUME,
+    PluginTarget, Project, SendId, TrackId,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -51,6 +51,8 @@ pub enum AutomationTarget {
         target: PluginTarget,
         param: u32,
     },
+    /// Gain of one audio clip (spec 0.2.0 §11).
+    AudioClipGain(ClipId),
 }
 
 /// AUT-060 form: `{ kind, object_id, param_id }`.
@@ -78,6 +80,7 @@ impl Serialize for AutomationTarget {
                 target: PluginTarget::Channel(c),
                 param,
             } => ("vst3_instrument_param", c.0, Some(param.to_string())),
+            Self::AudioClipGain(c) => ("audio_clip_gain", c.0, None),
         };
         TargetRepr {
             kind: kind.into(),
@@ -119,6 +122,7 @@ impl<'de> Deserialize<'de> for AutomationTarget {
                 target: PluginTarget::Channel(ChannelId(r.object_id)),
                 param: plugin_param()?,
             },
+            "audio_clip_gain" => Self::AudioClipGain(ClipId(r.object_id)),
             k => return Err(D::Error::custom(format!("unknown automation target {k}"))),
         })
     }
@@ -152,6 +156,7 @@ impl AutomationTarget {
                 target: PluginTarget::Channel(c),
                 ..
             } => p.channel(*c).is_some_and(|c| c.instrument().is_some()),
+            Self::AudioClipGain(c) => p.playlist.audio_clip(*c).is_some(),
         }
     }
 
@@ -191,6 +196,7 @@ impl AutomationTarget {
                 }
             }
             Self::PluginParam { .. } => return None,
+            Self::AudioClipGain(c) => p.playlist.audio_clip(*c)?.gain / MAX_VOLUME,
         })
     }
 
@@ -199,7 +205,7 @@ impl AutomationTarget {
     pub fn plain(&self, p: &Project, n: f32) -> Option<f32> {
         let n = n.clamp(0.0, 1.0);
         Some(match self {
-            Self::TrackVolume(_) => n * MAX_VOLUME,
+            Self::TrackVolume(_) | Self::AudioClipGain(_) => n * MAX_VOLUME,
             Self::TrackPan(_) => 2.0 * n - 1.0,
             Self::SendLevel(_) => n * MAX_SEND_LEVEL,
             Self::EffectParam { insert, param } => {
@@ -222,13 +228,24 @@ impl AutomationTarget {
     }
 }
 
+/// An automation source (spec 0.2.0 §11, "AutomationSource"): an
+/// envelope for one target. It sounds only through
+/// [`AutomationClip`](crate::AutomationClip)s placed in the Playlist.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AutomationLane {
     pub id: AutomationId,
+    #[serde(default)]
+    pub name: String,
     pub target: AutomationTarget,
-    /// Sorted by tick.
+    /// Length in ticks, `>= 1`; clips show at most this range.
+    #[serde(default)]
+    pub length: u64,
+    /// Sorted by tick, relative to the source start.
     pub points: Vec<AutoPoint>,
 }
+
+/// Longest automation source in ticks (about 2 h at 120 BPM).
+pub const MAX_AUTOMATION_TICKS: u64 = 1 << 30;
 
 /// Shaped interpolation weight for `t` in `0..=1`.
 pub fn curve_weight(curve: Curve, tension: f32, t: f64) -> f64 {
@@ -261,6 +278,9 @@ impl AutomationLane {
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        if self.length == 0 || self.length > MAX_AUTOMATION_TICKS {
+            return Err("automation length out of range".into());
+        }
         if self.points.len() > MAX_AUTOMATION_POINTS {
             return Err("too many automation points".into());
         }
@@ -299,7 +319,9 @@ mod tests {
     fn lane(points: Vec<AutoPoint>) -> AutomationLane {
         AutomationLane {
             id: AutomationId(1),
+            name: "Volume".into(),
             target: AutomationTarget::TrackVolume(TrackId(2)),
+            length: 3840,
             points,
         }
     }

@@ -9,7 +9,7 @@
 //!   repetitions is derived, never stored (spec 0.2.0 §4).
 //! - Clips may overlap freely; every admitted event plays.
 
-use crate::{AudioClip, ClipId, LaneId, Pattern, PatternId, TrackId};
+use crate::{AudioClip, AutomationId, ClipId, LaneId, Pattern, PatternId, TrackId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -27,6 +27,8 @@ pub struct Playlist {
     pub clips: Vec<PatternClip>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub audio_clips: Vec<AudioClip>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub automation_clips: Vec<AutomationClip>,
     /// Global loop region in ticks `[start, end)` for song playback.
     pub loop_range: Option<(u64, u64)>,
     pub loop_enabled: bool,
@@ -97,6 +99,31 @@ impl PatternClip {
     }
 }
 
+/// A placed range of an automation source (spec 0.2.0 §11). It does not
+/// loop: `offset + duration` stays within the source length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutomationClip {
+    pub id: ClipId,
+    pub lane: LaneId,
+    pub source: AutomationId,
+    /// Start in ticks.
+    pub start: u64,
+    /// Source position shown at `start`, in ticks.
+    #[serde(default)]
+    pub offset: u64,
+    /// Length on the timeline in ticks, `>= 1`.
+    pub duration: u64,
+    #[serde(default)]
+    pub muted: bool,
+}
+
+impl AutomationClip {
+    /// `[start, start + duration)` in ticks.
+    pub fn interval(&self) -> (u64, u64) {
+        (self.start, self.start + self.duration)
+    }
+}
+
 /// Default lane colors, cycled for new lanes.
 pub const LANE_COLORS: [[u8; 3]; 8] = [
     [235, 120, 60],
@@ -125,6 +152,7 @@ impl Playlist {
                 .collect(),
             clips: Vec::new(),
             audio_clips: Vec::new(),
+            automation_clips: Vec::new(),
             loop_range: None,
             loop_enabled: false,
         }
@@ -154,6 +182,22 @@ impl Playlist {
         self.audio_clips.iter_mut().find(|c| c.id == id)
     }
 
+    pub fn automation_clip(&self, id: ClipId) -> Option<&AutomationClip> {
+        self.automation_clips.iter().find(|c| c.id == id)
+    }
+
+    /// Whether any clip kind has `id`.
+    pub fn has_clip(&self, id: ClipId) -> bool {
+        self.clip(id).is_some()
+            || self.audio_clip(id).is_some()
+            || self.automation_clip(id).is_some()
+    }
+
+    /// Whether an automation clip is active (same rules as pattern clips).
+    pub fn admits_automation(&self, clip: &AutomationClip) -> bool {
+        !clip.muted && self.lane_plays(clip.lane)
+    }
+
     /// Whether the clip's events are admitted to playback (spec
     /// "Mute/Solo"): clip mute first, then lane mute, then lane solo.
     pub fn admits(&self, clip: &PatternClip) -> bool {
@@ -177,7 +221,8 @@ impl Playlist {
     }
 
     /// Right edge of all pattern clips in ticks, muted clips included.
-    /// Audio clips: [`crate::Project::arrangement_end_ticks`].
+    /// Audio clips: [`crate::Project::arrangement_end_ticks`]. Automation
+    /// clips make no sound and do not extend the song.
     pub fn arrangement_end(&self) -> u64 {
         self.clips.iter().map(|c| c.interval().1).max().unwrap_or(0)
     }

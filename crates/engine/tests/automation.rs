@@ -65,9 +65,37 @@ fn project() -> Project {
     p
 }
 
-fn lane(p: &mut Project, target: AutomationTarget, points: Vec<AutoPoint>) {
+/// A source with one clip over its whole length (16 bars) from 0.
+fn lane(p: &mut Project, target: AutomationTarget, points: Vec<AutoPoint>) -> AutomationId {
+    let id = source(p, target, points);
+    place(p, id, 0, 0, 16 * 3840);
+    id
+}
+
+fn source(p: &mut Project, target: AutomationTarget, points: Vec<AutoPoint>) -> AutomationId {
     let id = AutomationId(p.ids.next());
-    p.automation.push(AutomationLane { id, target, points });
+    p.automation.push(AutomationLane {
+        id,
+        name: "A".into(),
+        target,
+        length: 16 * 3840,
+        points,
+    });
+    id
+}
+
+fn place(p: &mut Project, source: AutomationId, start: u64, offset: u64, duration: u64) {
+    let clip = jdance_domain::AutomationClip {
+        id: jdance_domain::ClipId(p.ids.next()),
+        lane: p.playlist.lanes[1].id,
+        source,
+        start,
+        offset,
+        duration,
+        muted: false,
+    };
+    p.playlist.automation_clips.push(clip);
+    p.validate_arrangement().unwrap();
 }
 
 fn compile(p: &Project, mode: PlayMode, plugin: Option<PluginRt>) -> PlaybackSnapshot {
@@ -107,6 +135,81 @@ fn volume_follows_the_envelope_within_32_samples() {
     )
     .left;
     assert!((pattern[4_000] - PAN).abs() < 1e-6);
+}
+
+#[test]
+fn automation_acts_only_inside_its_clips() {
+    let mut p = project();
+    // Volume 0.4 (0.5 · 1.25 = 0.625) on source ticks 0..1920, then 0.8.
+    let id = source(
+        &mut p,
+        AutomationTarget::TrackVolume(TRACK),
+        vec![pt(0, 0.4, Curve::Hold), pt(1920, 0.8, Curve::Hold)],
+    );
+    // Source from tick 960 placed at a quarter bar for half a bar.
+    place(&mut p, id, 960, 960, 1920);
+    let out = render_offline(compile(&p, PlayMode::Song, None), BAR, || 256).left;
+    let q = BAR / 4;
+    assert!((out[q - 64] - PAN).abs() < 1e-5, "before: manual 1.0");
+    assert!((out[q + 64] - PAN * 0.5).abs() < 1e-5, "{}", out[q + 64]);
+    assert!(
+        (out[2 * q + 64] - PAN).abs() < 1e-5,
+        "source 1920: 0.8 · 1.25"
+    );
+    assert!((out[3 * q + 64] - PAN).abs() < 1e-5, "after: manual again");
+    // A muted clip leaves the manual value.
+    p.playlist.automation_clips[0].muted = true;
+    let muted = render_offline(compile(&p, PlayMode::Song, None), BAR, || 256).left;
+    assert!((muted[q + 64] - PAN).abs() < 1e-5);
+}
+
+#[test]
+fn audio_clip_gain_is_automated() {
+    let mut p = project();
+    p.playlist.clips.clear();
+    let asset = jdance_domain::AudioAsset {
+        id: jdance_domain::AssetId(p.ids.next()),
+        name: "dc".into(),
+        path: "dc.wav".into(),
+        hash: 0,
+        size: 0,
+        sample_rate: SR,
+        channels: 1,
+        frames: 2 * BAR as u64,
+    };
+    let clip = jdance_domain::AudioClip {
+        id: jdance_domain::ClipId(p.ids.next()),
+        lane: p.playlist.lanes[0].id,
+        asset: asset.id,
+        start: 0,
+        source_in: 0,
+        source_out: 2 * BAR as u64,
+        gain: 1.0,
+        muted: false,
+        fade_in: 0,
+        fade_out: 0,
+    };
+    p.assets.push(asset);
+    p.playlist.audio_clips.push(clip);
+    lane(
+        &mut p,
+        AutomationTarget::AudioClipGain(clip.id),
+        vec![pt(0, 0.4, Curve::Hold)],
+    );
+    let out = render_offline(compile(&p, PlayMode::Song, None), BAR, || 512).left;
+    // The lane bus is the master: unity, centre pan law of the master.
+    let plain = {
+        p.automation.clear();
+        p.playlist.automation_clips.clear();
+        render_offline(compile(&p, PlayMode::Song, None), BAR, || 512).left
+    };
+    assert!(plain[BAR / 2] > 0.1);
+    assert!(
+        (out[BAR / 2] - plain[BAR / 2] * 0.5).abs() < 1e-5,
+        "{} vs {}",
+        out[BAR / 2],
+        plain[BAR / 2]
+    );
 }
 
 #[test]

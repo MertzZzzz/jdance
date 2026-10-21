@@ -593,17 +593,29 @@ mod tests {
             tension: 0.0,
         };
         // 25 samples per tick: points at samples 0, 750 and 1500.
+        let source = AutomationId(p.ids.next());
         p.automation.push(AutomationLane {
-            id: AutomationId(p.ids.next()),
+            id: source,
+            name: "Param 0".into(),
             target: AutomationTarget::PluginParam {
                 target: jdance_domain::PluginTarget::Insert(insert),
                 param: 0,
             },
+            length: 2 * 3840,
             points: vec![
                 pt(0, 0.2, Curve::Hold),
                 pt(30, 0.9, Curve::Linear),
                 pt(60, 0.5, Curve::Linear),
             ],
+        });
+        p.playlist.automation_clips.push(jdance_domain::AutomationClip {
+            id: jdance_domain::ClipId(p.ids.next()),
+            lane: p.playlist.lanes[0].id,
+            source,
+            start: 0,
+            offset: 0,
+            duration: 2 * 3840,
+            muted: false,
         });
         p.playlist.loop_range = Some((0, 3840));
         p.playlist.loop_enabled = true;

@@ -12,11 +12,12 @@
 //! a clip's editor. Ruler: click seeks, Shift-drag sets the loop. Alt
 //! disables snapping while dragging.
 //!
-//! Automation lanes (ADR-014) sit below the clip lanes on the same
-//! timeline: double-click adds a point (or deletes the one under the
-//! pointer), drag moves a point, right-click sets its curve.
+//! Automation clips (spec 0.2.0 §11) place a range of an automation
+//! source like any clip; their points are edited in the Automation
+//! Editor (double-click).
 
-use crate::automation::{AUTOMATION_COLOR, LaneInfo, value_text};
+use crate::automation::AUTOMATION_COLOR;
+use crate::automation_editor::envelope_line;
 use crate::browser::BrowserItem;
 use crate::icons::{self, Glyph};
 use crate::project_browser::ProjectItem;
@@ -28,8 +29,8 @@ use egui::{
 };
 use jdance_commands::{Edge, Edit, audio_clip_edge, pattern_clip_edge};
 use jdance_domain::{
-    AssetId, AudioAsset, AudioClip, AutoPoint, AutomationId, AutomationLane, ClipId, Curve, LaneId,
-    PatternClip, PatternId, Project, SampleRef, TICKS_PER_STEP, TrackId, frames_per_tick,
+    AssetId, AudioAsset, AudioClip, AutomationClip, AutomationId, ClipId, LaneId, PatternClip,
+    PatternId, Project, SampleRef, TICKS_PER_STEP, TrackId, frames_per_tick,
 };
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -39,10 +40,6 @@ const RULER_H: f32 = 20.0;
 const HEADER_W: f32 = 190.0;
 const EDGE_PX: f32 = 6.0;
 const BAR_TICKS: u64 = 3_840;
-const AUTO_H: f32 = 64.0;
-/// Vertical padding of the envelope inside an automation row.
-const AUTO_PAD: f32 = 6.0;
-const POINT_R: f32 = 4.0;
 const NAME_H: f32 = 13.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +86,7 @@ impl Tool {
 pub(crate) enum Source {
     Pattern(PatternId),
     Asset(AssetId),
+    Automation(AutomationId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -96,7 +94,6 @@ enum DragKind {
     Move,
     Edge(ClipId, Edge),
     Loop(u64),
-    Point(AutomationId, usize),
     /// Draw: a copy of the source follows the pointer until release.
     Place,
     /// Paint: copies from `start` on `lane` up to the pointer.
@@ -126,8 +123,6 @@ pub(crate) struct PlaylistView {
     context_clip: Option<ClipId>,
     /// Snap grid in ticks (1 = off), from the toolbar.
     grid: u64,
-    /// Automation lane and point under the last right-click.
-    context_auto: Option<(AutomationId, Option<usize>)>,
     pub tool: Tool,
     pub source: Option<Source>,
     /// Pattern current at the last frame: choosing another one makes it
@@ -145,7 +140,6 @@ impl Default for PlaylistView {
             drag: None,
             context_clip: None,
             grid: u64::from(TICKS_PER_STEP),
-            context_auto: None,
             tool: Tool::Draw,
             source: None,
             last_pattern: None,
@@ -182,6 +176,8 @@ pub(crate) enum PlaylistAction {
     },
     /// Double-click: the clip's editor.
     Open(ClipId),
+    /// Automate an audio clip's gain.
+    AutomateGain(ClipId),
 }
 
 #[derive(Debug, Default)]
@@ -217,6 +213,7 @@ struct Geo {
 enum Item {
     Pattern(PatternClip),
     Audio(AudioClip),
+    Automation(AutomationClip),
 }
 
 impl Item {
@@ -224,7 +221,23 @@ impl Item {
         match self {
             Item::Pattern(c) => c.id,
             Item::Audio(c) => c.id,
+            Item::Automation(c) => c.id,
         }
+    }
+}
+
+/// An automation clip as a non-looped pattern clip over a source of
+/// `len` ticks: the same edge rules apply.
+fn as_pattern_clip(c: &AutomationClip) -> PatternClip {
+    PatternClip {
+        id: c.id,
+        lane: c.lane,
+        pattern: PatternId(0),
+        start: c.start,
+        offset: c.offset,
+        duration: c.duration,
+        looped: false,
+        muted: c.muted,
     }
 }
 
@@ -235,6 +248,10 @@ fn span(project: &Project, item: &Item) -> Option<(f64, f64)> {
             Some((a as f64, b as f64))
         }
         Item::Audio(c) => project.audio_clip_ticks(c),
+        Item::Automation(c) => {
+            let (a, b) = c.interval();
+            Some((a as f64, b as f64))
+        }
     }
 }
 
@@ -246,7 +263,12 @@ fn geos(project: &Project) -> Vec<Geo> {
         .clips
         .iter()
         .map(|c| (c.lane, Item::Pattern(*c)))
-        .chain(pl.audio_clips.iter().map(|c| (c.lane, Item::Audio(*c))));
+        .chain(pl.audio_clips.iter().map(|c| (c.lane, Item::Audio(*c))))
+        .chain(
+            pl.automation_clips
+                .iter()
+                .map(|c| (c.lane, Item::Automation(*c))),
+        );
     items
         .filter_map(|(lane, item)| {
             let (start, end) = span(project, &item)?;
@@ -271,6 +293,7 @@ fn source_len(project: &Project, source: Source) -> Option<f64> {
                 a.frames as f64 * f64::from(project.timebase_rate) / f64::from(a.sample_rate) / fpt,
             )
         }
+        Source::Automation(id) => project.automation_lane(id).map(|l| l.length as f64),
     }
 }
 
@@ -278,57 +301,8 @@ fn source_name(project: &Project, source: Source) -> Option<String> {
     match source {
         Source::Pattern(id) => project.pattern(id).map(|p| p.name.clone()),
         Source::Asset(id) => project.asset(id).map(|a| a.name.clone()),
+        Source::Automation(id) => project.automation_lane(id).map(|l| l.name.clone()),
     }
-}
-
-fn with_points(lane: &AutomationLane, f: impl FnOnce(&mut Vec<AutoPoint>)) -> Edit {
-    let mut lane = lane.clone();
-    f(&mut lane.points);
-    Edit::SetAutomation {
-        id: lane.id,
-        lane: Some(lane),
-    }
-}
-
-/// Envelope polyline of `lane` in `row`, between `x0` and `x1` on screen.
-fn envelope_line(
-    lane: &AutomationLane,
-    row: Rect,
-    x_of: &impl Fn(u64) -> f32,
-    (x0, x1): (f32, f32),
-) -> Vec<Pos2> {
-    let y_of = |v: f32| row.bottom() - AUTO_PAD - v * (row.height() - 2.0 * AUTO_PAD);
-    let pts = &lane.points;
-    let (Some(first), Some(last)) = (pts.first(), pts.last()) else {
-        return Vec::new();
-    };
-    let mut line = vec![pos2(x0.min(x_of(first.tick)), y_of(first.value))];
-    for w in pts.windows(2) {
-        let (a, b) = (w[0], w[1]);
-        let (xa, xb) = (x_of(a.tick), x_of(b.tick));
-        line.push(pos2(xa, y_of(a.value)));
-        if xb < x0 || xa > x1 {
-            continue;
-        }
-        match a.curve {
-            Curve::Hold => line.push(pos2(xb, y_of(a.value))),
-            Curve::Linear => {}
-            Curve::Curve => {
-                let n = (((xb - xa) / 3.0).ceil() as usize).clamp(1, 256);
-                for k in 1..n {
-                    let t = k as f64 / n as f64;
-                    let w = jdance_domain::curve_weight(a.curve, a.tension, t) as f32;
-                    line.push(pos2(
-                        xa + (xb - xa) * t as f32,
-                        y_of(a.value + (b.value - a.value) * w),
-                    ));
-                }
-            }
-        }
-    }
-    line.push(pos2(x_of(last.tick), y_of(last.value)));
-    line.push(pos2(x1.max(x_of(last.tick)), y_of(last.value)));
-    line
 }
 
 impl PlaylistView {
@@ -338,11 +312,11 @@ impl PlaylistView {
 
     pub(crate) fn retain_existing(&mut self, project: &Project) {
         let pl = &project.playlist;
-        self.selection
-            .retain(|id| pl.clip(*id).is_some() || pl.audio_clip(*id).is_some());
+        self.selection.retain(|id| pl.has_clip(*id));
         let valid = match self.source {
             Some(Source::Pattern(id)) => project.pattern(id).is_some(),
             Some(Source::Asset(id)) => project.asset(id).is_some(),
+            Some(Source::Automation(id)) => project.automation_lane(id).is_some(),
             None => true,
         };
         if !valid {
@@ -360,7 +334,6 @@ impl PlaylistView {
         &mut self,
         ui: &mut egui::Ui,
         project: &Project,
-        lanes: &[LaneInfo],
         playhead: Option<u64>,
         snap: u32,
         current_pattern: PatternId,
@@ -380,7 +353,7 @@ impl PlaylistView {
             .id_salt("playlist-v")
             .show(ui, |ui| {
                 ui.horizontal_top(|ui| {
-                    self.lane_headers(ui, project, lanes, &mut out);
+                    self.lane_headers(ui, project, &mut out);
                     egui::ScrollArea::horizontal()
                         .id_salt("playlist-h")
                         .show(ui, |ui| {
@@ -388,7 +361,7 @@ impl PlaylistView {
                         });
                 });
             });
-        self.shortcuts(ui, &mut out);
+        self.shortcuts(ui, project, &mut out);
         out
     }
 
@@ -428,7 +401,7 @@ impl PlaylistView {
     }
 
     /// Delete, Ctrl+D and tool keys, when no text field has focus.
-    fn shortcuts(&mut self, ui: &egui::Ui, out: &mut PlaylistOutput) {
+    fn shortcuts(&mut self, ui: &egui::Ui, project: &Project, out: &mut PlaylistOutput) {
         let ctx = ui.ctx().clone();
         if ctx.egui_wants_keyboard_input() {
             return;
@@ -457,7 +430,7 @@ impl PlaylistView {
             return;
         }
         if del {
-            out.edits.push(self.delete_edit(&self.selection.clone()));
+            out.edits.push(delete_edits(project, &self.selection));
             self.selection.clear();
         } else if dup {
             out.actions.push(PlaylistAction::Duplicate(
@@ -466,22 +439,7 @@ impl PlaylistView {
         }
     }
 
-    /// One undo step removing `ids` (pattern or audio clips).
-    fn delete_edit(&self, ids: &BTreeSet<ClipId>) -> Edit {
-        Edit::Batch(
-            ids.iter()
-                .map(|id| Edit::Batch(vec![Edit::RemoveClip(*id)]))
-                .collect(),
-        )
-    }
-
-    fn lane_headers(
-        &mut self,
-        ui: &mut egui::Ui,
-        project: &Project,
-        lanes: &[LaneInfo],
-        out: &mut PlaylistOutput,
-    ) {
+    fn lane_headers(&mut self, ui: &mut egui::Ui, project: &Project, out: &mut PlaylistOutput) {
         ui.vertical(|ui| {
             ui.set_width(HEADER_W);
             // Rows line up with the canvas: no spacing between them.
@@ -555,44 +513,6 @@ impl PlaylistView {
             {
                 out.actions.push(PlaylistAction::AddLane);
             }
-            for info in lanes {
-                ui.horizontal_top(|ui| {
-                    ui.set_height(AUTO_H - ui.spacing().item_spacing.y);
-                    let color = if info.missing {
-                        theme::WARN
-                    } else {
-                        AUTOMATION_COLOR
-                    };
-                    let hover = if info.missing {
-                        "The automated object was removed; the lane is kept and has no effect"
-                            .to_owned()
-                    } else {
-                        format!(
-                            "{} · {}: applied during song playback",
-                            info.context, info.name
-                        )
-                    };
-                    ui.vertical(|ui| {
-                        ui.set_width(HEADER_W - 30.0);
-                        ui.add(egui::Label::new(RichText::new(&info.name).color(color)).truncate())
-                            .on_hover_text(hover);
-                        ui.add(
-                            egui::Label::new(RichText::new(&info.context).small().weak())
-                                .truncate(),
-                        );
-                    });
-                    if ui
-                        .small_button("x")
-                        .on_hover_text("Remove automation lane")
-                        .clicked()
-                    {
-                        out.edits.push(Edit::SetAutomation {
-                            id: info.id,
-                            lane: None,
-                        });
-                    }
-                });
-            }
         });
     }
 
@@ -616,7 +536,7 @@ impl PlaylistView {
         let n_lanes = pl.lanes.len();
         // One extra row below the lanes: dropping there adds a lane.
         let lanes_bottom = RULER_H + (n_lanes + 1) as f32 * ROW_H;
-        let height = lanes_bottom + project.automation.len() as f32 * AUTO_H;
+        let height = lanes_bottom;
         let (rect, response) = ui.allocate_exact_size(vec2(width, height), Sense::click_and_drag());
         let painter = ui.painter_at(rect);
         let origin = rect.min;
@@ -634,31 +554,6 @@ impl PlaylistView {
                 pos2(xf(a), y0),
                 pos2(xf(b).max(xf(a) + 3.0), y0 + ROW_H - 4.0),
             )
-        };
-        let auto = &project.automation;
-        let auto_row = |i: usize| {
-            let y = origin.y + lanes_bottom + i as f32 * AUTO_H;
-            Rect::from_min_size(pos2(rect.left(), y), vec2(width, AUTO_H))
-        };
-        let auto_at = |y: f32| -> Option<usize> {
-            let i = ((y - origin.y - lanes_bottom) / AUTO_H).floor();
-            (i >= 0.0 && (i as usize) < auto.len()).then_some(i as usize)
-        };
-        let value_at_y = |row: Rect, y: f32| {
-            ((row.bottom() - AUTO_PAD - y) / (row.height() - 2.0 * AUTO_PAD)).clamp(0.0, 1.0)
-        };
-        let point_pos = |row: Rect, p: &AutoPoint| {
-            pos2(
-                x_of(p.tick),
-                row.bottom() - AUTO_PAD - p.value * (row.height() - 2.0 * AUTO_PAD),
-            )
-        };
-        let point_hit = |i: usize, p: Pos2| -> Option<usize> {
-            let row = auto_row(i);
-            auto[i]
-                .points
-                .iter()
-                .rposition(|pt| point_pos(row, pt).distance(p) <= POINT_R + 3.0)
         };
         let items = geos(project);
         // Topmost clip under `p` and the edge zone it is in. Narrow clips
@@ -682,15 +577,7 @@ impl PlaylistView {
         };
         let in_lanes = |p: Pos2| p.y >= origin.y + RULER_H && p.y < origin.y + lanes_bottom;
 
-        self.background(
-            &painter,
-            rect,
-            bars,
-            n_lanes,
-            lanes_bottom,
-            auto.len(),
-            &auto_row,
-        );
+        self.background(&painter, rect, bars, n_lanes, lanes_bottom);
         if let Some((a, b)) = pl.loop_range {
             let fill = if pl.loop_enabled {
                 theme::AMBER.gamma_multiply(0.6)
@@ -722,8 +609,6 @@ impl PlaylistView {
         {
             let kind = if p.y < origin.y + RULER_H {
                 shift.then(|| DragKind::Loop(snap(tick_at(p.x), BAR_TICKS).max(0) as u64))
-            } else if let Some(i) = auto_at(p.y) {
-                point_hit(i, p).map(|k| DragKind::Point(auto[i].id, k))
             } else if ctrl {
                 Some(DragKind::Frame { add: shift })
             } else {
@@ -808,6 +693,23 @@ impl PlaylistView {
                         None => g.item,
                     }
                 }
+                (Some(DragKind::Move), Item::Automation(c)) if selected => {
+                    Item::Automation(AutomationClip {
+                        start: (c.start as i64 + dt).max(0) as u64,
+                        ..c
+                    })
+                }
+                (Some(DragKind::Edge(id, e)), Item::Automation(c)) if id == c.id => {
+                    let len = project.automation_lane(c.source).map_or(1, |l| l.length);
+                    let (start, offset, duration) =
+                        pattern_clip_edge(&as_pattern_clip(&c), len, e, edge_tick);
+                    Item::Automation(AutomationClip {
+                        start,
+                        offset,
+                        duration,
+                        ..c
+                    })
+                }
                 (_, item) => item,
             };
             let lane = if matches!(drag_kind, Some(DragKind::Move)) && selected {
@@ -878,30 +780,6 @@ impl PlaylistView {
             self.selection = sel;
         }
 
-        // A dragged automation point stays between its neighbours.
-        let moved_point = |lane: &AutomationLane, k: usize| -> Option<AutoPoint> {
-            let (Some(d), Some(p)) = (self.drag, pointer) else {
-                return None;
-            };
-            let pt = *lane.points.get(k)?;
-            let row = auto_row(auto.iter().position(|l| l.id == lane.id)?);
-            let raw = pt.tick as i64 + ((p.x - d.origin.x) / ppt) as i64;
-            let t = if alt { raw } else { snap(raw, grid) };
-            let lo = k.checked_sub(1).map_or(0, |j| lane.points[j].tick);
-            let hi = lane.points.get(k + 1).map_or(u64::MAX, |n| n.tick);
-            Some(AutoPoint {
-                tick: (t.max(0) as u64).clamp(lo, hi),
-                value: value_at_y(row, point_pos(row, &pt).y + (p.y - d.origin.y)),
-                ..pt
-            })
-        };
-        let dragged_point = match drag_kind {
-            Some(DragKind::Point(id, k)) => project
-                .automation_lane(id)
-                .and_then(|l| Some((id, k, moved_point(l, k)?))),
-            _ => None,
-        };
-
         // Commit on release: one undo step per gesture.
         if response.drag_stopped()
             && let Some(d) = self.drag.take()
@@ -935,14 +813,6 @@ impl PlaylistView {
                                 enabled: true,
                             });
                         }
-                    }
-                }
-                DragKind::Point(..) => {
-                    if let Some((id, k, moved)) = dragged_point
-                        && let Some(lane) = project.automation_lane(id)
-                        && lane.points[k] != moved
-                    {
-                        out.edits.push(with_points(lane, |pts| pts[k] = moved));
                     }
                 }
                 DragKind::Place | DragKind::Paint { .. } => {
@@ -1016,39 +886,9 @@ impl PlaylistView {
         }
         if response.double_clicked()
             && let Some(p) = response.interact_pointer_pos()
+            && let Some((k, _)) = hit(p)
         {
-            if let Some(i) = auto_at(p.y) {
-                let lane = &auto[i];
-                out.edits.push(match point_hit(i, p) {
-                    Some(k) => with_points(lane, |pts| {
-                        pts.remove(k);
-                    }),
-                    None => {
-                        let raw = tick_at(p.x);
-                        let tick = if alt { raw } else { snap(raw, grid) }.max(0) as u64;
-                        let value = value_at_y(auto_row(i), p.y);
-                        // New points take the curve of the segment they split.
-                        let at = lane.points.partition_point(|q| q.tick <= tick);
-                        let (curve, tension) =
-                            at.checked_sub(1).map_or((Curve::Linear, 0.0), |j| {
-                                (lane.points[j].curve, lane.points[j].tension)
-                            });
-                        with_points(lane, |pts| {
-                            pts.insert(
-                                at,
-                                AutoPoint {
-                                    tick,
-                                    value,
-                                    curve,
-                                    tension,
-                                },
-                            );
-                        })
-                    }
-                });
-            } else if let Some((k, _)) = hit(p) {
-                out.actions.push(PlaylistAction::Open(items[k].item.id()));
-            }
+            out.actions.push(PlaylistAction::Open(items[k].item.id()));
         }
 
         // Files from the Browser or the system.
@@ -1128,7 +968,6 @@ impl PlaylistView {
 
         if response.secondary_clicked() {
             let p = response.interact_pointer_pos();
-            self.context_auto = p.and_then(|p| auto_at(p.y).map(|i| (auto[i].id, point_hit(i, p))));
             self.context_clip = p.and_then(hit).map(|(k, _)| items[k].item.id());
             if let Some(id) = self.context_clip
                 && !self.selection.contains(&id)
@@ -1140,12 +979,6 @@ impl PlaylistView {
         egui::Popup::context_menu(&response)
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .show(|ui| {
-                if let Some((id, point)) = self.context_auto {
-                    if let Some(lane) = project.automation_lane(id) {
-                        automation_menu(ui, project, lane, point, out);
-                    }
-                    return;
-                }
                 let Some(id) = self.context_clip else {
                     ui.label("No clip here");
                     return;
@@ -1168,6 +1001,7 @@ impl PlaylistView {
                 && match &g.item {
                     Item::Pattern(c) => pl.admits(c),
                     Item::Audio(c) => pl.admits_audio(c),
+                    Item::Automation(c) => pl.admits_automation(c),
                 };
             draw_clip(
                 ui,
@@ -1220,16 +1054,6 @@ impl PlaylistView {
             );
         }
 
-        self.automation_rows(
-            &painter,
-            project,
-            dragged_point,
-            &auto_row,
-            &x_of,
-            &point_pos,
-            visible,
-            rect,
-        );
         if let (Some(DragKind::Loop(a)), Some(p)) = (drag_kind, pointer) {
             let b = snap(tick_at(p.x), BAR_TICKS).max(0) as u64;
             painter.rect_filled(
@@ -1251,29 +1075,15 @@ impl PlaylistView {
         // Cursors.
         if self.drag.is_none()
             && let Some(p) = response.hover_pos()
+            && let Some((_, edge)) = hit(p)
         {
-            if let Some(i) = auto_at(p.y)
-                && let Some(k) = point_hit(i, p)
-            {
-                let lane = &auto[i];
-                let pt = lane.points[k];
-                ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
-                painter.text(
-                    point_pos(auto_row(i), &pt) + vec2(8.0, -8.0),
-                    Align2::LEFT_BOTTOM,
-                    value_text(project, &lane.target, pt.value),
-                    FontId::proportional(11.0),
-                    theme::TEXT,
-                );
-            } else if let Some((_, edge)) = hit(p) {
-                let icon = match (self.tool, edge) {
-                    (Tool::Delete, _) => egui::CursorIcon::NotAllowed,
-                    (Tool::Slice, _) => egui::CursorIcon::VerticalText,
-                    (_, Some(_)) => egui::CursorIcon::ResizeHorizontal,
-                    (_, None) => egui::CursorIcon::Grab,
-                };
-                ui.ctx().set_cursor_icon(icon);
-            }
+            let icon = match (self.tool, edge) {
+                (Tool::Delete, _) => egui::CursorIcon::NotAllowed,
+                (Tool::Slice, _) => egui::CursorIcon::VerticalText,
+                (_, Some(_)) => egui::CursorIcon::ResizeHorizontal,
+                (_, None) => egui::CursorIcon::Grab,
+            };
+            ui.ctx().set_cursor_icon(icon);
         }
     }
 
@@ -1285,8 +1095,6 @@ impl PlaylistView {
         bars: u64,
         n_lanes: usize,
         lanes_bottom: f32,
-        n_auto: usize,
-        auto_row: &impl Fn(usize) -> Rect,
     ) {
         let origin = rect.min;
         let bottom = origin.y + lanes_bottom;
@@ -1319,14 +1127,6 @@ impl PlaylistView {
             FontId::proportional(11.0),
             theme::MUTED.gamma_multiply(0.6),
         );
-        for i in 0..n_auto {
-            let row = auto_row(i);
-            painter.rect_filled(row, CornerRadius::ZERO, theme::PANEL);
-            painter.line_segment(
-                [row.left_top(), row.right_top()],
-                Stroke::new(1.0, theme::LINE),
-            );
-        }
         painter.rect_filled(
             Rect::from_min_size(origin, vec2(rect.width(), RULER_H)),
             CornerRadius::ZERO,
@@ -1364,85 +1164,6 @@ impl PlaylistView {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn automation_rows(
-        &self,
-        painter: &egui::Painter,
-        project: &Project,
-        dragged_point: Option<(AutomationId, usize, AutoPoint)>,
-        auto_row: &impl Fn(usize) -> Rect,
-        x_of: &impl Fn(u64) -> f32,
-        point_pos: &impl Fn(Rect, &AutoPoint) -> Pos2,
-        visible: Rect,
-        rect: Rect,
-    ) {
-        let span = (
-            visible.left().max(rect.left()),
-            visible.right().min(rect.right()),
-        );
-        for (i, lane) in project.automation.iter().enumerate() {
-            let row = auto_row(i);
-            if !visible.intersects(row) {
-                continue;
-            }
-            let preview;
-            let lane = match dragged_point {
-                Some((id, k, moved)) if id == lane.id => {
-                    let mut l = lane.clone();
-                    l.points[k] = moved;
-                    preview = l;
-                    &preview
-                }
-                _ => lane,
-            };
-            let missing = !lane.target.exists(project);
-            let color = if missing {
-                theme::MUTED
-            } else {
-                AUTOMATION_COLOR
-            };
-            if lane.points.is_empty() {
-                painter.text(
-                    pos2(span.0 + 6.0, row.center().y),
-                    Align2::LEFT_CENTER,
-                    "No points: double-click to add",
-                    FontId::proportional(11.0),
-                    theme::MUTED,
-                );
-                continue;
-            }
-            painter.add(egui::Shape::line(
-                envelope_line(lane, row, x_of, span),
-                Stroke::new(1.5, color),
-            ));
-            let first = lane
-                .points
-                .partition_point(|p| x_of(p.tick) < span.0 - POINT_R);
-            for (k, pt) in lane.points.iter().enumerate().skip(first) {
-                let c = point_pos(row, pt);
-                if c.x > span.1 + POINT_R {
-                    break;
-                }
-                let active = matches!(dragged_point, Some((id, j, _)) if id == lane.id && j == k);
-                painter.circle(
-                    c,
-                    POINT_R,
-                    if active { theme::TEXT } else { color },
-                    Stroke::new(1.0, Color32::from_black_alpha(160)),
-                );
-                if active {
-                    painter.text(
-                        c + vec2(8.0, -8.0),
-                        Align2::LEFT_BOTTOM,
-                        value_text(project, &lane.target, pt.value),
-                        FontId::proportional(11.0),
-                        theme::TEXT,
-                    );
-                }
-            }
-        }
-    }
-
     fn clip_menu(
         &mut self,
         ui: &mut egui::Ui,
@@ -1451,9 +1172,10 @@ impl PlaylistView {
         out: &mut PlaylistOutput,
     ) {
         let pl = &project.playlist;
-        let muted = match (pl.clip(id), pl.audio_clip(id)) {
-            (Some(c), _) => c.muted,
-            (_, Some(c)) => c.muted,
+        let muted = match (pl.clip(id), pl.audio_clip(id), pl.automation_clip(id)) {
+            (Some(c), _, _) => c.muted,
+            (_, Some(c), _) => c.muted,
+            (_, _, Some(c)) => c.muted,
             _ => return,
         };
         if ui.button("Open editor").clicked() {
@@ -1492,6 +1214,20 @@ impl PlaylistView {
                     duration,
                     looped: !c.looped,
                 });
+                ui.close();
+            }
+        }
+        if pl.audio_clip(id).is_some() {
+            let automated = project
+                .lane_for(&jdance_domain::AutomationTarget::AudioClipGain(id))
+                .is_some();
+            let label = if automated {
+                "Edit gain automation…"
+            } else {
+                "Automate gain"
+            };
+            if ui.button(label).clicked() {
+                out.actions.push(PlaylistAction::AutomateGain(id));
                 ui.close();
             }
         }
@@ -1550,10 +1286,11 @@ fn commit(g: &Geo, lanes: &[jdance_domain::Lane]) -> Edit {
             },
         ]),
         Item::Audio(c) => Edit::SetAudioClip(AudioClip { lane, ..c }),
+        Item::Automation(c) => Edit::SetAutomationClip(AutomationClip { lane, ..c }),
     }
 }
 
-/// One undo step removing `ids` (pattern or audio clips).
+/// One undo step removing `ids` (any clip kind).
 fn delete_edits(project: &Project, ids: &BTreeSet<ClipId>) -> Edit {
     let pl = &project.playlist;
     Edit::Batch(
@@ -1563,6 +1300,8 @@ fn delete_edits(project: &Project, ids: &BTreeSet<ClipId>) -> Edit {
                     Some(Edit::RemoveClip(*id))
                 } else if pl.audio_clip(*id).is_some() {
                     Some(Edit::RemoveAudioClip(*id))
+                } else if pl.automation_clip(*id).is_some() {
+                    Some(Edit::RemoveAutomationClip(*id))
                 } else {
                     None
                 }
@@ -1575,6 +1314,9 @@ fn mute_edit(project: &Project, id: ClipId, muted: bool) -> Option<Edit> {
     let pl = &project.playlist;
     if pl.clip(id).is_some() {
         return Some(Edit::SetClipMuted(id, muted));
+    }
+    if let Some(c) = pl.automation_clip(id) {
+        return Some(Edit::SetAutomationClip(AutomationClip { muted, ..*c }));
     }
     pl.audio_clip(id)
         .map(|c| Edit::SetAudioClip(AudioClip { muted, ..*c }))
@@ -1674,6 +1416,40 @@ fn draw_clip(
                 }
             }
             (asset.name.clone(), c.muted)
+        }
+        Item::Automation(c) => {
+            let Some(source) = project.automation_lane(c.source) else {
+                return;
+            };
+            // The source's envelope over the clip's range.
+            let x_of = |t: u64| r.left() + (t as f32 - c.offset as f32) * ppt;
+            let line = envelope_line(
+                &source.points,
+                body.shrink2(vec2(0.0, 1.0)),
+                &x_of,
+                (body.left(), body.right()),
+            );
+            let line: Vec<Pos2> = line
+                .into_iter()
+                .map(|p| pos2(p.x.clamp(body.left(), body.right()), p.y))
+                .collect();
+            let missing = !source.target.exists(project);
+            let ink = if missing {
+                theme::WARN
+            } else if audible {
+                AUTOMATION_COLOR
+            } else {
+                AUTOMATION_COLOR.gamma_multiply(0.5)
+            };
+            painter
+                .with_clip_rect(body)
+                .add(egui::Shape::line(line, Stroke::new(1.5, ink)));
+            let name = if missing {
+                format!("{} (target not found)", source.name)
+            } else {
+                source.name.clone()
+            };
+            (name, c.muted)
         }
     };
     if muted {
@@ -1822,105 +1598,5 @@ fn draw_waveform(
             Stroke::new(1.0, ink),
         );
         x += 1.0;
-    }
-}
-/// Context menu of an automation lane, or of one of its points.
-fn automation_menu(
-    ui: &mut egui::Ui,
-    project: &Project,
-    lane: &AutomationLane,
-    point: Option<usize>,
-    out: &mut PlaylistOutput,
-) {
-    if let Some(k) = point
-        && let Some(pt) = lane.points.get(k).copied()
-    {
-        ui.label(value_text(project, &lane.target, pt.value));
-        ui.label("Curve to the next point");
-        for (curve, name) in [
-            (Curve::Linear, "Linear"),
-            (Curve::Curve, "Curve"),
-            (Curve::Hold, "Hold"),
-        ] {
-            if ui.radio(pt.curve == curve, name).clicked() && pt.curve != curve {
-                // A visible bend to start from.
-                let tension = if curve == Curve::Curve && pt.tension == 0.0 {
-                    0.5
-                } else {
-                    pt.tension
-                };
-                out.edits.push(with_points(lane, |pts| {
-                    pts[k].curve = curve;
-                    pts[k].tension = tension;
-                }));
-            }
-        }
-        if pt.curve == Curve::Curve {
-            let mut tension = pt.tension;
-            let r = ui.add(egui::Slider::new(&mut tension, -1.0..=1.0).text("Tension"));
-            if r.changed() {
-                out.gesture
-                    .push(with_points(lane, |pts| pts[k].tension = tension));
-            }
-            out.end_gesture |= r.drag_stopped() || r.lost_focus();
-        }
-        if ui.button("Delete point").clicked() {
-            out.edits.push(with_points(lane, |pts| {
-                pts.remove(k);
-            }));
-            ui.close();
-        }
-        ui.separator();
-    }
-    if ui.button("Remove lane").clicked() {
-        out.edits.push(Edit::SetAutomation {
-            id: lane.id,
-            lane: None,
-        });
-        ui.close();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use jdance_domain::{AutomationTarget, TrackId};
-
-    fn pt(tick: u64, value: f32, curve: Curve) -> AutoPoint {
-        AutoPoint {
-            tick,
-            value,
-            curve,
-            tension: 0.0,
-        }
-    }
-
-    #[test]
-    fn envelope_shapes() {
-        let lane = AutomationLane {
-            id: AutomationId(1),
-            target: AutomationTarget::TrackPan(TrackId(1)),
-            points: vec![pt(100, 0.0, Curve::Hold), pt(200, 1.0, Curve::Linear)],
-        };
-        // Row of 2·AUTO_PAD + 100 px: value v sits at y = 106 - 100·v.
-        let row = Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 2.0 * AUTO_PAD + 100.0));
-        let x_of = |t: u64| t as f32;
-        let line = envelope_line(&lane, row, &x_of, (0.0, 500.0));
-        let y = |v: f32| AUTO_PAD + 100.0 - 100.0 * v;
-        assert_eq!(
-            line,
-            [
-                pos2(0.0, y(0.0)),
-                pos2(100.0, y(0.0)),
-                pos2(200.0, y(0.0)),
-                pos2(200.0, y(1.0)),
-                pos2(500.0, y(1.0)),
-            ]
-        );
-        let empty = AutomationLane {
-            points: Vec::new(),
-            ..lane
-        };
-        assert!(envelope_line(&empty, row, &x_of, (0.0, 500.0)).is_empty());
     }
 }

@@ -67,6 +67,7 @@ pub struct PlaybackSnapshot {
 /// wraps and delay compensation need no state.
 #[derive(Debug)]
 pub struct AudioClipRt {
+    pub id: jdance_domain::ClipId,
     /// The asset converted to the engine rate.
     pub buffer: Arc<SampleBuffer>,
     /// Index into [`PlaybackSnapshot::tracks`].
@@ -82,12 +83,16 @@ pub struct AudioClipRt {
     pub fade_out: u64,
     /// Delay compensation: the clip sounds `delay` samples later.
     pub delay: u64,
+    /// Index into [`PlaybackSnapshot::automation`] for the clip gain.
+    pub auto_gain: Option<usize>,
 }
 
 impl AudioClipRt {
     /// Adds the clip's output for timeline samples `[from, from + n)`
-    /// into `l` and `r` (`n` = their length). Realtime-safe.
-    pub fn render_add(&self, from: u64, l: &mut [f32], r: &mut [f32]) {
+    /// into `l` and `r` (`n` = their length). Realtime-safe. Automated
+    /// gain is read at 32-sample steps of the (undelayed) timeline and
+    /// ramped linearly between them, so it is block-size independent.
+    pub fn render_add(&self, from: u64, l: &mut [f32], r: &mut [f32], automation: &[AutomationRt]) {
         let n = l.len() as u64;
         let (start, end) = (self.start + self.delay, self.end + self.delay);
         let (a, b) = (from.max(start), (from + n).min(end));
@@ -113,11 +118,27 @@ impl AudioClipRt {
             } else {
                 1.0
             };
-            let g = self.gain * fin * fout;
+            let g = self.gain_at(t - self.delay, automation) * fin * fout;
             let o = (t - from) as usize;
             l[o] += buf.left[i] * g;
             r[o] += buf.right[i] * g;
         }
+    }
+}
+
+impl AudioClipRt {
+    fn gain_at(&self, pos: u64, automation: &[AutomationRt]) -> f32 {
+        let Some(a) = self.auto_gain.and_then(|i| automation.get(i)) else {
+            return self.gain;
+        };
+        let step = crate::automation::AUTOMATION_STEP as u64;
+        let at = |p: u64| a.plain_at(p).unwrap_or(self.gain);
+        let k = pos % step;
+        if k == 0 {
+            return at(pos);
+        }
+        let (g0, g1) = (at(pos - k), at(pos - k + step));
+        g0 + (g1 - g0) * k as f32 / step as f32
     }
 }
 
@@ -348,8 +369,10 @@ impl PlaybackSnapshot {
     }
 }
 
-/// Compiles the project's lanes and attaches them to their targets.
-/// Lanes whose target is gone are skipped (AUT-050).
+/// Compiles the project's automation per target: its sources, active
+/// inside the windows of their (playing) clips (spec 0.2.0 §11), and
+/// attaches it to the target. Sources whose target is gone are skipped
+/// (AUT-050).
 fn bind_automation(
     project: &Project,
     snap: &mut PlaybackSnapshot,
@@ -362,12 +385,34 @@ fn bind_automation(
             .enumerate()
             .find_map(|(ti, t)| t.inserts.iter().position(|i| i.id == id).map(|ii| (ti, ii)))
     };
+    let pl = &project.playlist;
+    let mut targets: Vec<(&jdance_domain::AutomationTarget, AutomationRt)> = Vec::new();
     for lane in &project.automation {
-        if lane.points.is_empty() {
+        let clips = pl
+            .automation_clips
+            .iter()
+            .filter(|c| c.source == lane.id && pl.admits_automation(c));
+        let k = match targets.iter().position(|(t, _)| **t == lane.target) {
+            Some(k) => k,
+            None => {
+                targets.push((&lane.target, AutomationRt::new(AutoMap::Raw)));
+                targets.len() - 1
+            }
+        };
+        let rt = &mut targets[k].1;
+        let source = rt.add_source(lane, to_sample);
+        for c in clips {
+            let (a, b) = c.interval();
+            rt.add_window(source, to_sample(a), to_sample(b), to_sample(c.offset));
+        }
+    }
+    for (target, mut rt) in targets {
+        rt.finish();
+        if rt.is_empty() {
             continue;
         }
         let index = snap.automation.len();
-        let map = match &lane.target {
+        let map = match target {
             T::TrackVolume(id) => {
                 let Some(t) = snap.tracks.iter_mut().find(|t| t.id == *id) else {
                     continue;
@@ -452,9 +497,16 @@ fn bind_automation(
                 inst.auto_plugin.push((*param, index));
                 AutoMap::Raw
             }
+            T::AudioClipGain(id) => {
+                let Some(c) = snap.audio_clips.iter_mut().find(|c| c.id == *id) else {
+                    continue;
+                };
+                c.auto_gain = Some(index);
+                AutoMap::Volume
+            }
         };
-        snap.automation
-            .push(AutomationRt::compile(lane, map, to_sample));
+        rt.map = map;
+        snap.automation.push(rt);
     }
 }
 
@@ -722,9 +774,6 @@ pub fn compile_full(
     let spt = samples_per_tick(project.tempo_bpm, sample_rate);
     snapshot.samples_per_tick = spt;
     let to_sample = |tick: u64| (tick as f64 * spt).round() as u64;
-    if snapshot.song {
-        bind_automation(project, &mut snapshot, &to_sample);
-    }
     match mode {
         PlayMode::Pattern(id) => {
             let Some(pattern) = project.pattern(id).or_else(|| project.patterns.first()) else {
@@ -795,6 +844,9 @@ pub fn compile_full(
             snapshot.end_tail = snapshot.latency as u64 + (tail * sample_rate as f32) as u64;
         }
     }
+    if snapshot.song {
+        bind_automation(project, &mut snapshot, &to_sample);
+    }
     // Overlapping clips keep all events (no de-duplication).
     snapshot.events.sort_by_key(|e| (e.pos, e.channel));
     snapshot
@@ -843,6 +895,7 @@ fn compile_audio_clips(
         let track = track_of(lane_track);
         let bound = |f: u64| f.max(fade).min(len / 2);
         out.push(AudioClipRt {
+            id: c.id,
             buffer,
             track,
             start,
@@ -852,6 +905,7 @@ fn compile_audio_clips(
             fade_in: bound(to_dev(c.fade_in, tb)),
             fade_out: bound(to_dev(c.fade_out, tb)),
             delay: u64::from(in_lat.get(track).copied().unwrap_or(0)),
+            auto_gain: None,
         });
     }
     out.sort_by_key(|c| c.start);

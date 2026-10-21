@@ -12,16 +12,16 @@ mod playlist;
 pub use mixer::{add_insert, add_send, add_track};
 pub use playlist::{
     Edge, add_clip, add_lane, add_pattern, audio_clip_edge, duplicate_clips, make_unique,
-    pattern_clip_edge, slice_audio_clip, slice_pattern_clip, steps_beyond,
+    new_lane_edit, pattern_clip_edge, slice_audio_clip, slice_pattern_clip, steps_beyond,
 };
 
 use jdance_domain::{
-    AssetId, AudioAsset, AudioClip, AutoPoint, AutomationId, AutomationLane, AutomationTarget,
-    Channel, ChannelId, ClipId, Curve, Effect, InsertId, Lane, LaneId, LimiterSettings,
-    MAX_CHANNEL_PITCH, MAX_CHANNELS, MAX_NOTES_PER_ROW, MAX_POLYPHONY, MAX_TEMPO_BPM, MAX_VOLUME,
-    MIN_TEMPO_BPM, Mixer, MixerTrack, Note, Pattern, PatternClip, PatternId, Playlist, Project,
-    RoutingError, SampleRef, SamplerSettings, SendId, Sidechain, Step, StepRow, TrackId,
-    sort_notes, sort_points,
+    AssetId, AudioAsset, AudioClip, AutoPoint, AutomationClip, AutomationId, AutomationLane,
+    AutomationTarget, Channel, ChannelId, ClipId, Curve, Effect, InsertId, Lane, LaneId,
+    LimiterSettings, MAX_CHANNEL_PITCH, MAX_CHANNELS, MAX_NOTES_PER_ROW, MAX_POLYPHONY,
+    MAX_TEMPO_BPM, MAX_VOLUME, MIN_TEMPO_BPM, Mixer, MixerTrack, Note, Pattern, PatternClip,
+    PatternId, Playlist, Project, RoutingError, SampleRef, SamplerSettings, SendId, Sidechain,
+    Step, StepRow, TrackId, sort_notes, sort_points,
 };
 use thiserror::Error;
 
@@ -186,6 +186,10 @@ pub enum Edit {
     RenameAsset(AssetId, String),
     AddAudioClip(AudioClip),
     RemoveAudioClip(ClipId),
+    AddAutomationClip(AutomationClip),
+    RemoveAutomationClip(ClipId),
+    /// Replaces an automation clip (move, resize, mute).
+    SetAutomationClip(AutomationClip),
     /// Replaces an audio clip by ID (move, trim, gain, mute, fades).
     SetAudioClip(AudioClip),
     /// Mixer track for a lane's audio clips.
@@ -213,7 +217,8 @@ pub enum Edit {
         automation: Vec<AutomationLane>,
     },
     /// Adds (`lane: Some`, new id), replaces or removes (`None`) an
-    /// automation lane. Points are sorted on apply.
+    /// automation source. Points are sorted on apply; a source used by
+    /// clips cannot be removed.
     SetAutomation {
         id: AutomationId,
         lane: Option<AutomationLane>,
@@ -237,7 +242,8 @@ pub enum MergeKey {
     ChannelPlayback(ChannelId),
     Sampler(ChannelId),
     Automation(AutomationId),
-    AudioClip(ClipId),
+    /// An audio or automation clip.
+    Clip(ClipId),
 }
 
 impl Edit {
@@ -299,6 +305,9 @@ impl Edit {
             Edit::AddAudioClip(_) => "Add audio clip",
             Edit::RemoveAudioClip(_) => "Delete audio clip",
             Edit::SetAudioClip(_) => "Edit audio clip",
+            Edit::AddAutomationClip(_) => "Add automation clip",
+            Edit::RemoveAutomationClip(_) => "Delete automation clip",
+            Edit::SetAutomationClip(_) => "Edit automation clip",
             Edit::SetLaneAudioTrack(..) => "Route lane audio",
             Edit::SetClipMuted(..) => "Mute clip",
             Edit::MakeUnique { .. } => "Make unique",
@@ -314,7 +323,8 @@ impl Edit {
     pub fn merge_key(&self) -> Option<MergeKey> {
         match self {
             Edit::SetTempo(_) => Some(MergeKey::Tempo),
-            Edit::SetAudioClip(c) => Some(MergeKey::AudioClip(c.id)),
+            Edit::SetAudioClip(c) => Some(MergeKey::Clip(c.id)),
+            Edit::SetAutomationClip(c) => Some(MergeKey::Clip(c.id)),
             Edit::SetChannelVolume(id, _) => Some(MergeKey::ChannelVolume(*id)),
             Edit::SetChannelPan(id, _) => Some(MergeKey::ChannelPan(*id)),
             Edit::SetMasterVolume(_) => Some(MergeKey::MasterVolume),
@@ -380,20 +390,29 @@ impl Edit {
                         new.id = *id;
                         sort_points(&mut new.points);
                         new.validate().map_err(EditError::Arrangement)?;
-                        if p.automation
-                            .iter()
-                            .any(|l| l.id != *id && l.target == new.target)
-                        {
-                            return Err(EditError::Arrangement(
-                                "the target already has an automation lane".into(),
-                            ));
-                        }
                         match at {
                             Some(i) => p.automation[i] = new,
                             None => p.automation.push(new),
                         }
+                        // A shorter source or a new target must still fit
+                        // its clips.
+                        if let Err(e) = p.validate_arrangement() {
+                            match (at, old.clone()) {
+                                (Some(i), Some(o)) => p.automation[i] = o,
+                                _ => {
+                                    p.automation.pop();
+                                }
+                            }
+                            return Err(EditError::Arrangement(e));
+                        }
                     }
                     None => {
+                        let used = p.automation_usage(*id);
+                        if used > 0 {
+                            return Err(EditError::Arrangement(format!(
+                                "the automation is used by {used} clip(s)"
+                            )));
+                        }
                         if let Some(i) = at {
                             p.automation.remove(i);
                         }
@@ -468,18 +487,13 @@ impl Edit {
                         rows.push((pat.id, pat.rows.remove(i)));
                     }
                 }
-                // The channel's automation goes with it (AUT-050).
-                let target = jdance_domain::PluginTarget::Channel(*id);
-                let (automation, keep): (Vec<_>, Vec<_>) =
-                    std::mem::take(&mut p.automation).into_iter().partition(|l| {
-                        matches!(&l.target, AutomationTarget::PluginParam { target: t, .. } if *t == target)
-                    });
-                p.automation = keep;
+                // Automation of the channel's instrument stays, shown as
+                // missing (AUT-050); undo reconnects it.
                 Ok(Edit::AddChannel {
                     channel,
                     index,
                     rows,
-                    automation,
+                    automation: Vec::new(),
                 })
             }
             Edit::SetChannelVolume(id, v) => {
@@ -615,6 +629,9 @@ impl Edit {
             | Edit::AddAudioClip(_)
             | Edit::RemoveAudioClip(_)
             | Edit::SetAudioClip(_)
+            | Edit::AddAutomationClip(_)
+            | Edit::RemoveAutomationClip(_)
+            | Edit::SetAutomationClip(_)
             | Edit::SetLaneAudioTrack(..)
             | Edit::MakeUnique { .. }
             | Edit::SetLoop { .. }
@@ -893,13 +910,16 @@ pub fn add_instrument_channel(
     Ok(id)
 }
 
-/// Creates the automation lane for `target` with one point at the song
-/// start holding `initial` (normalized), or returns the existing lane.
+/// Creates an automation source for `target` named `name`, with one
+/// point holding `initial` (normalized), and places it with a clip from
+/// the song start over the arrangement (at least 4 bars) on a new lane;
+/// one undo step. A target that already has a source returns that one.
 pub fn add_automation(
     history: &mut History,
     p: &mut Project,
     target: AutomationTarget,
     initial: f32,
+    name: String,
 ) -> Result<AutomationId, EditError> {
     if let Some(l) = p.lane_for(&target) {
         return Ok(l.id);
@@ -908,23 +928,59 @@ pub fn add_automation(
         return Err(EditError::Arrangement("automation target not found".into()));
     }
     let id = AutomationId(p.ids.next());
+    let bar = 4 * u64::from(jdance_domain::PPQ);
+    let length = p.arrangement_end_ticks().div_ceil(bar).max(4) * bar;
+    let (lane, add_lane) = new_lane_edit(p, name.clone());
+    let clip = ClipId(p.ids.next());
     history.execute(
         p,
-        Edit::SetAutomation {
-            id,
-            lane: Some(AutomationLane {
+        Edit::Batch(vec![
+            Edit::SetAutomation {
                 id,
-                target,
-                points: vec![AutoPoint {
-                    tick: 0,
-                    value: initial.clamp(0.0, 1.0),
-                    curve: Curve::Linear,
-                    tension: 0.0,
-                }],
+                lane: Some(AutomationLane {
+                    id,
+                    name,
+                    target,
+                    length,
+                    points: vec![AutoPoint {
+                        tick: 0,
+                        value: initial.clamp(0.0, 1.0),
+                        curve: Curve::Linear,
+                        tension: 0.0,
+                    }],
+                }),
+            },
+            add_lane,
+            Edit::AddAutomationClip(AutomationClip {
+                id: clip,
+                lane,
+                source: id,
+                start: 0,
+                offset: 0,
+                duration: length,
+                muted: false,
             }),
-        },
+        ]),
     )?;
     Ok(id)
+}
+
+/// Removes an automation source with all its clips; one undo step.
+pub fn remove_automation(
+    history: &mut History,
+    p: &mut Project,
+    id: AutomationId,
+) -> Result<(), EditError> {
+    let mut edits: Vec<Edit> = p
+        .playlist
+        .automation_clips
+        .iter()
+        .filter(|c| c.source == id)
+        .map(|c| Edit::RemoveAutomationClip(c.id))
+        .collect();
+    edits.push(Edit::SetAutomation { id, lane: None });
+    history.execute(p, Edit::Batch(edits))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1164,21 +1220,37 @@ mod tests {
         let target = AutomationTarget::TrackPan(t);
         let n = target.normalized(&p).unwrap();
         assert_eq!(n, 0.75);
-        let id = add_automation(&mut h, &mut p, target.clone(), n).unwrap();
-        assert_eq!(p.automation_lane(id).unwrap().points[0].value, 0.75);
-        assert_eq!(add_automation(&mut h, &mut p, target, 0.1).unwrap(), id);
+        let lanes = p.playlist.lanes.len();
+        let id = add_automation(&mut h, &mut p, target.clone(), n, "Bus pan".into()).unwrap();
+        let source = p.automation_lane(id).unwrap();
+        assert_eq!(source.points[0].value, 0.75);
+        assert_eq!(source.length, 4 * 3840, "at least 4 bars");
+        let clip = p.playlist.automation_clips[0];
+        assert_eq!((clip.source, clip.start, clip.duration), (id, 0, 4 * 3840));
+        assert_eq!(p.playlist.lane(clip.lane).unwrap().name, "Bus pan");
+        assert_eq!(p.playlist.lanes.len(), lanes + 1);
+        assert_eq!(
+            add_automation(&mut h, &mut p, target, 0.1, "x".into()).unwrap(),
+            id
+        );
         assert_eq!(p.automation.len(), 1);
         assert!(
             add_automation(
                 &mut h,
                 &mut p,
                 AutomationTarget::TrackPan(TrackId(999)),
-                0.0
+                0.0,
+                "x".into()
             )
             .is_err()
         );
+        remove_automation(&mut h, &mut p, id).unwrap();
+        assert!(p.automation.is_empty() && p.playlist.automation_clips.is_empty());
+        h.undo(&mut p).unwrap();
+        assert_eq!(p.automation_usage(id), 1);
         h.undo(&mut p).unwrap();
         assert!(p.automation.is_empty());
+        assert_eq!(p.playlist.lanes.len(), lanes, "one undo step");
     }
 
     #[test]

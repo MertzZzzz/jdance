@@ -5,6 +5,7 @@
 //! through `jdance-commands`, and tells the [`Host`] when it changed.
 
 mod automation;
+mod automation_editor;
 mod browser;
 mod channel_settings;
 mod host;
@@ -65,6 +66,7 @@ pub(crate) enum RenameTarget {
     Pattern(PatternId),
     Lane(LaneId),
     Asset(jdance_domain::AssetId),
+    Automation(jdance_domain::AutomationId),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -111,6 +113,7 @@ pub struct JdanceApp<H: Host, S: ProjectStore> {
     mode_sent: Option<TransportMode>,
     playlist_view: playlist::PlaylistView,
     sample_editor: Option<sample_editor::SampleEditor>,
+    automation_editors: Vec<automation_editor::AutomationEditor>,
     sample_picker: Option<library::SamplePicker>,
     show_library: bool,
     /// Audio imports in flight: ticket → where the clip goes (`None` =
@@ -182,6 +185,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             mode_sent: None,
             playlist_view: playlist::PlaylistView::default(),
             sample_editor: None,
+            automation_editors: Vec::new(),
             sample_picker: None,
             show_library: false,
             pending_imports: std::collections::BTreeMap::new(),
@@ -844,6 +848,16 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 self.open_clip(id);
                 Ok(())
             }
+            A::AutomateGain(id) => {
+                if let Some(c) = self.project.playlist.audio_clip(id) {
+                    let request = automation::AutomationRequest::Create {
+                        target: jdance_domain::AutomationTarget::AudioClipGain(id),
+                        initial: c.gain / jdance_domain::MAX_VOLUME,
+                    };
+                    self.automation_request(request, now);
+                }
+                Ok(())
+            }
         };
         match result {
             Ok(()) => self.sync_needed = true,
@@ -869,6 +883,9 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 let name = match source {
                     playlist::Source::Pattern(id) => p.pattern(id).map(|x| x.name.clone()),
                     playlist::Source::Asset(id) => p.asset(id).map(|x| x.name.clone()),
+                    playlist::Source::Automation(id) => {
+                        p.automation_lane(id).map(|x| x.name.clone())
+                    }
                 };
                 let (id, edit) = new_lane_edit(p, name.unwrap_or_else(|| "Lane".into()));
                 edits.push(edit);
@@ -906,6 +923,27 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                     let mut clip = audio_clip_for(&asset, cid, lane, 0);
                     clip.start = first + k * clip.length(&asset, p.timebase_rate);
                     edits.push(Edit::AddAudioClip(clip));
+                }
+            }
+            playlist::Source::Automation(id) => {
+                let len = p
+                    .automation_lane(id)
+                    .ok_or_else(|| {
+                        jdance_commands::EditError::Arrangement("the automation is gone".into())
+                    })?
+                    .length;
+                for k in 0..u64::from(count.max(1)) {
+                    let cid = ClipId(p.ids.next());
+                    ids.push(cid);
+                    edits.push(Edit::AddAutomationClip(jdance_domain::AutomationClip {
+                        id: cid,
+                        lane,
+                        source: id,
+                        start: start + k * len,
+                        offset: 0,
+                        duration: len,
+                        muted: false,
+                    }));
                 }
             }
         }
@@ -1017,6 +1055,26 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 return Ok(());
             };
             vec![Edit::SetAudioClip(l), Edit::AddAudioClip(r)]
+        } else if let Some(c) = p.playlist.automation_clip(id).copied() {
+            let (a, b) = c.interval();
+            if tick <= a || tick >= b {
+                return Ok(());
+            }
+            let left = jdance_domain::AutomationClip {
+                duration: tick - a,
+                ..c
+            };
+            let right = jdance_domain::AutomationClip {
+                id: new_id,
+                start: tick,
+                offset: c.offset + (tick - a),
+                duration: b - tick,
+                ..c
+            };
+            vec![
+                Edit::SetAutomationClip(left),
+                Edit::AddAutomationClip(right),
+            ]
         } else {
             return Ok(());
         };
@@ -1039,6 +1097,42 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             }
         } else if let Some(c) = self.project.playlist.audio_clip(id) {
             self.sample_editor = Some(sample_editor::SampleEditor::for_clip(c));
+        } else if let Some(c) = self.project.playlist.automation_clip(id) {
+            self.open_automation(c.source);
+        }
+    }
+
+    /// Opens (or brings back) the Automation Editor of `id`.
+    fn open_automation(&mut self, id: jdance_domain::AutomationId) {
+        if !self.automation_editors.iter().any(|e| e.source == id) {
+            self.automation_editors
+                .push(automation_editor::AutomationEditor::new(id));
+        }
+    }
+
+    fn automation_editor_windows(&mut self, ctx: &egui::Context, now: f64) {
+        let mut editors = std::mem::take(&mut self.automation_editors);
+        let mut out = automation_editor::EditorOutput::default();
+        editors.retain_mut(|e| {
+            e.show(
+                ctx,
+                &self.project,
+                u64::from(self.snap.max(1)),
+                &mut self.host,
+                &mut out,
+            )
+        });
+        // A window opened meanwhile (none can be) would be kept too.
+        editors.append(&mut self.automation_editors);
+        self.automation_editors = editors;
+        for edit in out.edits {
+            self.apply(edit, false, now);
+        }
+        for edit in out.gesture {
+            self.apply(edit, true, now);
+        }
+        if out.end_gesture {
+            self.history.end_gesture();
         }
     }
 
@@ -1141,6 +1235,35 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 self.confirm_delete = Some(playlist::Source::Asset(id));
                 Ok(())
             }
+            A::OpenAutomation(id) => {
+                self.open_automation(id);
+                Ok(())
+            }
+            A::RenameAutomation(id) => {
+                self.start_rename(RenameTarget::Automation(id));
+                Ok(())
+            }
+            A::DuplicateAutomation(id) => match self.project.automation_lane(id).cloned() {
+                Some(src) => {
+                    let new_id = jdance_domain::AutomationId(self.project.ids.next());
+                    self.history.execute(
+                        &mut self.project,
+                        Edit::SetAutomation {
+                            id: new_id,
+                            lane: Some(jdance_domain::AutomationLane {
+                                id: new_id,
+                                name: format!("{} copy", src.name),
+                                ..src
+                            }),
+                        },
+                    )
+                }
+                None => Ok(()),
+            },
+            A::DeleteAutomation(id) => {
+                self.confirm_delete = Some(playlist::Source::Automation(id));
+                Ok(())
+            }
         };
         match result {
             Ok(()) => self.sync_needed = true,
@@ -1162,6 +1285,13 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                     p.playlist.clips.iter().filter(|c| c.pattern == id).count(),
                     0,
                 ),
+                None => {
+                    self.confirm_delete = None;
+                    return;
+                }
+            },
+            playlist::Source::Automation(id) => match p.automation_lane(id) {
+                Some(a) => (a.name.clone(), p.automation_usage(id), 0),
                 None => {
                     self.confirm_delete = None;
                     return;
@@ -1222,6 +1352,15 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
     fn delete_source(&mut self, target: playlist::Source, now: f64) {
         let edit = match target {
             playlist::Source::Pattern(id) => Edit::RemovePattern(id),
+            playlist::Source::Automation(id) => {
+                if let Err(e) =
+                    jdance_commands::remove_automation(&mut self.history, &mut self.project, id)
+                {
+                    self.notify(Notice::error(e.to_string()), now);
+                }
+                self.sync_needed = true;
+                return;
+            }
             playlist::Source::Asset(id) => {
                 let mut edits: Vec<Edit> = self
                     .project
@@ -1515,6 +1654,9 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 .lane(id)
                 .map(|l| (l.name.clone(), Some(Some(l.color)), l.color)),
             RenameTarget::Asset(id) => p.asset(id).map(|a| (a.name.clone(), None, [0; 3])),
+            RenameTarget::Automation(id) => p
+                .automation_lane(id)
+                .map(|a| (a.name.clone(), None, [0; 3])),
         };
         if let Some((text, color, default_color)) = found {
             self.rename = Some(RenameDialog {
@@ -1580,25 +1722,35 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
     fn automation_request(&mut self, request: automation::AutomationRequest, now: f64) {
         match request {
             automation::AutomationRequest::Create { target, initial } => {
+                let name = automation::source_name(&self.project, &target, &mut self.host);
                 match jdance_commands::add_automation(
                     &mut self.history,
                     &mut self.project,
                     target,
                     initial,
+                    name,
                 ) {
-                    Ok(_) => {
+                    Ok(id) => {
                         self.sync_needed = true;
                         self.piano = None;
+                        self.show_playlist = true;
+                        self.open_automation(id);
                         self.notify(
-                            Notice::info("Automation lane added below the playlist lanes"),
+                            Notice::info("Automation clip added on a new Playlist lane"),
                             now,
                         );
                     }
                     Err(e) => self.notify(Notice::error(e.to_string()), now),
                 }
             }
+            automation::AutomationRequest::Edit(id) => self.open_automation(id),
             automation::AutomationRequest::Remove(id) => {
-                self.apply(Edit::SetAutomation { id, lane: None }, false, now);
+                if let Err(e) =
+                    jdance_commands::remove_automation(&mut self.history, &mut self.project, id)
+                {
+                    self.notify(Notice::error(e.to_string()), now);
+                }
+                self.sync_needed = true;
             }
         }
     }
@@ -1731,6 +1883,13 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                     RenameTarget::Pattern(id) => Edit::RenamePattern(id, name),
                     RenameTarget::Lane(id) => Edit::RenameLane(id, name),
                     RenameTarget::Asset(id) => Edit::RenameAsset(id, name),
+                    RenameTarget::Automation(id) => match self.project.automation_lane(id) {
+                        Some(a) => Edit::SetAutomation {
+                            id,
+                            lane: Some(jdance_domain::AutomationLane { name, ..a.clone() }),
+                        },
+                        None => Edit::Batch(Vec::new()),
+                    },
                 });
             }
             match (target, color) {
@@ -2013,7 +2172,6 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
                 }
                 _ => {
                     let playhead = transport.position_ticks.filter(|_| self.song_mode);
-                    let lanes = automation::lane_infos(&self.project, &mut self.host);
                     let dir = self.path.as_deref().and_then(Path::parent);
                     ui.horizontal_top(|ui| {
                         ui.vertical(|ui| {
@@ -2021,6 +2179,7 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
                                 ui,
                                 &self.project,
                                 self.playlist_view.source,
+                                &mut self.host,
                             );
                         });
                         ui.separator();
@@ -2028,7 +2187,6 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
                             pl_out = self.playlist_view.show(
                                 ui,
                                 &self.project,
-                                &lanes,
                                 playhead,
                                 self.snap,
                                 self.current_pattern,
@@ -2078,6 +2236,7 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
         self.finish_imports(now);
         self.confirm_delete_dialog(&ctx, now);
         self.sample_editor_window(&ctx, now);
+        self.automation_editor_windows(&ctx, now);
         if self.show_library {
             self.show_library = library::library_window(&ctx, &mut self.host);
         }

@@ -14,7 +14,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 pub const FORMAT_TAG: &str = "jdance-project";
-pub const CURRENT_FORMAT_VERSION: u32 = 11;
+pub const CURRENT_FORMAT_VERSION: u32 = 12;
 pub const PROJECT_EXTENSION: &str = "jdance";
 
 /// Saves `project` to `path` atomically. Sample paths inside the project
@@ -188,6 +188,10 @@ fn migrate(version: u32, mut project: Value) -> Result<Value, PersistError> {
         project = v10_to_v11(project)?;
         v = 11;
     }
+    if v == 11 {
+        project = v11_to_v12(project)?;
+        v = 12;
+    }
     match v {
         CURRENT_FORMAT_VERSION => Ok(project),
         v => Err(PersistError::Corrupt(format!("unknown format_version {v}"))),
@@ -235,6 +239,16 @@ fn v10_to_v11(mut project: Value) -> Result<Value, PersistError> {
         obj.insert("looped".into(), true.into());
     }
     Ok(project)
+}
+
+/// v12 (0.2.0): automation lanes on the song timeline become sources
+/// placed by automation clips (plan D1). The v11 shape reads as v12 with
+/// sources of length 0, which the domain turns into a clip each.
+fn v11_to_v12(project: Value) -> Result<Value, PersistError> {
+    let mut p: Project = serde_json::from_value(project)
+        .map_err(|e| PersistError::Corrupt(format!("v11 project: {e}")))?;
+    p.adopt_timeline_automation();
+    serde_json::to_value(&p).map_err(|e| PersistError::Corrupt(e.to_string()))
 }
 
 /// v5 added the playlist (lanes, pattern clips, loop). Older projects get
@@ -503,7 +517,9 @@ mod tests {
         let id = AutomationId(p.ids.next());
         p.automation.push(AutomationLane {
             id,
+            name: "Master volume".into(),
             target: AutomationTarget::TrackVolume(TrackId::MASTER),
+            length: 7680,
             points: vec![
                 AutoPoint {
                     tick: 0,
@@ -519,6 +535,18 @@ mod tests {
                 },
             ],
         });
+        let lane = p.playlist.lanes[0].id;
+        p.playlist
+            .automation_clips
+            .push(jdance_domain::AutomationClip {
+                id: jdance_domain::ClipId(p.ids.next()),
+                lane,
+                source: id,
+                start: 960,
+                offset: 480,
+                duration: 3840,
+                muted: false,
+            });
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("a.jdance");
         save_project(&file, &p).unwrap();
@@ -676,6 +704,60 @@ mod tests {
         assert_eq!(
             std::fs::read(&backup).unwrap(),
             serde_json::to_vec(&file).unwrap()
+        );
+    }
+
+    #[test]
+    fn v11_timeline_automation_becomes_a_source_and_a_clip() {
+        let mut p = Project::new();
+        let lane = p.playlist.lanes[0].id;
+        let pat = p.patterns[0].clone();
+        p.playlist.clips.push(jdance_domain::PatternClip::repeating(
+            jdance_domain::ClipId(p.ids.next()),
+            lane,
+            &pat,
+            0,
+            2,
+        ));
+        let id = jdance_domain::AutomationId(p.ids.next());
+        let point = |tick, value| jdance_domain::AutoPoint {
+            tick,
+            value,
+            curve: jdance_domain::Curve::Linear,
+            tension: 0.0,
+        };
+        p.automation.push(jdance_domain::AutomationLane {
+            id,
+            name: String::new(),
+            target: jdance_domain::AutomationTarget::TrackVolume(jdance_domain::TrackId::MASTER),
+            length: 0,
+            points: vec![point(0, 0.2), point(960, 0.8)],
+        });
+        let mut v = serde_json::to_value(&p).unwrap();
+        for a in v["automation"].as_array_mut().unwrap() {
+            let a = a.as_object_mut().unwrap();
+            a.remove("name");
+            a.remove("length");
+        }
+        let file = serde_json::json!({"format": FORMAT_TAG, "format_version": 11, "project": v});
+        let loaded = parse_project(&serde_json::to_vec(&file).unwrap()).unwrap();
+        let source = &loaded.automation[0];
+        let bar = 4 * u64::from(jdance_domain::PPQ);
+        assert_eq!(source.length, 2 * 3840 + bar, "arrangement end plus a bar");
+        assert_eq!(source.points, p.automation[0].points, "points unchanged");
+        assert_eq!(source.name, "Automation 1");
+        let clip = &loaded.playlist.automation_clips[0];
+        assert_eq!(
+            (clip.source, clip.start, clip.offset, clip.duration),
+            (id, 0, 0, source.length)
+        );
+        let new_lane = loaded.playlist.lane(clip.lane).unwrap();
+        assert_eq!(new_lane.name, "Automation 1");
+        assert_eq!(loaded.playlist.lanes.len(), p.playlist.lanes.len() + 1);
+        assert_eq!(
+            loaded.arrangement_end_ticks(),
+            2 * 3840,
+            "song length unchanged"
         );
     }
 

@@ -19,8 +19,8 @@ pub use audio::{
     frames_per_tick,
 };
 pub use automation::{
-    AutoPoint, AutomationLane, AutomationTarget, Curve, MAX_AUTOMATION_POINTS, curve_weight,
-    sort_points,
+    AutoPoint, AutomationLane, AutomationTarget, Curve, MAX_AUTOMATION_POINTS,
+    MAX_AUTOMATION_TICKS, curve_weight, sort_points,
 };
 pub use effects::{
     DELAY_DIVISIONS, EQ_MAX_FREQ, Effect, EffectKind, LimiterSettings, Mapping, ParamSpec,
@@ -38,7 +38,8 @@ pub use mixer::{
     MixerTrack, RoutingError, Send, Sidechain, Tap,
 };
 pub use playlist::{
-    LANE_COLORS, Lane, MAX_CLIP_TICKS, MAX_REPEAT, MAX_START_TICKS, PatternClip, Playlist,
+    AutomationClip, LANE_COLORS, Lane, MAX_CLIP_TICKS, MAX_REPEAT, MAX_START_TICKS, PatternClip,
+    Playlist,
 };
 pub use plugin::{PluginSlot, base64};
 
@@ -73,7 +74,8 @@ pub struct Project {
     pub patterns: Vec<Pattern>,
     pub mixer: Mixer,
     pub playlist: Playlist,
-    /// Automation lanes on the song timeline (ADR-014).
+    /// Automation sources (spec 0.2.0 §11); clips in the Playlist place
+    /// them on the timeline.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub automation: Vec<AutomationLane>,
     /// Frames per second of audio clip positions (spec 0.2.0 §2).
@@ -167,18 +169,93 @@ impl Project {
         (patterns, lanes)
     }
 
+    /// Automation clips using source `id`.
+    pub fn automation_usage(&self, id: AutomationId) -> usize {
+        self.playlist
+            .automation_clips
+            .iter()
+            .filter(|c| c.source == id)
+            .count()
+    }
+
+    /// First pair of overlapping automation clips with the same target,
+    /// as a message (spec 0.2.0 §11: such placement is rejected).
+    pub fn automation_overlap(&self) -> Option<String> {
+        let mut spans: Vec<(&AutomationTarget, u64, u64, &str)> = self
+            .playlist
+            .automation_clips
+            .iter()
+            .filter_map(|c| {
+                let s = self.automation_lane(c.source)?;
+                let (a, b) = c.interval();
+                Some((&s.target, a, b, s.name.as_str()))
+            })
+            .collect();
+        spans.sort();
+        spans.windows(2).find_map(|w| {
+            (w[0].0 == w[1].0 && w[1].1 < w[0].2).then(|| {
+                format!(
+                    "automation clips of one parameter may not overlap ({} and {})",
+                    w[0].3, w[1].3
+                )
+            })
+        })
+    }
+
+    /// Format v12 migration (spec 0.2.0 §13, plan D1): sources of length
+    /// 0 came from timeline lanes. Each becomes a source over the whole
+    /// arrangement plus a bar, placed by one clip at the song start on a
+    /// new lane, so playback stays the same within the arrangement.
+    pub fn adopt_timeline_automation(&mut self) {
+        let end = self.arrangement_end_ticks();
+        for i in 0..self.automation.len() {
+            if self.automation[i].length > 0 {
+                continue;
+            }
+            let last = self.automation[i].points.last().map_or(0, |p| p.tick);
+            let length = (last.max(end) + 4 * u64::from(PPQ)).min(MAX_AUTOMATION_TICKS);
+            let n = i + 1;
+            let source = &mut self.automation[i];
+            source.length = length;
+            if source.name.is_empty() {
+                source.name = format!("Automation {n}");
+            }
+            let (id, name) = (source.id, source.name.clone());
+            let lane = LaneId(self.ids.next());
+            let colors = &LANE_COLORS;
+            self.playlist.lanes.push(Lane {
+                id: lane,
+                name,
+                color: colors[self.playlist.lanes.len() % colors.len()],
+                muted: false,
+                solo: false,
+                audio_track: TrackId::MASTER,
+            });
+            let clip = ClipId(self.ids.next());
+            self.playlist.automation_clips.push(AutomationClip {
+                id: clip,
+                lane,
+                source: id,
+                start: 0,
+                offset: 0,
+                duration: length,
+                muted: false,
+            });
+        }
+    }
+
     /// The lane controlling `target`, if any (one lane per target).
     pub fn lane_for(&self, target: &AutomationTarget) -> Option<&AutomationLane> {
         self.automation.iter().find(|l| l.target == *target)
     }
 
-    /// Checks automation lanes. Lanes whose target is gone are kept
+    /// Checks automation sources. Sources whose target is gone are kept
     /// (AUT-050); they are reported by [`AutomationTarget::exists`].
     pub fn validate_automation(&self) -> Result<(), String> {
         let mut seen = std::collections::BTreeSet::new();
         for l in &self.automation {
-            if !seen.insert(&l.target) {
-                return Err("two automation lanes for one target".into());
+            if !seen.insert(l.id) {
+                return Err(format!("duplicate automation ID {}", l.id.0));
             }
             l.validate()?;
         }
@@ -256,6 +333,29 @@ impl Project {
                 .asset(c.asset)
                 .ok_or_else(|| format!("audio clip {} references a missing file", c.id.0))?;
             c.validate(asset)?;
+        }
+        for c in &self.playlist.automation_clips {
+            if !ids.insert(c.id.0) {
+                return Err(format!("duplicate clip ID {}", c.id.0));
+            }
+            if self.playlist.lane(c.lane).is_none() {
+                return Err(format!("automation clip {} is on a missing lane", c.id.0));
+            }
+            let source = self
+                .automation_lane(c.source)
+                .ok_or_else(|| format!("automation clip {} references a missing source", c.id.0))?;
+            if c.duration == 0 || c.offset + c.duration > source.length.max(1) {
+                return Err(format!(
+                    "automation clip {} reaches past its source",
+                    c.id.0
+                ));
+            }
+            if c.start > MAX_START_TICKS {
+                return Err(format!("automation clip {} starts too late", c.id.0));
+            }
+        }
+        if let Some(e) = self.automation_overlap() {
+            return Err(e);
         }
         Ok(())
     }
