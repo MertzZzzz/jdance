@@ -6,6 +6,7 @@
 
 mod host;
 mod mixer;
+mod piano;
 mod playlist;
 mod plugins;
 mod rack;
@@ -76,6 +77,8 @@ pub struct JdanceApp<H: Host, S: ProjectStore> {
     song_mode: bool,
     mode_sent: Option<TransportMode>,
     playlist_view: playlist::PlaylistView,
+    /// Piano roll shown instead of the playlist.
+    piano: Option<piano::PianoRoll>,
     /// Shortening that needs confirmation: (pattern, steps, dropped).
     pending_length: Option<(PatternId, u32, usize)>,
     notices: Vec<(Notice, f64)>,
@@ -123,6 +126,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             song_mode,
             mode_sent: None,
             playlist_view: playlist::PlaylistView::default(),
+            piano: None,
             pending_length: None,
             notices: Vec::new(),
             pending: None,
@@ -927,14 +931,43 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
                 );
             });
         let mut pl_out = playlist::PlaylistOutput::default();
+        let mut piano_out = piano::PianoOutput::default();
+        if let Some(id) = out.open_piano.take() {
+            self.piano = Some(piano::PianoRoll::new(id));
+        }
+        if self
+            .piano
+            .as_ref()
+            .is_some_and(|p| self.project.channel(p.channel).is_none())
+        {
+            self.piano = None;
+        }
         egui::CentralPanel::default().show(ui, |ui| {
-            let playhead = self
-                .host
-                .transport()
-                .position_ticks
-                .filter(|_| self.song_mode);
-            pl_out = self.playlist_view.show(ui, &self.project, playhead);
+            let transport = self.host.transport();
+            match (&mut self.piano, self.project.pattern(self.current_pattern)) {
+                (Some(roll), Some(pattern)) => {
+                    // The playhead shows when this pattern loops.
+                    let playhead = transport
+                        .loop_pos
+                        .filter(|_| transport.playing && !self.song_mode)
+                        .map(|p| p * pattern.length_ticks() as f32);
+                    piano_out = roll.show(ui, &self.project, pattern, playhead);
+                }
+                _ => {
+                    let playhead = transport.position_ticks.filter(|_| self.song_mode);
+                    pl_out = self.playlist_view.show(ui, &self.project, playhead);
+                }
+            }
         });
+        if piano_out.close {
+            self.piano = None;
+        }
+        for (edit, merging) in piano_out.edits {
+            self.apply(edit, merging, now);
+        }
+        if piano_out.end_gesture {
+            self.history.end_gesture();
+        }
         for edit in pl_out.edits {
             self.apply(edit, false, now);
         }

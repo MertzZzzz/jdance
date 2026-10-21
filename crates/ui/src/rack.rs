@@ -20,6 +20,8 @@ pub(crate) struct RackOutput {
     /// New channels to create: name and optional sample.
     pub new_channels: Vec<(String, Option<SampleRef>)>,
     pub rename: Option<crate::RenameTarget>,
+    /// Open the piano roll for this channel.
+    pub open_piano: Option<jdance_domain::ChannelId>,
 }
 
 pub(crate) fn show(
@@ -96,6 +98,10 @@ pub(crate) fn show(
                         out.rename = Some(crate::RenameTarget::Channel(ch.id));
                         ui.close();
                     }
+                    if ui.button("Piano roll").clicked() {
+                        out.open_piano = Some(ch.id);
+                        ui.close();
+                    }
                     if ui.button("Load sample…").clicked() {
                         if let Some(p) = pick_wav() {
                             out.edits
@@ -123,6 +129,19 @@ pub(crate) fn show(
                 };
                 let (dot, _) = ui.allocate_exact_size(vec2(10.0, STEP_SIZE), Sense::hover());
                 ui.painter().circle_filled(dot.center(), 3.5, color);
+                let notes = pattern.row(ch.id).map_or(0, |r| r.notes.len());
+                let label = if notes > 0 {
+                    format!("Piano {notes}")
+                } else {
+                    "Piano".to_owned()
+                };
+                if ui
+                    .small_button(label)
+                    .on_hover_text("Open the piano roll for this channel")
+                    .clicked()
+                {
+                    out.open_piano = Some(ch.id);
+                }
 
                 ui.weak("Vol");
                 ui.spacing_mut().slider_width = 70.0;

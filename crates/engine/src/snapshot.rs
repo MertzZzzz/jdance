@@ -10,7 +10,8 @@
 
 use crate::effect_rt::{EffectRt, InsertRt, PluginRt, SidechainRt};
 use jdance_domain::{
-    ChannelId, InsertId, MAX_CHANNELS, MixerTrack, PluginSlot, Project, SampleRef, SendId, TrackId,
+    ChannelId, InsertId, MAX_CHANNELS, MixerTrack, PluginSlot, Project, ROOT_KEY, SampleRef,
+    SendId, TrackId,
 };
 use jdance_dsp::{
     DelayLine, SafetyLimiter, SampleBuffer, Smoothed, StereoGain, balance_gains, pan_gains,
@@ -61,6 +62,11 @@ pub struct StepEvent {
     /// Index into [`PlaybackSnapshot::channels`].
     pub channel: usize,
     pub velocity: f32,
+    /// MIDI key; steps play [`ROOT_KEY`].
+    pub key: u8,
+    /// Gate length in samples, cut at the end of the pattern repetition;
+    /// 0 for steps (one-shot). One-shot samplers ignore it.
+    pub length: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -538,8 +544,31 @@ fn push_pattern_events(
                     pos,
                     channel: ch_index,
                     velocity: step.velocity,
+                    key: ROOT_KEY,
+                    length: 0,
                 });
             }
+        }
+        // Notes start inside the pattern; gated notes end at the
+        // repetition's end at the latest (spec "Playback boundaries").
+        let rep_end = base + pattern.length_ticks();
+        for n in &row.notes {
+            let start = base + u64::from(n.start);
+            if start >= rep_end {
+                continue;
+            }
+            let pos = to_sample(start);
+            if pos >= limit {
+                continue;
+            }
+            let end = to_sample((start + u64::from(n.length)).min(rep_end));
+            out.push(StepEvent {
+                pos,
+                channel: ch_index,
+                velocity: n.velocity,
+                key: n.key,
+                length: end.saturating_sub(pos).max(1),
+            });
         }
     }
 }

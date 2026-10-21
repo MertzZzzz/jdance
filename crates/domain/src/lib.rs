@@ -37,6 +37,10 @@ pub const TICKS_PER_STEP: u32 = PPQ / 4;
 pub const DEFAULT_PATTERN_STEPS: u32 = 16;
 /// Pattern length limit in steps (16 bars).
 pub const MAX_PATTERN_STEPS: u32 = 256;
+/// Upper bound for notes in one piano-roll row.
+pub const MAX_NOTES_PER_ROW: usize = 10_000;
+/// MIDI key played by steps and the sampler's root key (C5 = 60).
+pub const ROOT_KEY: u8 = 60;
 /// Lanes in a new project.
 pub const DEFAULT_LANES: usize = 6;
 
@@ -110,6 +114,13 @@ impl Project {
             for row in &pat.rows {
                 if row.steps.len() != pat.length_steps as usize {
                     return Err(format!("pattern {:?} row length mismatch", pat.id));
+                }
+                if row.notes.len() > MAX_NOTES_PER_ROW {
+                    return Err(format!("pattern {:?} has too many notes", pat.id));
+                }
+                for n in &row.notes {
+                    n.validate()
+                        .map_err(|e| format!("pattern {:?}: {e}", pat.id))?;
                 }
             }
         }
@@ -228,6 +239,10 @@ impl Pattern {
 pub struct StepRow {
     pub channel: ChannelId,
     pub steps: Vec<Step>,
+    /// Piano-roll notes of this channel, sorted by `(start, key)`. Steps
+    /// and notes both play.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<Note>,
 }
 
 impl StepRow {
@@ -235,8 +250,48 @@ impl StepRow {
         Self {
             channel,
             steps: vec![Step::default(); length as usize],
+            notes: Vec::new(),
         }
     }
+}
+
+/// A piano-roll note. Times are in ticks relative to the pattern start.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Note {
+    pub start: u32,
+    /// `>= 1` tick.
+    pub length: u32,
+    /// MIDI key `0..=127`; 60 is C5.
+    pub key: u8,
+    /// `0.0..=1.0`.
+    pub velocity: f32,
+}
+
+impl Note {
+    pub fn end(&self) -> u32 {
+        self.start.saturating_add(self.length)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.key > 127 {
+            return Err(format!("note key {} out of range", self.key));
+        }
+        if self.length == 0 {
+            return Err("note length must be at least one tick".into());
+        }
+        if !(0.0..=1.0).contains(&self.velocity) {
+            return Err(format!("note velocity {} out of range", self.velocity));
+        }
+        if self.start > MAX_PATTERN_STEPS * TICKS_PER_STEP {
+            return Err("note starts after the longest pattern".into());
+        }
+        Ok(())
+    }
+}
+
+/// Sorts notes into canonical order (`start`, then `key`).
+pub fn sort_notes(notes: &mut [Note]) {
+    notes.sort_by_key(|n| (n.start, n.key));
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]

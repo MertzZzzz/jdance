@@ -644,5 +644,11 @@ fn trigger(
     *serial += 1;
     let v = &mut voices[index];
     v.channel = ch.id;
-    v.inner.start(e.channel, *serial, e.velocity, e.velocity);
+    v.inner.start_pitched(
+        e.channel,
+        *serial,
+        e.velocity,
+        e.velocity,
+        jdance_dsp::key_rate(e.key, jdance_domain::ROOT_KEY),
+    );
 }

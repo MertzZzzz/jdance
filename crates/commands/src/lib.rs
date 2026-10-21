@@ -13,8 +13,9 @@ pub use playlist::{add_clip, add_lane, add_pattern, duplicate_clips, make_unique
 
 use jdance_domain::{
     Channel, ChannelId, ClipId, Effect, InsertId, Lane, LaneId, LimiterSettings, MAX_CHANNELS,
-    MAX_TEMPO_BPM, MAX_VOLUME, MIN_TEMPO_BPM, Mixer, MixerTrack, Pattern, PatternClip, PatternId,
-    Playlist, Project, RoutingError, SampleRef, SendId, Sidechain, Step, StepRow, TrackId,
+    MAX_NOTES_PER_ROW, MAX_TEMPO_BPM, MAX_VOLUME, MIN_TEMPO_BPM, Mixer, MixerTrack, Note, Pattern,
+    PatternClip, PatternId, Playlist, Project, RoutingError, SampleRef, SendId, Sidechain, Step,
+    StepRow, TrackId, sort_notes,
 };
 use thiserror::Error;
 
@@ -53,6 +54,13 @@ pub enum Edit {
         channel: ChannelId,
         index: u32,
         step: Step,
+    },
+    /// Replaces the piano-roll notes of `channel` in `pattern` (sorted on
+    /// apply). One drag is one gesture and one undo step.
+    SetNotes {
+        pattern: PatternId,
+        channel: ChannelId,
+        notes: Vec<Note>,
     },
     /// Inserts `channel` at `index` (clamped) and restores its step rows.
     AddChannel {
@@ -176,6 +184,7 @@ pub enum MergeKey {
     SendLevel(SendId),
     InsertEffect(InsertId),
     Limiter,
+    Notes(PatternId, ChannelId),
 }
 
 impl Edit {
@@ -183,6 +192,7 @@ impl Edit {
         match self {
             Edit::SetTempo(_) => "Change tempo",
             Edit::SetStep { .. } => "Edit step",
+            Edit::SetNotes { .. } => "Edit notes",
             Edit::AddChannel { .. } => "Add channel",
             Edit::RemoveChannel(_) => "Remove channel",
             Edit::SetChannelVolume(..) => "Change channel volume",
@@ -245,6 +255,9 @@ impl Edit {
             Edit::SetSendLevel(id, _) => Some(MergeKey::SendLevel(*id)),
             Edit::SetInsertEffect(id, _) => Some(MergeKey::InsertEffect(*id)),
             Edit::SetLimiter(_) => Some(MergeKey::Limiter),
+            Edit::SetNotes {
+                pattern, channel, ..
+            } => Some(MergeKey::Notes(*pattern, *channel)),
             _ => None,
         }
     }
@@ -285,6 +298,32 @@ impl Edit {
                     channel: *channel,
                     index: *index,
                     step: old,
+                })
+            }
+            Edit::SetNotes {
+                pattern,
+                channel,
+                notes,
+            } => {
+                if p.channel(*channel).is_none() {
+                    return Err(EditError::NoSuchChannel(*channel));
+                }
+                if notes.len() > MAX_NOTES_PER_ROW {
+                    return Err(EditError::OutOfRange(notes.len() as f64));
+                }
+                for n in notes {
+                    n.validate().map_err(EditError::Arrangement)?;
+                }
+                let pat = p
+                    .pattern_mut(*pattern)
+                    .ok_or(EditError::NoSuchPattern(*pattern))?;
+                let mut sorted = notes.clone();
+                sort_notes(&mut sorted);
+                let old = std::mem::replace(&mut pat.row_mut(*channel).notes, sorted);
+                Ok(Edit::SetNotes {
+                    pattern: *pattern,
+                    channel: *channel,
+                    notes: old,
                 })
             }
             Edit::AddChannel {
@@ -625,6 +664,84 @@ mod tests {
 
     fn on(velocity: f32) -> Step {
         Step { on: true, velocity }
+    }
+
+    fn note(start: u32, key: u8) -> Note {
+        Note {
+            start,
+            length: 240,
+            key,
+            velocity: 0.8,
+        }
+    }
+
+    #[test]
+    fn set_notes_sorts_validates_and_drags_undo_as_one_step() {
+        let (mut p, mut h, ch, pat) = setup();
+        let set = |notes| Edit::SetNotes {
+            pattern: pat,
+            channel: ch,
+            notes,
+        };
+        h.execute(&mut p, set(vec![note(480, 64), note(0, 60)]))
+            .unwrap();
+        let row = p.patterns[0].row(ch).unwrap();
+        assert_eq!(row.notes, [note(0, 60), note(480, 64)], "sorted");
+        h.end_gesture();
+        // A drag: many merged edits, one undo step.
+        for x in 1..10 {
+            h.execute_merging(&mut p, set(vec![note(x * 24, 60), note(480, 64)]))
+                .unwrap();
+        }
+        h.end_gesture();
+        h.undo(&mut p).unwrap();
+        assert_eq!(p.patterns[0].row(ch).unwrap().notes[0].start, 0);
+        h.undo(&mut p).unwrap();
+        assert!(p.patterns[0].row(ch).unwrap().notes.is_empty());
+        let bad = Note {
+            key: 128,
+            ..note(0, 60)
+        };
+        assert!(h.execute(&mut p, set(vec![bad])).is_err());
+        let zero = Note {
+            length: 0,
+            ..note(0, 60)
+        };
+        assert!(h.execute(&mut p, set(vec![zero])).is_err());
+    }
+
+    #[test]
+    fn shortening_counts_and_drops_notes_beyond_the_end() {
+        let (mut p, mut h, ch, pat) = setup();
+        h.execute(
+            &mut p,
+            Edit::SetNotes {
+                pattern: pat,
+                channel: ch,
+                notes: vec![note(0, 60), note(8 * 240, 62), note(7 * 240, 61)],
+            },
+        )
+        .unwrap();
+        let shorten = |truncate| Edit::SetPatternLength {
+            pattern: pat,
+            steps: 8,
+            truncate,
+        };
+        assert_eq!(
+            h.execute(&mut p, shorten(false)),
+            Err(EditError::WouldDropSteps(1))
+        );
+        h.execute(&mut p, shorten(true)).unwrap();
+        let keys: Vec<u8> = p.patterns[0]
+            .row(ch)
+            .unwrap()
+            .notes
+            .iter()
+            .map(|n| n.key)
+            .collect();
+        assert_eq!(keys, [60, 61], "the note reaching past the end stays");
+        h.undo(&mut p).unwrap();
+        assert_eq!(p.patterns[0].row(ch).unwrap().notes.len(), 3);
     }
 
     #[test]

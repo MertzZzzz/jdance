@@ -145,6 +145,19 @@
 | Autosave (PLG-075) | NOT RUN | |
 | Undo для изменений параметров плагина | NOT RUN | изменения в generic editor сейчас без undo |
 
+## Milestone P2 — часть 1: Piano roll
+
+| Пункт | Статус | Артефакт / комментарий |
+|---|---|---|
+| Ноты в паттерне: start, length (тики), key 0..127, velocity; до 10 000 на строку | PASS | `domain` валидация, `persistence` формат v7 |
+| Команда SetNotes: сортировка, проверка, перетаскивание = один шаг undo | PASS | `set_notes_sorts_validates_and_drags_undo_as_one_step` |
+| Укорочение паттерна учитывает ноты за концом (явный truncate) | PASS | `shortening_counts_and_drops_notes_beyond_the_end` |
+| Sampler играет ноты с высотой (2^(n/12), линейная интерполяция; C5 бит-в-бит как раньше) | PASS | `notes_start_on_time_and_pitch_changes_speed`, golden-файл не изменился |
+| Gate нот обрезается концом повторения паттерна; ноты за концом не играют | PASS | `gate_is_cut_at_the_repetition_end`, `notes_after_the_pattern_end_do_not_play` |
+| Редактор: добавить (двойной клик), перетащить, изменить длину, удалить, мультивыделение, velocity-полоса, snap, zoom | PASS (ручная) | Xvfb + XTest |
+| Piano roll с 10 000 нот: p95 ≤ 16.6 ms (BLD-020) | NOT RUN | рисуются только видимые ноты; замер на reference machine не проводился |
+| Ввод нот с клавиатуры компьютера | NOT RUN | |
+
 ## Milestone 1A / 1B
 
 | Пункт | Статус |
@@ -157,4 +170,4 @@
 ## Известные ограничения текущей реализации
 
 - Ресемплинг сэмплов без anti-aliasing (BLD-041, ADR-012).
-- Piano roll и автоматизация не начаты; VST3-инструменты не начаты.
+- Автоматизация и VST3-инструменты не начаты.

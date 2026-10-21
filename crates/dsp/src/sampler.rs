@@ -2,8 +2,9 @@
 //! One-shot sample playback.
 //!
 //! Samples are converted to stereo at the engine sample rate when loaded
-//! (outside the audio thread), so a voice plays frames 1:1 with no
-//! interpolation in the callback.
+//! (outside the audio thread), so a voice at the root key plays frames 1:1
+//! with no interpolation. Other keys play at `2^(semitones/12)` speed with
+//! linear interpolation.
 
 /// Stereo, deinterleaved audio at a known sample rate.
 #[derive(Debug, Clone, PartialEq)]
@@ -73,6 +74,9 @@ pub struct SamplerVoice {
     /// is 0 while not releasing.
     env: f32,
     step: f32,
+    /// Playback speed (1 = root key) and fractional read position.
+    rate: f64,
+    frac: f64,
 }
 
 impl SamplerVoice {
@@ -86,6 +90,26 @@ impl SamplerVoice {
             active: true,
             env: 1.0,
             step: 0.0,
+            rate: 1.0,
+            frac: 0.0,
+        };
+    }
+
+    /// Starts at `rate` times the original speed (pitch shift by
+    /// resampling; `rate` > 0).
+    pub fn start_pitched(
+        &mut self,
+        slot: usize,
+        started_at: u64,
+        gain_l: f32,
+        gain_r: f32,
+        rate: f64,
+    ) {
+        self.start(slot, started_at, gain_l, gain_r);
+        self.rate = if rate.is_finite() && rate > 0.0 {
+            rate
+        } else {
+            1.0
         };
     }
 
@@ -121,6 +145,10 @@ impl SamplerVoice {
         if !self.active {
             return;
         }
+        if self.rate != 1.0 {
+            self.render_pitched(sample, out_l, out_r);
+            return;
+        }
         let n = out_l.len().min(out_r.len());
         let available = sample.len().saturating_sub(self.pos);
         let count = n.min(available);
@@ -147,6 +175,41 @@ impl SamplerVoice {
             self.active = false;
         }
     }
+
+    fn render_pitched(&mut self, sample: &SampleBuffer, out_l: &mut [f32], out_r: &mut [f32]) {
+        let n = out_l.len().min(out_r.len());
+        let len = sample.len();
+        for i in 0..n {
+            if self.pos + 1 >= len {
+                self.active = false;
+                return;
+            }
+            let t = self.frac as f32;
+            let l = sample.left[self.pos] + (sample.left[self.pos + 1] - sample.left[self.pos]) * t;
+            let r =
+                sample.right[self.pos] + (sample.right[self.pos + 1] - sample.right[self.pos]) * t;
+            let mut g = 1.0;
+            if self.step > 0.0 {
+                self.env -= self.step;
+                if self.env <= 0.0 {
+                    self.active = false;
+                    return;
+                }
+                g = self.env;
+            }
+            out_l[i] += l * self.gain_l * g;
+            out_r[i] += r * self.gain_r * g;
+            self.frac += self.rate;
+            let whole = self.frac.floor();
+            self.pos += whole as usize;
+            self.frac -= whole;
+        }
+    }
+}
+
+/// Playback rate for `key` relative to `root` (equal temperament).
+pub fn key_rate(key: u8, root: u8) -> f64 {
+    2f64.powf((f64::from(key) - f64::from(root)) / 12.0)
 }
 
 #[cfg(test)]
@@ -163,6 +226,25 @@ mod tests {
         v.render_add(&s, &mut l, &mut r);
         assert_eq!(l, [0.75, 0.5, 0.25, 0.0, 0.0, 0.0, 0.0, 0.0]);
         assert!(!v.is_active());
+    }
+
+    #[test]
+    fn octave_up_plays_twice_as_fast_and_root_is_exact() {
+        let data: Vec<f32> = (0..100).map(|i| i as f32).collect();
+        let s = SampleBuffer::from_interleaved(48_000, 1, &data);
+        let mut v = SamplerVoice::default();
+        v.start_pitched(0, 0, 1.0, 1.0, key_rate(72, 60));
+        let (mut l, mut r) = ([0.0; 4], [0.0; 4]);
+        v.render_add(&s, &mut l, &mut r);
+        assert_eq!(l, [0.0, 2.0, 4.0, 6.0]);
+        // A fifth down interpolates between frames.
+        let mut v = SamplerVoice::default();
+        v.start_pitched(0, 0, 1.0, 1.0, 0.5);
+        let (mut l, mut r) = ([0.0; 4], [0.0; 4]);
+        v.render_add(&s, &mut l, &mut r);
+        assert_eq!(l, [0.0, 0.5, 1.0, 1.5]);
+        assert_eq!(key_rate(60, 60), 1.0);
+        assert!((key_rate(67, 60) - 1.498_307).abs() < 1e-6);
     }
 
     #[test]

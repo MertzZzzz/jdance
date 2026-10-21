@@ -8,7 +8,7 @@
 use crate::{Edit, EditError, History};
 use jdance_domain::{
     ClipId, LANE_COLORS, Lane, LaneId, MAX_PATTERN_STEPS, Pattern, PatternClip, PatternId,
-    Playlist, Project, Step,
+    Playlist, Project, Step, TICKS_PER_STEP,
 };
 
 fn arrangement_err(m: String) -> EditError {
@@ -58,10 +58,14 @@ fn lane_mut(p: &mut Project, id: LaneId) -> Result<&mut Lane, EditError> {
 
 /// Number of active steps at or after `len` in `pattern`.
 pub fn steps_beyond(pattern: &Pattern, len: u32) -> usize {
+    let end = len * TICKS_PER_STEP;
     pattern
         .rows
         .iter()
-        .map(|r| r.steps.iter().skip(len as usize).filter(|s| s.on).count())
+        .map(|r| {
+            r.steps.iter().skip(len as usize).filter(|s| s.on).count()
+                + r.notes.iter().filter(|n| n.start >= end).count()
+        })
         .sum()
 }
 
@@ -100,8 +104,12 @@ pub(crate) fn apply(edit: &Edit, p: &mut Project) -> Result<Edit, EditError> {
             }
             let mut new = pat.clone();
             new.length_steps = *steps;
+            let end = *steps * TICKS_PER_STEP;
             for row in &mut new.rows {
                 row.steps.resize(*steps as usize, Step::default());
+                // Notes reaching past the end stay; they are cut at each
+                // repetition's end during playback.
+                row.notes.retain(|n| n.start < end);
             }
             Edit::ReplacePattern(new).apply(p)
         }
