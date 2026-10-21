@@ -129,12 +129,30 @@ impl Catalog {
     /// module). Unchanged modules keep their cached result; with `full`,
     /// every module is scanned again, blocklisted ones included
     /// (PLG-023/024).
-    pub fn rescan(&self, roots: &[PathBuf], scanner: &Path, full: bool) -> Self {
+    /// `progress` gets (done, total, module) before each module; when
+    /// `cancel` is set, the remaining modules keep their cached results.
+    pub fn rescan(
+        &self,
+        roots: &[PathBuf],
+        scanner: &Path,
+        full: bool,
+        progress: &dyn Fn(usize, usize, &Path),
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Self {
         let mut out = Catalog {
             crashed: self.crashed.clone(),
             ..Catalog::default()
         };
-        for path in find_modules(roots) {
+        let modules = find_modules(roots);
+        let total = modules.len();
+        for (i, path) in modules.into_iter().enumerate() {
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                if let Some(old) = self.modules.get(&path) {
+                    out.modules.insert(path, old.clone());
+                }
+                continue;
+            }
+            progress(i, total, &path);
             let key = ModuleKey::of(&path);
             if !full
                 && let Some(old) = self.modules.get(&path)

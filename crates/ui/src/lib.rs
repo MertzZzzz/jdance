@@ -27,8 +27,9 @@ mod widgets;
 
 pub use host::{
     DirEntry, FinishedTake, Host, ImportedAudio, IndexStatus, InputDevice, LatencyInfo,
-    LibraryRoot, Listing, MeterReadings, Notice, NoticeLevel, PluginParamView, RecordingSettings,
-    RecordingState, Recovery, SampleStatus, StreamStatus, TransportMode, TransportStatus,
+    LibraryRoot, Listing, MeterReadings, Notice, NoticeLevel, PluginParamView, PluginPath,
+    RecordingSettings, RecordingState, Recovery, SampleStatus, StreamStatus, TransportMode,
+    TransportStatus,
 };
 
 use egui::{Key, KeyboardShortcut, Modifiers};

@@ -57,6 +57,9 @@ pub struct UserSettings {
     /// Extra VST3 folders (PLG-020); never stored in projects.
     #[serde(default)]
     pub plugin_paths: Vec<PathBuf>,
+    /// Plugin folders (standard or the user's) left out of scans.
+    #[serde(default)]
+    pub disabled_plugin_paths: Vec<PathBuf>,
     /// Sample library folders shown in the Browser (a plain path in
     /// settings written before 0.2.0).
     #[serde(default)]

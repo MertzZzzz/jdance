@@ -165,6 +165,16 @@ pub struct IndexStatus {
     pub cancelled: bool,
 }
 
+/// A plugin search folder (spec 0.2.0 §6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginPath {
+    pub path: PathBuf,
+    /// A standard folder of the OS (cannot be removed, only disabled).
+    pub system: bool,
+    pub enabled: bool,
+    pub exists: bool,
+}
+
 /// A device that can record, on the current audio backend.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InputDevice {
@@ -508,5 +518,17 @@ pub trait Host {
         Vec::new()
     }
     fn set_plugin_paths(&mut self, _paths: Vec<PathBuf>) {}
+    /// Every folder scanned for VST3: the standard ones and the user's.
+    fn plugin_search_paths(&self) -> Vec<PluginPath> {
+        Vec::new()
+    }
+    /// Leaves a folder out of scans (or takes it back); rescans.
+    fn set_plugin_path_enabled(&mut self, _path: &Path, _enabled: bool) {}
+    /// (modules done, modules found, current module) while scanning.
+    fn plugin_scan_progress(&self) -> Option<(usize, usize, PathBuf)> {
+        None
+    }
+    /// Stops the scan; modules not reached keep their earlier result.
+    fn cancel_plugin_scan(&mut self) {}
     fn take_notices(&mut self) -> Vec<Notice>;
 }

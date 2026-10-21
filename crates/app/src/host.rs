@@ -144,6 +144,11 @@ pub struct AudioHost {
     /// are gone.
     engine_generation: u64,
     scan: Option<Receiver<Catalog>>,
+    /// Progress (done, total, module) and cancel flag of the scan.
+    scan_state: Option<(
+        Arc<std::sync::Mutex<(usize, usize, PathBuf)>>,
+        Arc<std::sync::atomic::AtomicBool>,
+    )>,
     browser: BrowserFs,
     /// File waiting to load before its preview starts.
     /// File to preview once loaded, and the part of it (fractions).
@@ -211,6 +216,7 @@ impl AudioHost {
             plugins,
             engine_generation: 0,
             scan: None,
+            scan_state: None,
             browser,
             pending_preview: None,
             imports: std::sync::mpsc::channel(),
@@ -323,10 +329,12 @@ impl AudioHost {
         v
     }
 
-    /// Plugin folders: the standard ones plus the user's (PLG-020).
+    /// Plugin folders scanned: the standard ones plus the user's
+    /// (PLG-020), without the disabled ones (spec 0.2.0 §6).
     fn plugin_roots(&self) -> Vec<PathBuf> {
         let mut roots = jdance_plugin_vst3::default_search_paths();
         roots.extend(self.settings.plugin_paths.iter().cloned());
+        roots.retain(|r| !self.settings.disabled_plugin_paths.contains(r));
         roots
     }
 
@@ -345,8 +353,16 @@ impl AudioHost {
         let (tx, rx) = channel();
         let catalog = self.plugins.catalog.clone();
         let roots = self.plugin_roots();
+        let progress = Arc::new(std::sync::Mutex::new((0usize, 0usize, PathBuf::new())));
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.scan_state = Some((Arc::clone(&progress), Arc::clone(&cancel)));
         std::thread::spawn(move || {
-            let _ = tx.send(catalog.rescan(&roots, &scanner, full));
+            let report = |done: usize, total: usize, module: &Path| {
+                if let Ok(mut p) = progress.lock() {
+                    *p = (done, total, module.to_path_buf());
+                }
+            };
+            let _ = tx.send(catalog.rescan(&roots, &scanner, full, &report, &cancel));
         });
         self.scan = Some(rx);
     }
@@ -542,6 +558,7 @@ impl Host for AudioHost {
             && let Ok(catalog) = rx.try_recv()
         {
             self.scan = None;
+            self.scan_state = None;
             if let Err(e) = catalog.save_cached() {
                 self.notices.push(Notice::warning(format!(
                     "Could not save the plugin list: {e}"
@@ -1283,6 +1300,48 @@ impl Host for AudioHost {
         self.settings.plugin_paths = paths;
         self.save_settings();
         self.start_plugin_scan(false);
+    }
+
+    fn plugin_search_paths(&self) -> Vec<jdance_ui::PluginPath> {
+        let disabled = &self.settings.disabled_plugin_paths;
+        let entry = |path: PathBuf, system: bool| jdance_ui::PluginPath {
+            enabled: !disabled.contains(&path),
+            exists: path.is_dir(),
+            path,
+            system,
+        };
+        jdance_plugin_vst3::default_search_paths()
+            .into_iter()
+            .map(|p| entry(p, true))
+            .chain(
+                self.settings
+                    .plugin_paths
+                    .iter()
+                    .cloned()
+                    .map(|p| entry(p, false)),
+            )
+            .collect()
+    }
+
+    fn set_plugin_path_enabled(&mut self, path: &Path, enabled: bool) {
+        let d = &mut self.settings.disabled_plugin_paths;
+        d.retain(|p| p != path);
+        if !enabled {
+            d.push(path.to_path_buf());
+        }
+        self.save_settings();
+        self.start_plugin_scan(false);
+    }
+
+    fn plugin_scan_progress(&self) -> Option<(usize, usize, PathBuf)> {
+        let (p, _) = self.scan_state.as_ref()?;
+        p.lock().ok().map(|p| p.clone())
+    }
+
+    fn cancel_plugin_scan(&mut self) {
+        if let Some((_, c)) = &self.scan_state {
+            c.store(true, Relaxed);
+        }
     }
 
     fn estimated_tail_seconds(&mut self, project: &Project) -> f32 {
