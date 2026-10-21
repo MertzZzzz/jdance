@@ -58,7 +58,7 @@ jobs:
             -ext WixToolset.UI.wixext `
             -d Version=${{ steps.version.outputs.version }} `
             -d BinDir=target\release `
-            -d DemoDir=assets\demo `
+            -d DemoDir="$PWD\assets\demo" `
             -d LicenseRtf=License.rtf `
             -o ${{ steps.version.outputs.msi }}
 
