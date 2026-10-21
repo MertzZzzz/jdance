@@ -1,0 +1,104 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# CI-001/CI-002: checks on every push and PR, on all three target platforms.
+name: CI
+
+on:
+  push:
+    branches: [master, main, "claude/**", "0.*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  repo-checks:
+    name: fmt · architecture · SPDX · licenses
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Linux build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libjack-jackd2-dev pkg-config
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo fmt
+        run: cargo fmt --all --check
+      - name: Dependency graph (ARCH-001) and SPDX headers (LIC-001)
+        run: cargo xtask check
+      - name: cargo deny (BLD-012)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses bans sources advisories
+
+  build-test:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86_64
+            os: ubuntu-24.04
+            exe: jdance
+          - name: Windows x86_64
+            os: windows-2025
+            exe: jdance.exe
+          - name: macOS Apple Silicon
+            os: macos-15
+            exe: jdance
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: >
+          sudo apt-get update && sudo apt-get install -y
+          libasound2-dev libjack-jackd2-dev pkg-config
+          libxkbcommon-x11-0 libgl1-mesa-dri xvfb
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Unit and integration tests
+        run: cargo test --workspace --locked
+      # The plugin editor test needs an X server on Linux (PLG-060).
+      - name: Plugin editor window test (Linux, Xvfb)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a cargo test --locked -p jdance-plugin-vst3 --test editor
+      - name: Release build
+        run: cargo build --release --locked -p jdance-app
+      - name: Headless offline render (ARCH-002)
+        shell: bash
+        run: |
+          ./target/release/${{ matrix.exe }} render assets/demo/demo.jdance demo-render.wav --loops 2
+          test -s demo-render.wav
+      - name: GUI startup smoke test (CI-004, Linux)
+        if: runner.os == 'Linux'
+        env:
+          JDANCE_CONFIG_DIR: ${{ runner.temp }}/jdance-config
+        run: timeout 60 xvfb-run -a ./target/release/jdance assets/demo/demo.jdance --smoke-test-frames 60
+      - name: GUI startup smoke test (CI-004, macOS)
+        if: runner.os == 'macOS'
+        env:
+          JDANCE_CONFIG_DIR: ${{ runner.temp }}/jdance-config
+        run: ./target/release/jdance assets/demo/demo.jdance --smoke-test-frames 60
+      # Windows runners have no OpenGL 2+: the app falls back to wgpu
+      # (verified in run #4: "Glow renderer unavailable", then 60 frames).
+      - name: GUI startup smoke test (CI-004, Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          JDANCE_CONFIG_DIR: ${{ runner.temp }}/jdance-config
+        run: ./target/release/jdance.exe assets/demo/demo.jdance --smoke-test-frames 60
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jdance-${{ runner.os }}-${{ runner.arch }}
+          path: |
+            target/release/${{ matrix.exe }}
+            demo-render.wav
+          retention-days: 14

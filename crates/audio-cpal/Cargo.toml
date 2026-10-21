@@ -1,0 +1,19 @@
+[package]
+name = "jdance-audio-cpal"
+description = "CPAL adapter implementing jdance-audio-api (WASAPI, CoreAudio, ALSA, JACK)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+jdance-audio-api.workspace = true
+cpal.workspace = true
+
+# JACK on Linux only (Milestone 1B); needs libjack at build time.
+[target.'cfg(target_os = "linux")'.dependencies]
+cpal = { workspace = true, features = ["jack"] }
+
+[lints]
+workspace = true

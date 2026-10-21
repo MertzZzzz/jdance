@@ -1,0 +1,86 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/domain",
+    "crates/commands",
+    "crates/dsp",
+    "crates/engine",
+    "crates/audio-api",
+    "crates/audio-cpal",
+    "crates/persistence",
+    "crates/mp3",
+    "crates/scripts",
+    "crates/plugin-api",
+    "crates/plugin-vst3",
+    "crates/ui",
+    "crates/app",
+    "crates/test-support",
+    "crates/rt-check",
+    "test-plugins/jdance-test-fx",
+    "xtask",
+]
+default-members = ["crates/app"]
+
+[workspace.package]
+version = "0.2.1"
+edition = "2024"
+rust-version = "1.97"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/MertzZzzz/jdance"
+publish = false
+
+[workspace.dependencies]
+# Workspace crates.
+jdance-domain = { path = "crates/domain" }
+jdance-commands = { path = "crates/commands" }
+jdance-mp3 = { path = "crates/mp3" }
+jdance-scripts = { path = "crates/scripts" }
+jdance-dsp = { path = "crates/dsp" }
+jdance-engine = { path = "crates/engine" }
+jdance-audio-api = { path = "crates/audio-api" }
+jdance-audio-cpal = { path = "crates/audio-cpal" }
+jdance-persistence = { path = "crates/persistence" }
+jdance-plugin-api = { path = "crates/plugin-api" }
+jdance-plugin-vst3 = { path = "crates/plugin-vst3" }
+jdance-ui = { path = "crates/ui" }
+jdance-test-support = { path = "crates/test-support" }
+jdance-rt-check = { path = "crates/rt-check" }
+
+# Third-party. Every entry is listed in docs/dependencies.md (BLD-010).
+cpal = "0.18.2"
+eframe = { version = "0.37.0", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "wgpu",
+    "wayland",
+    "x11",
+] }
+egui = "0.37.0"
+hound = "3.5.1"
+proptest = "1.12.0"
+rfd = "0.17.2"
+rtrb = "0.4.0"
+# LAME 3.100 built from bundled source (LGPL-2.0; see docs/licenses.md).
+mp3lame-encoder = "0.2.5"
+# Embedded script runtime for Piano Roll scripts (spec 0.2.0 §18.22).
+rhai = { version = "1.27.0", default-features = false, features = ["std", "no_module", "no_custom_syntax", "no_time", "only_i64", "f32_float"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tempfile = "3.27.0"
+thiserror = "2.0.21"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+
+[profile.release]
+# RT-030: unwind so that catch_unwind at FFI/callback boundaries works.
+panic = "unwind"
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 2
