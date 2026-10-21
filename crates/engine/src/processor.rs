@@ -28,6 +28,9 @@ use std::time::Instant;
 /// Tracks including the master.
 const MAX_BUSES: usize = MAX_TRACKS + 1;
 
+/// Browser preview level (−6 dB).
+const PREVIEW_GAIN: f32 = 0.5;
+
 /// Short release for voices on Stop, seek, mute and loop wrap, ≈ 5 ms.
 fn release_len(sample_rate: u32) -> u32 {
     (sample_rate / 200).max(1)
@@ -140,6 +143,8 @@ pub struct EngineProcessor {
     automating: bool,
     /// Parameter events for one insert, built per block.
     param_events: Vec<ParamEvent>,
+    /// Browser preview: the sample and its voice.
+    preview: Option<(Arc<jdance_dsp::SampleBuffer>, SamplerVoice)>,
 }
 
 impl EngineProcessor {
@@ -172,6 +177,7 @@ impl EngineProcessor {
             voice_serial: 0,
             automating: false,
             param_events: Vec::with_capacity(MAX_PARAM_EVENTS),
+            preview: None,
         }
     }
 
@@ -198,6 +204,9 @@ impl EngineProcessor {
         }
         left[frames..].fill(0.0);
         right[frames..].fill(0.0);
+        if let Some((sample, voice)) = &mut self.preview {
+            voice.render_add(sample, &mut left[..frames], &mut right[..frames]);
+        }
 
         let loop_len = self.snapshot.as_ref().map_or(0, |s| s.loop_len);
         self.feedback
@@ -276,6 +285,9 @@ impl EngineProcessor {
             let Ok(next) = self.commands.peek() else {
                 break;
             };
+            if matches!(next, Command::Preview(_)) && self.garbage.slots() == 0 {
+                break;
+            }
             if matches!(next, Command::SetSnapshot(_))
                 && (self.garbage.slots() == 0 || self.pending.is_some())
             {
@@ -298,6 +310,17 @@ impl EngineProcessor {
                     self.play_after_stop = false;
                     self.out_fade.set_target(0.0);
                     self.instruments_off();
+                }
+                Command::Preview(sample) => {
+                    let new = sample.map(|s| {
+                        let mut v = SamplerVoice::default();
+                        v.start(0, 0, PREVIEW_GAIN, PREVIEW_GAIN);
+                        (s, v)
+                    });
+                    if let Some((old, _)) = std::mem::replace(&mut self.preview, new) {
+                        // Checked above: there is room.
+                        let _ = self.garbage.push(Garbage::Sample(old));
+                    }
                 }
                 Command::Panic => {
                     for v in self.voices.iter_mut() {

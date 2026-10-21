@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Wires the UI to the engine, the audio backends and the sample cache.
 
+use crate::browser_fs::BrowserFs;
 use crate::config::{self, UserSettings};
 use crate::plugins::{Catalog, PluginHost};
 use crate::render::{estimated_tail_seconds, render_to_wav};
@@ -20,7 +21,7 @@ use jdance_engine::{
 use jdance_persistence::resolve_sample_path;
 use jdance_plugin_api::{PluginController, PluginDescriptor, PluginKind};
 use jdance_ui::{
-    Host, LatencyInfo, MeterReadings, Notice, PluginParamView, SampleStatus, StreamStatus,
+    Host, LatencyInfo, Listing, MeterReadings, Notice, PluginParamView, SampleStatus, StreamStatus,
     TransportMode, TransportStatus,
 };
 use std::path::{Path, PathBuf};
@@ -100,6 +101,9 @@ pub struct AudioHost {
     /// are gone.
     engine_generation: u64,
     scan: Option<Receiver<Catalog>>,
+    browser: BrowserFs,
+    /// File waiting to load before its preview starts.
+    pending_preview: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for AudioHost {
@@ -147,6 +151,8 @@ impl AudioHost {
             plugins,
             engine_generation: 0,
             scan: None,
+            browser: BrowserFs::new(),
+            pending_preview: None,
         }
     }
 
@@ -341,6 +347,27 @@ impl Host for AudioHost {
     fn poll(&mut self) {
         if self.samples.poll() {
             self.needs_compile = true;
+        }
+        self.browser.poll();
+        if let Some(path) = self.pending_preview.clone() {
+            match self.samples.status(&path) {
+                Some(SampleStatus::Failed(e)) => {
+                    self.pending_preview = None;
+                    self.notices.push(Notice::warning(format!(
+                        "Cannot preview {}: {e}",
+                        path.display()
+                    )));
+                }
+                Some(SampleStatus::Ready { .. }) => {
+                    if let (Some(buf), Some(a)) = (self.samples.converted(&path), &mut self.active)
+                        && buf.sample_rate == a.engine.sample_rate()
+                    {
+                        self.pending_preview = None;
+                        let _ = a.engine.preview(Some(buf));
+                    }
+                }
+                _ => {}
+            }
         }
         if self.plugins.poll() {
             self.needs_compile = true;
@@ -731,6 +758,69 @@ impl Host for AudioHost {
 
     fn rescan_plugins(&mut self, full: bool) {
         self.start_plugin_scan(full);
+    }
+
+    fn library_folders(&self) -> Vec<PathBuf> {
+        self.settings.library_folders.clone()
+    }
+
+    fn set_library_folders(&mut self, folders: Vec<PathBuf>) {
+        self.settings.library_folders = folders;
+        self.save_settings();
+    }
+
+    fn favorite_folders(&self) -> Vec<PathBuf> {
+        self.settings.favorite_folders.clone()
+    }
+
+    fn set_favorite_folders(&mut self, folders: Vec<PathBuf>) {
+        self.settings.favorite_folders = folders;
+        self.save_settings();
+    }
+
+    fn list_dir(&mut self, dir: &Path) -> Listing {
+        self.browser.list(dir)
+    }
+
+    fn refresh_dir(&mut self, dir: &Path) {
+        self.browser.refresh(dir);
+    }
+
+    fn search_files(&mut self, roots: &[PathBuf], query: &str) -> Listing {
+        self.browser.search(roots, query)
+    }
+
+    fn inspect_file(&mut self, path: &Path) {
+        self.samples.request(path);
+    }
+
+    fn preview_file(&mut self, path: Option<&Path>) {
+        match path {
+            Some(p) => {
+                if self.active.is_none() {
+                    self.notices.push(Notice::warning(
+                        "No audio device open: nothing to preview on.",
+                    ));
+                    return;
+                }
+                self.samples.request(p);
+                self.pending_preview = Some(p.to_path_buf());
+            }
+            None => {
+                self.pending_preview = None;
+                if let Some(a) = &mut self.active {
+                    let _ = a.engine.preview(None);
+                }
+            }
+        }
+    }
+
+    fn reveal_in_file_manager(&mut self, path: &Path) {
+        if let Err(e) = crate::browser_fs::reveal(path) {
+            self.notices.push(Notice::warning(format!(
+                "Could not open the file manager: {e}"
+            )));
+        }
     }
 
     fn plugin_paths(&self) -> Vec<PathBuf> {

@@ -22,6 +22,24 @@ pub struct PluginParamView {
     pub text: String,
 }
 
+/// A folder or audio file in a Browser listing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirEntry {
+    pub path: PathBuf,
+    pub name: String,
+    pub is_dir: bool,
+    /// Bytes; 0 for folders.
+    pub size: u64,
+}
+
+/// A folder listing or search result, filled in the background.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Listing {
+    Loading,
+    Ready(Vec<DirEntry>),
+    Failed(String),
+}
+
 /// What Play plays.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransportMode {
@@ -170,6 +188,34 @@ pub trait Host {
     fn stream(&self) -> Option<StreamStatus>;
     fn sample_status(&self, sample: &SampleRef, project_dir: Option<&Path>)
     -> Option<SampleStatus>;
+    /// Library folders shown in the Browser (user settings).
+    fn library_folders(&self) -> Vec<PathBuf> {
+        Vec::new()
+    }
+    fn set_library_folders(&mut self, _folders: Vec<PathBuf>) {}
+    /// Favorite folders (user settings).
+    fn favorite_folders(&self) -> Vec<PathBuf> {
+        Vec::new()
+    }
+    fn set_favorite_folders(&mut self, _folders: Vec<PathBuf>) {}
+    /// Folders and audio files in `dir`; `Loading` until the background
+    /// listing finishes.
+    fn list_dir(&mut self, _dir: &Path) -> Listing {
+        Listing::Failed("not available".into())
+    }
+    fn refresh_dir(&mut self, _dir: &Path) {}
+    /// Audio files under `roots` whose names contain `query`.
+    fn search_files(&mut self, _roots: &[PathBuf], _query: &str) -> Listing {
+        Listing::Failed("not available".into())
+    }
+    /// Loads an audio file for inspection (status, waveform) in the
+    /// background.
+    fn inspect_file(&mut self, _path: &Path) {}
+    /// Plays a file on the preview bus; `None` stops. The project does not
+    /// change.
+    fn preview_file(&mut self, _path: Option<&Path>) {}
+    fn reveal_in_file_manager(&mut self, _path: &Path) {}
+
     /// Peak level per bucket of a loaded sample (waveform display).
     fn sample_peaks(
         &self,

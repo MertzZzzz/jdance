@@ -659,6 +659,11 @@ impl History {
     }
 
     /// Closes the current merge gesture (e.g. on slider release).
+    /// Labels of the undoable edits, most recent first.
+    pub fn undo_labels(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.undo.iter().rev().map(|e| e.label)
+    }
+
     pub fn end_gesture(&mut self) {
         self.gesture_open = false;
     }
@@ -765,12 +770,24 @@ pub fn add_sampler_channel(
     p: &mut Project,
     name: impl Into<String>,
 ) -> Result<ChannelId, EditError> {
+    add_sample_channel(history, p, name, None)
+}
+
+/// Appends a sampler channel already holding `sample`: one undo step.
+pub fn add_sample_channel(
+    history: &mut History,
+    p: &mut Project,
+    name: impl Into<String>,
+    sample: Option<SampleRef>,
+) -> Result<ChannelId, EditError> {
     let id = ChannelId(p.ids.next());
     let index = p.channels.len();
+    let mut channel = Channel::new_sampler(id, name);
+    channel.source = jdance_domain::ChannelSource::Sampler { sample };
     history.execute(
         p,
         Edit::AddChannel {
-            channel: Channel::new_sampler(id, name),
+            channel,
             index,
             rows: Vec::new(),
             automation: Vec::new(),

@@ -112,118 +112,165 @@ impl RackView {
         let mut dropped_on_row = false;
 
         self.header(ui, project, pattern, host, &mut out);
-        egui::ScrollArea::both().id_salt("rack").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let label = |ui: &mut egui::Ui, w: f32, t: &str| {
-                    ui.add_sized(
-                        [w, 14.0],
-                        egui::Label::new(RichText::new(t).size(10.5).color(theme::MUTED)),
+        egui::ScrollArea::both()
+            .id_salt("rack")
+            .max_height(ui.available_height())
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let label = |ui: &mut egui::Ui, w: f32, t: &str| {
+                        ui.add_sized(
+                            [w, 14.0],
+                            egui::Label::new(RichText::new(t).size(10.5).color(theme::MUTED)),
+                        );
+                    };
+                    label(ui, 20.0, "ON");
+                    label(ui, 30.0, "PAN");
+                    label(ui, 30.0, "VOL");
+                    label(ui, 40.0, "MIXER");
+                    label(ui, NAME_W, "CHANNEL");
+                    ui.label(
+                        RichText::new("STEPS · velocity is the fill height; wheel to change")
+                            .size(10.5)
+                            .color(theme::MUTED),
                     );
-                };
-                label(ui, 20.0, "ON");
-                label(ui, 30.0, "PAN");
-                label(ui, 30.0, "VOL");
-                label(ui, 40.0, "MIXER");
-                label(ui, NAME_W, "CHANNEL");
-                ui.label(
-                    RichText::new("STEPS · velocity is the fill height; wheel to change")
-                        .size(10.5)
-                        .color(theme::MUTED),
-                );
-            });
-            for (index, ch) in project.channels.iter().enumerate() {
-                let selected = self.selection.contains(&ch.id);
-                let color = theme::rgb(color_or_default(ch.color, index));
-                let frame = egui::Frame::new()
-                    .inner_margin(egui::Margin::symmetric(6, 3))
-                    .corner_radius(6)
-                    .fill(if selected {
-                        egui::Color32::from_rgb(0x1A, 0x27, 0x38)
-                    } else {
-                        egui::Color32::TRANSPARENT
-                    })
-                    .stroke(if selected {
-                        Stroke::new(1.0, egui::Color32::from_rgb(0x2F, 0x5C, 0x8F))
-                    } else {
-                        Stroke::NONE
-                    });
-                let row = frame.show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        if lamp(ui, !ch.muted)
-                            .on_hover_text(if ch.muted {
-                                "Muted: click to unmute"
-                            } else {
-                                "Click to mute"
-                            })
-                            .clicked()
-                        {
-                            out.edits
-                                .push((Edit::SetChannelMuted(ch.id, !ch.muted), false));
-                        }
-                        let mut pan = ch.pan;
-                        let r =
-                            knob(ui, &mut pan, -1.0..=1.0, 0.0, theme::TEXT, 30.0).on_hover_text(
-                                format!("Pan {} (drag; double-click centers)", pan_text(ch.pan)),
-                            );
-                        if r.changed() {
-                            out.edits.push((Edit::SetChannelPan(ch.id, pan), true));
-                        }
-                        out.end_gesture |= r.drag_stopped();
-                        let mut vol = ch.volume;
-                        let r = knob(ui, &mut vol, 0.0..=MAX_VOLUME, 0.8, theme::AMBER, 30.0)
-                            .on_hover_text(format!(
-                                "Volume {:.0}% (drag; double-click resets)",
-                                ch.volume * 100.0
-                            ));
-                        if r.changed() {
-                            out.edits.push((Edit::SetChannelVolume(ch.id, vol), true));
-                        }
-                        out.end_gesture |= r.drag_stopped();
-                        self.track_box(ui, project, ch.id, ch.track, &mut out);
-                        self.name_button(ui, project, index, color, host, dir, &mut out);
-                        let notes = pattern.row(ch.id).is_some_and(|r| !r.notes.is_empty());
-                        if notes {
-                            notes_preview(ui, pattern, ch.id, color, &mut out);
-                        } else {
-                            self.steps(
-                                ui,
-                                pattern,
-                                ch.id,
-                                current_step,
-                                pointer,
-                                primary_down,
-                                &mut out,
-                            );
-                        }
-                    });
                 });
-                let rect = row.response.rect;
-                if hovering_files && pointer.is_some_and(|p| rect.contains(p)) {
-                    ui.painter().rect_stroke(
-                        rect.expand(2.0),
-                        CornerRadius::same(6),
-                        Stroke::new(2.0, theme::BLUE),
-                        StrokeKind::Outside,
-                    );
+                for (index, ch) in project.channels.iter().enumerate() {
+                    let selected = self.selection.contains(&ch.id);
+                    let color = theme::rgb(color_or_default(ch.color, index));
+                    let frame = egui::Frame::new()
+                        .inner_margin(egui::Margin::symmetric(6, 3))
+                        .corner_radius(6)
+                        .fill(if selected {
+                            egui::Color32::from_rgb(0x1A, 0x27, 0x38)
+                        } else {
+                            egui::Color32::TRANSPARENT
+                        })
+                        .stroke(if selected {
+                            Stroke::new(1.0, egui::Color32::from_rgb(0x2F, 0x5C, 0x8F))
+                        } else {
+                            Stroke::NONE
+                        });
+                    let row = frame.show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            if lamp(ui, !ch.muted)
+                                .on_hover_text(if ch.muted {
+                                    "Muted: click to unmute"
+                                } else {
+                                    "Click to mute"
+                                })
+                                .clicked()
+                            {
+                                out.edits
+                                    .push((Edit::SetChannelMuted(ch.id, !ch.muted), false));
+                            }
+                            let mut pan = ch.pan;
+                            let r = knob(ui, &mut pan, -1.0..=1.0, 0.0, theme::TEXT, 30.0)
+                                .on_hover_text(format!(
+                                    "Pan {} (drag; double-click centers)",
+                                    pan_text(ch.pan)
+                                ));
+                            if r.changed() {
+                                out.edits.push((Edit::SetChannelPan(ch.id, pan), true));
+                            }
+                            out.end_gesture |= r.drag_stopped();
+                            let mut vol = ch.volume;
+                            let r = knob(ui, &mut vol, 0.0..=MAX_VOLUME, 0.8, theme::AMBER, 30.0)
+                                .on_hover_text(format!(
+                                    "Volume {:.0}% (drag; double-click resets)",
+                                    ch.volume * 100.0
+                                ));
+                            if r.changed() {
+                                out.edits.push((Edit::SetChannelVolume(ch.id, vol), true));
+                            }
+                            out.end_gesture |= r.drag_stopped();
+                            self.track_box(ui, project, ch.id, ch.track, &mut out);
+                            self.name_button(ui, project, index, color, host, dir, &mut out);
+                            let notes = pattern.row(ch.id).is_some_and(|r| !r.notes.is_empty());
+                            if notes {
+                                notes_preview(ui, pattern, ch.id, color, &mut out);
+                            } else {
+                                self.steps(
+                                    ui,
+                                    pattern,
+                                    ch.id,
+                                    current_step,
+                                    pointer,
+                                    primary_down,
+                                    &mut out,
+                                );
+                            }
+                        });
+                    });
+                    let rect = row.response.rect;
+                    let dragging_in = row
+                        .response
+                        .dnd_hover_payload::<crate::browser::BrowserItem>()
+                        .is_some();
+                    if let Some(item) = row
+                        .response
+                        .dnd_release_payload::<crate::browser::BrowserItem>()
+                    {
+                        dropped_on_row = true;
+                        match &*item {
+                            crate::browser::BrowserItem::Sample(p) if ch.instrument().is_none() => {
+                                out.edits.push((
+                                    Edit::SetChannelSample(ch.id, Some(sample_ref(p))),
+                                    false,
+                                ));
+                            }
+                            crate::browser::BrowserItem::Sample(p) => {
+                                out.new_channels.push((stem(p), Some(sample_ref(p))));
+                            }
+                            crate::browser::BrowserItem::Instrument(d) => {
+                                out.new_instruments.push(d.clone())
+                            }
+                        }
+                    }
+                    if (hovering_files || dragging_in) && pointer.is_some_and(|p| rect.contains(p))
+                    {
+                        ui.painter().rect_stroke(
+                            rect.expand(2.0),
+                            CornerRadius::same(6),
+                            Stroke::new(2.0, theme::BLUE),
+                            StrokeKind::Outside,
+                        );
+                    }
+                    if ch.instrument().is_none()
+                        && let (Some(p), Some(file)) = (pointer, dropped.first())
+                        && rect.contains(p)
+                    {
+                        out.edits
+                            .push((Edit::SetChannelSample(ch.id, Some(sample_ref(file))), false));
+                        dropped_on_row = true;
+                    }
                 }
-                if ch.instrument().is_none()
-                    && let (Some(p), Some(file)) = (pointer, dropped.first())
-                    && rect.contains(p)
-                {
-                    out.edits
-                        .push((Edit::SetChannelSample(ch.id, Some(sample_ref(file))), false));
-                    dropped_on_row = true;
-                }
-            }
-            ui.add_space(6.0);
-            ui.label(
+                ui.add_space(6.0);
+                ui.label(
                 RichText::new(
                     "Drop WAV files here to add channels, or onto a channel to replace its sample",
                 )
                 .size(11.0)
                 .color(theme::MUTED),
             );
-        });
+            });
+
+        // Browser items dropped on empty rack space become new channels.
+        // A rect test, not a widget: an overlay would swallow the scroll.
+        let released = ui.input(|i| i.pointer.any_released());
+        if !dropped_on_row
+            && released
+            && ui.rect_contains_pointer(ui.min_rect())
+            && let Some(item) =
+                egui::DragAndDrop::take_payload::<crate::browser::BrowserItem>(ui.ctx())
+        {
+            match &*item {
+                crate::browser::BrowserItem::Sample(p) => {
+                    out.new_channels.push((stem(p), Some(sample_ref(p))));
+                }
+                crate::browser::BrowserItem::Instrument(d) => out.new_instruments.push(d.clone()),
+            }
+        }
 
         // Commit a finished paint drag as one undo step.
         if !primary_down && let Some(paint) = self.paint.take() {
@@ -327,7 +374,7 @@ impl RackView {
             .map_or_else(|| "?".to_owned(), |t| t.name.clone());
         egui::ComboBox::from_id_salt(("route", id.0))
             .width(40.0)
-            .selected_text(RichText::new(number).font(theme::mono(12.0)))
+            .selected_text(RichText::new(format!("{number:<2}")).font(theme::mono(12.0)))
             .show_ui(ui, |ui| {
                 for t in project.mixer.all_tracks() {
                     let label = format!("{} · {}", track_number(project, t.id), t.name);
@@ -765,6 +812,11 @@ fn truncate(s: &str, n: usize) -> String {
         t.push('…');
         t
     }
+}
+
+fn stem(path: &Path) -> String {
+    path.file_stem()
+        .map_or_else(|| "Sample".into(), |s| s.to_string_lossy().into_owned())
 }
 
 fn sample_ref(path: &Path) -> SampleRef {

@@ -5,6 +5,7 @@
 //! through `jdance-commands`, and tells the [`Host`] when it changed.
 
 mod automation;
+mod browser;
 mod channel_settings;
 mod host;
 mod mixer;
@@ -18,13 +19,13 @@ mod toolbar;
 mod widgets;
 
 pub use host::{
-    Host, LatencyInfo, MeterReadings, Notice, NoticeLevel, PluginParamView, SampleStatus,
-    StreamStatus, TransportMode, TransportStatus,
+    DirEntry, Host, LatencyInfo, Listing, MeterReadings, Notice, NoticeLevel, PluginParamView,
+    SampleStatus, StreamStatus, TransportMode, TransportStatus,
 };
 
 use egui::{Key, KeyboardShortcut, Modifiers};
 use jdance_commands::{
-    Edit, History, add_clip, add_insert, add_lane, add_pattern, add_sampler_channel, add_send,
+    Edit, History, add_clip, add_insert, add_lane, add_pattern, add_sample_channel, add_send,
     add_track, duplicate_clips, make_unique,
 };
 use jdance_domain::{
@@ -83,6 +84,8 @@ pub struct JdanceApp<H: Host, S: ProjectStore> {
     show_mixer: bool,
     show_rack: bool,
     show_playlist: bool,
+    show_browser: bool,
+    browser_view: browser::BrowserView,
     show_plugins: bool,
     /// Position shown as time instead of bars.
     time_display: bool,
@@ -146,6 +149,8 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             show_mixer: true,
             show_rack: true,
             show_playlist: true,
+            show_browser: true,
+            browser_view: browser::BrowserView::new(),
             show_plugins: false,
             time_display: false,
             snap: jdance_domain::TICKS_PER_STEP,
@@ -537,6 +542,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 }
             });
             ui.menu_button("View", |ui| {
+                ui.toggle_value(&mut self.show_browser, "Browser");
                 ui.toggle_value(&mut self.show_rack, "Channel Rack");
                 ui.toggle_value(&mut self.show_playlist, "Playlist");
                 ui.toggle_value(&mut self.show_mixer, "Mixer");
@@ -657,6 +663,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 .response
                 .on_hover_text("Grid for the Playlist and the Piano Roll");
             ui.separator();
+            ui.toggle_value(&mut self.show_browser, "Browser");
             ui.toggle_value(&mut self.show_rack, "Rack");
             let mut piano = self.piano.is_some();
             if ui
@@ -929,6 +936,63 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 color,
                 default_color,
             });
+        }
+    }
+
+    fn browser_action(&mut self, action: browser::BrowserAction, now: f64) {
+        use browser::BrowserAction as A;
+        match action {
+            A::SelectPattern(id) => self.current_pattern = id,
+            A::ChannelSettings(id) => {
+                self.channel_settings = Some(channel_settings::ChannelSettingsWindow::new(id));
+            }
+            A::UndoSteps(n) => {
+                for _ in 0..n {
+                    self.undo(now);
+                }
+            }
+            A::AddSample(path) => self.add_sample_channel(&path, now),
+            A::AddInstrument(d) => self.add_instrument(d, now),
+        }
+    }
+
+    fn add_sample_channel(&mut self, path: &Path, now: f64) {
+        let name = path
+            .file_stem()
+            .map_or_else(|| "Sample".into(), |s| s.to_string_lossy().into_owned());
+        let sample = jdance_domain::SampleRef {
+            path: path.to_string_lossy().into_owned(),
+        };
+        self.add_channel(name, Some(sample), now);
+    }
+
+    fn add_channel(&mut self, name: String, sample: Option<jdance_domain::SampleRef>, now: f64) {
+        let added = add_sample_channel(&mut self.history, &mut self.project, name, sample);
+        match added {
+            Ok(_) => self.sync_needed = true,
+            Err(e) => self.notify(Notice::error(e.to_string()), now),
+        }
+    }
+
+    fn add_instrument(&mut self, d: jdance_plugin_api::PluginDescriptor, now: f64) {
+        let slot = PluginSlot {
+            format: "vst3".into(),
+            class_id: d.plugin.class_id,
+            name: d.plugin.name.clone(),
+            vendor: d.plugin.vendor,
+            version: d.plugin.version,
+            category: d.category,
+            component_state: Vec::new(),
+            controller_state: Vec::new(),
+        };
+        match jdance_commands::add_instrument_channel(
+            &mut self.history,
+            &mut self.project,
+            d.plugin.name,
+            slot,
+        ) {
+            Ok(_) => self.sync_needed = true,
+            Err(e) => self.notify(Notice::error(e.to_string()), now),
         }
     }
 
@@ -1270,6 +1334,28 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
                 self.tap = Some(tap);
             }
         }
+        let mut browser_actions = Vec::new();
+        if self.show_browser {
+            let labels: Vec<&'static str> = self.history.undo_labels().collect();
+            egui::Panel::left("browser")
+                .resizable(true)
+                .default_size(270.0)
+                .min_size(180.0)
+                .frame(
+                    egui::Frame::new()
+                        .fill(theme::SIDEBAR)
+                        .inner_margin(egui::Margin::same(10)),
+                )
+                .show(ui, |ui| {
+                    let dir = self.path.as_deref().and_then(Path::parent);
+                    browser_actions =
+                        self.browser_view
+                            .show(ui, &self.project, dir, &labels, &mut self.host);
+                });
+        }
+        for action in browser_actions {
+            self.browser_action(action, now);
+        }
         let mut mix = mixer::MixerOutput::default();
         if self.show_mixer {
             let latency = self.host.latency();
@@ -1414,36 +1500,10 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
             });
         }
         for d in std::mem::take(&mut out.new_instruments) {
-            let slot = PluginSlot {
-                format: "vst3".into(),
-                class_id: d.plugin.class_id,
-                name: d.plugin.name.clone(),
-                vendor: d.plugin.vendor,
-                version: d.plugin.version,
-                category: d.category,
-                component_state: Vec::new(),
-                controller_state: Vec::new(),
-            };
-            match jdance_commands::add_instrument_channel(
-                &mut self.history,
-                &mut self.project,
-                d.plugin.name,
-                slot,
-            ) {
-                Ok(_) => self.sync_needed = true,
-                Err(e) => self.notify(Notice::error(e.to_string()), now),
-            }
+            self.add_instrument(d, now);
         }
         for (name, sample) in out.new_channels {
-            match add_sampler_channel(&mut self.history, &mut self.project, name) {
-                Ok(id) => {
-                    if let Some(s) = sample {
-                        self.apply(Edit::SetChannelSample(id, Some(s)), false, now);
-                    }
-                    self.sync_needed = true;
-                }
-                Err(e) => self.notify(Notice::error(e.to_string()), now),
-            }
+            self.add_channel(name, sample, now);
         }
 
         if let Some(mut w) = self.settings.take()

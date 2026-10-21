@@ -62,12 +62,16 @@ pub(crate) enum Command {
         index: u16,
         value: f32,
     },
+    /// Plays a sample once on the preview bus (after the master); `None`
+    /// stops. Not part of the project or the transport.
+    Preview(Option<Arc<jdance_dsp::SampleBuffer>>),
 }
 
 /// Objects handed back to the non-realtime side for destruction.
 #[derive(Debug)]
 pub(crate) enum Garbage {
     Snapshot(#[allow(dead_code)] Box<PlaybackSnapshot>),
+    Sample(#[allow(dead_code)] Arc<jdance_dsp::SampleBuffer>),
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -148,6 +152,20 @@ impl EngineHandle {
             index,
             value,
         })
+    }
+
+    /// Plays `sample` (at the engine rate) on the preview bus, replacing
+    /// any preview; `None` stops the preview.
+    pub fn preview(
+        &mut self,
+        sample: Option<Arc<jdance_dsp::SampleBuffer>>,
+    ) -> Result<(), EngineError> {
+        debug_assert!(
+            sample
+                .as_ref()
+                .is_none_or(|s| s.sample_rate == self.sample_rate)
+        );
+        self.send(Command::Preview(sample))
     }
 
     /// Replaces the playing snapshot. Its sample rate must match the engine.

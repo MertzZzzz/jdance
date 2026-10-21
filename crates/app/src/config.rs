@@ -14,6 +14,12 @@ pub struct UserSettings {
     /// Extra VST3 folders (PLG-020); never stored in projects.
     #[serde(default)]
     pub plugin_paths: Vec<PathBuf>,
+    /// Sample library folders shown in the Browser.
+    #[serde(default)]
+    pub library_folders: Vec<PathBuf>,
+    /// Favorite Browser folders.
+    #[serde(default)]
+    pub favorite_folders: Vec<PathBuf>,
 }
 
 /// Unit tests point the configuration directory here.

@@ -7,6 +7,7 @@
 //! jdance devices                         list audio backends and devices
 //! ```
 
+mod browser_fs;
 mod config;
 mod host;
 mod plugins;
