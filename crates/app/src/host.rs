@@ -145,10 +145,7 @@ pub struct AudioHost {
     engine_generation: u64,
     scan: Option<Receiver<Catalog>>,
     /// Progress (done, total, module) and cancel flag of the scan.
-    scan_state: Option<(
-        Arc<std::sync::Mutex<(usize, usize, PathBuf)>>,
-        Arc<std::sync::atomic::AtomicBool>,
-    )>,
+    scan_state: Option<ScanState>,
     browser: BrowserFs,
     /// File waiting to load before its preview starts.
     /// File to preview once loaded, and the part of it (fractions).
@@ -1352,6 +1349,12 @@ impl Host for AudioHost {
         std::mem::take(&mut self.notices)
     }
 }
+
+/// Progress (done, total, module) and cancel flag of a plugin scan.
+type ScanState = (
+    Arc<std::sync::Mutex<(usize, usize, PathBuf)>>,
+    Arc<std::sync::atomic::AtomicBool>,
+);
 
 /// A finished background import: ticket and file or error.
 type ImportResult = (u64, Result<jdance_ui::ImportedAudio, String>);
