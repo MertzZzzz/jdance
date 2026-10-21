@@ -23,6 +23,7 @@
 | objc2, objc2-app-kit, objc2-foundation | 0.6.5 / 0.3.2 | MIT | plugin-vst3 (macOS) | окна редакторов плагинов (NSWindow) | AppKit |
 | libc | 0.2.186 | MIT OR Apache-2.0 | plugin-vst3 (Linux) | `poll` для IRunLoop | — |
 | mp3lame-encoder (+ mp3lame-sys 0.1.11) | 0.2.5 | LGPL-3.0 (crates), LAME 3.100: LGPL-2.0-or-later | mp3 | MP3-кодирование для экспорта (спецификация 0.2.0 §12, план D9) | LAME собирается из исходников в crate: autotools (Linux, macOS), `cc` (Windows MSVC); линковка статическая |
+| rhai | 1.27.0 | MIT OR Apache-2.0 | scripts | встроенный runtime скриптов Piano Roll (спецификация 0.2.0 §18.22) | — |
 | tempfile | 3.27.0 | MIT OR Apache-2.0 | persistence, app (dev) | временные каталоги в тестах | — |
 
 Проверено: Claude Code, 2026-10-20, по `cargo metadata`.
@@ -44,6 +45,9 @@
   машине разработчика невозможна без C-тулчейнов целевой ОС: локальный
   `cargo clippy --target …` запускается с `DOCS_RS=1` (build script
   LAME пропускается); настоящая сборка — нативно в CI.
+- **Rhai (спецификация 0.2.0 §18.22).** Тянет `smartstring`, помеченный
+  RUSTSEC-2026-0249 как unmaintained (не уязвимость). Исключение в
+  `deny.toml` с причиной; пересмотреть, когда Rhai от него откажется.
 - **PipeWire.** В cpal 0.18 есть feature `pipewire` (нативный backend).
   Он не включён: по спецификации для MVP проверяется работа через
   pipewire-jack (AUD-001).
