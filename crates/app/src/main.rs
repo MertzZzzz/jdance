@@ -14,6 +14,7 @@ mod browser_fs;
 mod config;
 mod host;
 mod plugins;
+mod recording;
 mod render;
 mod samples;
 

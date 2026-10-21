@@ -4,11 +4,12 @@
 use crate::browser_fs::BrowserFs;
 use crate::config::{self, UserSettings};
 use crate::plugins::{Catalog, PluginHost};
+use crate::recording::{self, MonitorControl, MonitorMix, Session, Shared};
 use crate::render::{estimated_tail_seconds, render_to_wav};
 use crate::samples::SampleCache;
 use jdance_audio_api::{
-    AudioBackend, AudioError, BackendId, BufferRequest, DeviceCapabilities, DeviceInfo, DeviceKey,
-    DeviceSettings, OutputStream, RenderCallback, StreamState,
+    AudioBackend, AudioError, BackendId, BufferRequest, DeviceCapabilities, DeviceId, DeviceInfo,
+    DeviceKey, DeviceSettings, InputStream, OutputStream, RenderCallback, StreamState,
 };
 use jdance_audio_cpal::CpalBackend;
 use jdance_domain::PluginTarget;
@@ -21,10 +22,13 @@ use jdance_engine::{
 use jdance_persistence::resolve_sample_path;
 use jdance_plugin_api::{PluginController, PluginDescriptor, PluginKind};
 use jdance_ui::{
-    Host, LatencyInfo, Listing, MeterReadings, Notice, PluginParamView, SampleStatus, StreamStatus,
-    TransportMode, TransportStatus,
+    FinishedTake, Host, InputDevice, LatencyInfo, Listing, MeterReadings, Notice, PluginParamView,
+    RecordingSettings, RecordingState, Recovery, SampleStatus, StreamStatus, TransportMode,
+    TransportStatus,
 };
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::Ordering::Relaxed;
 use std::sync::mpsc::{Receiver, channel};
 
 /// Rate used for samples and export when no device is open.
@@ -65,12 +69,46 @@ impl MeterState {
     }
 }
 
-/// Adapts the engine processor to the audio-api callback.
-struct EngineCallback(EngineProcessor);
+/// Adapts the engine processor to the audio-api callback; the input
+/// monitor is added after the engine.
+struct EngineCallback(EngineProcessor, MonitorMix);
 
 impl RenderCallback for EngineCallback {
     fn render(&mut self, left: &mut [f32], right: &mut [f32]) {
         self.0.render(left, right);
+        self.1.add(left, right);
+    }
+}
+
+/// Recording input and the take being written (spec 0.2.0 §7).
+struct Recorder {
+    shared: Arc<Shared>,
+    input: Option<Box<dyn InputStream>>,
+    /// Recording ring reader while no take holds it.
+    ring: Option<rtrb::Consumer<f32>>,
+    session: Option<Session>,
+    finished: Option<Result<FinishedTake, String>>,
+    /// Monitor feed of the open output.
+    monitor: Option<MonitorControl>,
+    /// Why no input is open.
+    problem: Option<String>,
+    monitor_on: bool,
+    project_dir: Option<PathBuf>,
+}
+
+impl Default for Recorder {
+    fn default() -> Self {
+        Self {
+            shared: Arc::new(Shared::default()),
+            input: None,
+            ring: None,
+            session: None,
+            finished: None,
+            monitor: None,
+            problem: None,
+            monitor_on: false,
+            project_dir: None,
+        }
     }
 }
 
@@ -111,6 +149,7 @@ pub struct AudioHost {
         std::sync::mpsc::Receiver<ImportResult>,
     ),
     next_import: u64,
+    recorder: Recorder,
 }
 
 impl std::fmt::Debug for AudioHost {
@@ -170,6 +209,97 @@ impl AudioHost {
             pending_preview: None,
             imports: std::sync::mpsc::channel(),
             next_import: 0,
+            recorder: Recorder::default(),
+        }
+    }
+
+    /// Opens the configured input at the output's rate (or closes it).
+    fn open_input(&mut self) {
+        let rec = &mut self.recorder;
+        if rec.session.is_some() {
+            return;
+        }
+        rec.input = None;
+        rec.ring = None;
+        rec.problem = None;
+        let cfg = self.settings.recording.clone();
+        let Some(device) = cfg.device else {
+            rec.problem = Some("Choose an input in Options → Recording.".into());
+            return;
+        };
+        let Some(active) = &self.active else {
+            rec.problem = Some("Open an audio output first (recording uses its rate).".into());
+            return;
+        };
+        let Some(backend) = self.backends.iter().find(|b| b.id() == active.key.backend) else {
+            return;
+        };
+        let rate = active.engine.sample_rate();
+        let (capture, ring, mon) = recording::capture(Arc::clone(&rec.shared), rate);
+        let request = jdance_audio_api::InputRequest {
+            sample_rate: rate,
+            channels: cfg.channels,
+        };
+        match backend.open_input(&DeviceId(device), &request, Box::new(capture)) {
+            Ok(stream) => {
+                rec.input = Some(stream);
+                rec.ring = Some(ring);
+                if let Some(m) = &mut rec.monitor {
+                    m.send(mon);
+                }
+            }
+            Err(e) => {
+                rec.problem = Some(format!(
+                    "The input could not be opened: {e}. If the system asks for microphone \
+                     access, allow it and choose the input again."
+                ));
+            }
+        }
+    }
+
+    /// Where takes are written: the project's `assets/`, or the settings
+    /// folder for an unsaved project.
+    fn recording_dir(project_dir: Option<&Path>) -> Option<PathBuf> {
+        match project_dir {
+            Some(d) => Some(d.join(jdance_persistence::ASSETS_DIR)),
+            None => config::config_dir().map(|d| d.join("recordings")),
+        }
+    }
+
+    fn poll_recording(&mut self) {
+        let rec = &mut self.recorder;
+        if let Some(m) = &mut rec.monitor {
+            m.collect();
+        }
+        if let Some(input) = &rec.input
+            && let StreamState::Failed(e) = input.state()
+        {
+            rec.shared.recording.store(false, Relaxed);
+            rec.problem = Some(format!("The input stopped: {e}"));
+            rec.input = None;
+            self.notices
+                .push(Notice::error(format!("Recording input failed: {e}")));
+        }
+        let rec = &mut self.recorder;
+        if rec.session.as_ref().is_some_and(Session::is_finished) {
+            let (ring, result) = rec.session.take().expect("checked").join();
+            if rec.input.is_some() {
+                rec.ring = ring;
+            }
+            let dir = rec.project_dir.clone();
+            rec.finished = Some(result.and_then(|take| {
+                if take.frames == 0 {
+                    let _ = std::fs::remove_file(&take.path);
+                    return Err(take
+                        .problem
+                        .unwrap_or_else(|| "nothing was recorded".into()));
+                }
+                let audio = import_file(&take.path, dir.as_deref())?;
+                Ok(FinishedTake {
+                    audio,
+                    problem: take.problem,
+                })
+            }));
         }
     }
 
@@ -424,6 +554,7 @@ impl Host for AudioHost {
         if self.needs_compile {
             self.recompile();
         }
+        self.poll_recording();
         if let Some(a) = &mut self.active {
             a.engine.collect_garbage();
             self.reading = a.engine.feedback().read();
@@ -596,6 +727,185 @@ impl Host for AudioHost {
         Some(ticket)
     }
 
+    fn input_devices(&mut self) -> Vec<InputDevice> {
+        let Some(backend) = self
+            .active
+            .as_ref()
+            .and_then(|a| self.backends.iter().find(|b| b.id() == a.key.backend))
+            .or_else(|| self.backends.first())
+        else {
+            return Vec::new();
+        };
+        backend
+            .input_devices()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|d| InputDevice {
+                channels: backend.input_channels(&d.id).unwrap_or(0),
+                id: d.id.0,
+                name: d.name,
+                is_default: d.is_default,
+            })
+            .collect()
+    }
+
+    fn recording_settings(&self) -> RecordingSettings {
+        let c = &self.settings.recording;
+        RecordingSettings {
+            device: c.device.clone(),
+            channels: c.channels,
+            monitor: self.recorder.monitor_on,
+            offset_ms: c.offset_ms,
+        }
+    }
+
+    fn set_recording_settings(&mut self, s: RecordingSettings) -> Result<(), String> {
+        let reopen = s.device != self.settings.recording.device
+            || s.channels != self.settings.recording.channels
+            || self.recorder.input.is_none();
+        self.settings.recording = config::RecordingConfig {
+            device: s.device,
+            channels: s.channels,
+            offset_ms: s.offset_ms.clamp(-1000.0, 1000.0),
+        };
+        self.save_settings();
+        self.recorder.monitor_on = s.monitor;
+        self.recorder.shared.monitor.store(s.monitor, Relaxed);
+        if reopen {
+            self.open_input();
+        }
+        match &self.recorder.problem {
+            Some(p) if self.settings.recording.device.is_some() => Err(p.clone()),
+            _ => Ok(()),
+        }
+    }
+
+    fn input_meter(&mut self) -> (f32, f32) {
+        self.recorder.shared.take_peaks()
+    }
+
+    fn recording_state(&self) -> RecordingState {
+        let rec = &self.recorder;
+        if rec.session.is_some() {
+            if rec.shared.recording.load(Relaxed) {
+                let rate = f64::from(self.engine_rate().max(1));
+                return RecordingState::Recording {
+                    seconds: rec.shared.captured.load(Relaxed) as f64 / rate,
+                };
+            }
+            return RecordingState::Finishing;
+        }
+        if rec.input.is_some() {
+            return RecordingState::Ready;
+        }
+        RecordingState::NoInput(
+            rec.problem
+                .clone()
+                .unwrap_or_else(|| "Choose an input in Options → Recording.".into()),
+        )
+    }
+
+    fn start_recording(&mut self, name: &str, project_dir: Option<&Path>) -> Result<(), String> {
+        if self.recorder.session.is_some() {
+            return Err("a recording is already running".into());
+        }
+        let channels = self.settings.recording.channels.count();
+        let rate = self.engine_rate();
+        let rec = &mut self.recorder;
+        let Some(ring) = rec.ring.take() else {
+            return Err(rec
+                .problem
+                .clone()
+                .unwrap_or_else(|| "no recording input is open".into()));
+        };
+        let dir = Self::recording_dir(project_dir)
+            .ok_or_else(|| "no folder for recordings".to_owned())?;
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            rec.ring = Some(ring);
+            return Err(format!("cannot create {}: {e}", dir.display()));
+        }
+        let safe: String = name
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || " -_".contains(c) {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let part = (1..)
+            .map(|n| {
+                let stem = if n == 1 {
+                    safe.clone()
+                } else {
+                    format!("{safe}-{n}")
+                };
+                dir.join(format!("{stem}{}", recording::PART_SUFFIX))
+            })
+            .find(|p| !p.exists())
+            .expect("unbounded");
+        rec.shared.overflow.store(false, Relaxed);
+        rec.shared.captured.store(0, Relaxed);
+        match Session::start(part, channels, rate, ring, Arc::clone(&rec.shared)) {
+            Ok(session) => {
+                rec.session = Some(session);
+                rec.project_dir = project_dir.map(Path::to_path_buf);
+                rec.shared.recording.store(true, Relaxed);
+                Ok(())
+            }
+            Err((ring, e)) => {
+                rec.ring = Some(ring);
+                Err(e)
+            }
+        }
+    }
+
+    fn stop_recording(&mut self) {
+        self.recorder.shared.recording.store(false, Relaxed);
+    }
+
+    fn take_recording(&mut self) -> Option<Result<FinishedTake, String>> {
+        self.recorder.finished.take()
+    }
+
+    fn unfinished_recordings(&mut self, project_dir: Option<&Path>) -> Vec<PathBuf> {
+        let dirs: Vec<PathBuf> = [Self::recording_dir(project_dir), Self::recording_dir(None)]
+            .into_iter()
+            .flatten()
+            .collect();
+        let current = self.recorder.session.as_ref().map(|s| s.part.clone());
+        recording::unfinished(&dirs)
+            .into_iter()
+            .filter(|p| Some(p) != current.as_ref())
+            .collect()
+    }
+
+    fn resolve_unfinished(
+        &mut self,
+        path: &Path,
+        action: Recovery,
+        project_dir: Option<&Path>,
+    ) -> Result<Option<jdance_ui::ImportedAudio>, String> {
+        if action == Recovery::Delete {
+            std::fs::remove_file(path).map_err(|e| e.to_string())?;
+            return Ok(None);
+        }
+        recording::repair(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let done = recording::final_name(path);
+        std::fs::rename(path, &done).map_err(|e| e.to_string())?;
+        match action {
+            Recovery::Import => import_file(&done, project_dir).map(Some),
+            _ => {
+                self.notices.push(Notice::info(format!(
+                    "Recording kept as {}",
+                    done.display()
+                )));
+                Ok(None)
+            }
+        }
+    }
+
     fn take_imports(&mut self) -> Vec<(u64, Result<jdance_ui::ImportedAudio, String>)> {
         self.imports.1.try_iter().collect()
     }
@@ -652,13 +962,17 @@ impl Host for AudioHost {
             .backend(&key.backend)
             .ok_or_else(|| AudioError::Unsupported(format!("backend {}", key.backend)))?;
         let (engine, processor) = create_engine(settings.sample_rate);
+        let (mix, control) = recording::monitor_mix();
         let request = jdance_audio_api::StreamRequest {
             sample_rate: settings.sample_rate,
             buffer: settings.buffer,
             first_output_channel: settings.first_output_channel,
         };
-        let stream =
-            backend.open_output(&key.device, &request, Box::new(EngineCallback(processor)))?;
+        let stream = backend.open_output(
+            &key.device,
+            &request,
+            Box::new(EngineCallback(processor, mix)),
+        )?;
         self.engine_generation += 1;
         self.active = Some(Active {
             key: key.clone(),
@@ -672,13 +986,18 @@ impl Host for AudioHost {
         self.save_settings();
         self.needs_compile = true;
         self.recompile();
+        // The input follows the output's rate and feeds its monitor.
+        self.recorder.monitor = Some(control);
+        self.open_input();
         Ok(())
     }
 
     fn close_device(&mut self) {
         // Dropping the stream stops the callback; the processor and its
         // snapshot are freed on this (non-realtime) thread.
+        self.recorder.shared.recording.store(false, Relaxed);
         self.active = None;
+        self.recorder.monitor = None;
     }
 
     fn open_control_panel(&mut self, key: &DeviceKey) -> Result<(), AudioError> {

@@ -37,7 +37,7 @@ use std::path::{Path, PathBuf};
 
 const ROW_H: f32 = 32.0;
 const RULER_H: f32 = 20.0;
-const HEADER_W: f32 = 190.0;
+const HEADER_W: f32 = 212.0;
 const EDGE_PX: f32 = 6.0;
 const BAR_TICKS: u64 = 3_840;
 const NAME_H: f32 = 13.0;
@@ -130,6 +130,8 @@ pub(crate) struct PlaylistView {
     last_pattern: Option<PatternId>,
     /// Clips touched by a Delete drag.
     erased: BTreeSet<ClipId>,
+    /// Lane that receives the next recording (spec 0.2.0 §7).
+    pub armed: Option<LaneId>,
 }
 
 impl Default for PlaylistView {
@@ -144,6 +146,7 @@ impl Default for PlaylistView {
             source: None,
             last_pattern: None,
             erased: BTreeSet::new(),
+            armed: None,
         }
     }
 }
@@ -322,6 +325,9 @@ impl PlaylistView {
         if !valid {
             self.source = None;
         }
+        if self.armed.is_some_and(|l| pl.lane(l).is_none()) {
+            self.armed = None;
+        }
     }
 
     /// Selects only `ids` (e.g. clips just created).
@@ -497,6 +503,13 @@ impl PlaylistView {
                     .changed()
                 {
                     out.edits.push(Edit::SetLaneSolo(lane.id, s));
+                }
+                let armed = self.armed == Some(lane.id);
+                if arm_button(ui, armed)
+                    .on_hover_text("Arm for recording: the next take goes on this lane")
+                    .clicked()
+                {
+                    self.armed = if armed { None } else { Some(lane.id) };
                 }
                 route_box(ui, project, lane.id, lane.audio_track, out);
             }
@@ -1320,6 +1333,25 @@ fn mute_edit(project: &Project, id: ClipId, muted: bool) -> Option<Edit> {
     }
     pl.audio_clip(id)
         .map(|c| Edit::SetAudioClip(AudioClip { muted, ..*c }))
+}
+
+/// Record-arm toggle: a ring, filled when armed.
+fn arm_button(ui: &mut egui::Ui, armed: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::click());
+    let c = rect.center();
+    let color = if armed {
+        theme::RED
+    } else if resp.hovered() {
+        theme::TEXT
+    } else {
+        theme::MUTED
+    };
+    if armed {
+        ui.painter().circle_filled(c, 5.5, color);
+    } else {
+        ui.painter().circle_stroke(c, 5.0, Stroke::new(1.5, color));
+    }
+    resp
 }
 
 /// Mixer track box of a lane's audio clips (UI-VIS-036).

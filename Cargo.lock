@@ -1204,6 +1204,7 @@ name = "jdance-app"
 version = "0.1.0"
 dependencies = [
  "eframe",
+ "hound",
  "jdance-audio-api",
  "jdance-audio-cpal",
  "jdance-domain",
@@ -1214,6 +1215,7 @@ dependencies = [
  "jdance-plugin-vst3",
  "jdance-test-support",
  "jdance-ui",
+ "rtrb",
  "serde",
  "serde_json",
  "tempfile",

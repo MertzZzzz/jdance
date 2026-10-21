@@ -22,6 +22,7 @@ jdance-plugin-api.workspace = true
 jdance-plugin-vst3.workspace = true
 jdance-ui.workspace = true
 eframe.workspace = true
+rtrb.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
@@ -29,6 +30,7 @@ serde_json.workspace = true
 windows-sys = { version = "0.61.2", features = ["Win32_System_Console"] }
 
 [dev-dependencies]
+hound.workspace = true
 jdance-test-support.workspace = true
 tempfile.workspace = true
 

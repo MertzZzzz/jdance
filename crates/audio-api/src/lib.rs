@@ -133,7 +133,7 @@ pub struct DeviceCapabilities {
     pub default_sample_rate: Option<u32>,
     pub buffer_size: BufferSizeCaps,
     pub output_channels: u16,
-    /// Display only: recording is outside MVP scope.
+    /// Input channels of the same device (0 = none).
     pub input_channels: u16,
     pub sample_formats: Vec<SampleFormat>,
     pub reports_latency: bool,
@@ -194,6 +194,68 @@ pub trait OutputStream {
     fn state(&self) -> StreamState;
 }
 
+/// Hardware inputs captured by a recording (spec 0.2.0 §7), zero-based.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InputChannels {
+    Mono(u16),
+    /// The pair starting at this channel.
+    Stereo(u16),
+}
+
+impl InputChannels {
+    /// Channels in the recorded file.
+    pub fn count(self) -> u16 {
+        match self {
+            Self::Mono(_) => 1,
+            Self::Stereo(_) => 2,
+        }
+    }
+
+    /// Hardware channels the device needs.
+    pub fn needed(self) -> u16 {
+        match self {
+            Self::Mono(c) => c + 1,
+            Self::Stereo(c) => c + 2,
+        }
+    }
+
+    /// Display name, from driver names when known ("Input 1", "Input 1+2").
+    pub fn label(self) -> String {
+        match self {
+            Self::Mono(c) => format!("Input {}", c + 1),
+            Self::Stereo(c) => format!("Input {}+{}", c + 1, c + 2),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputRequest {
+    pub sample_rate: u32,
+    pub channels: InputChannels,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ActiveInputInfo {
+    pub device: DeviceId,
+    pub device_name: String,
+    pub sample_rate: u32,
+    /// Hardware channels of the opened configuration.
+    pub device_channels: u16,
+    pub channels: InputChannels,
+}
+
+/// Receives captured audio on the device thread; same realtime rules as
+/// [`RenderCallback`]. Mono captures pass the same slice twice.
+pub trait CaptureCallback: Send + 'static {
+    fn capture(&mut self, left: &[f32], right: &[f32]);
+}
+
+/// An open input stream; dropping it stops and closes the stream.
+pub trait InputStream {
+    fn info(&self) -> &ActiveInputInfo;
+    fn state(&self) -> StreamState;
+}
+
 pub trait AudioBackend {
     fn id(&self) -> BackendId;
     fn display_name(&self) -> String;
@@ -205,6 +267,24 @@ pub trait AudioBackend {
         request: &StreamRequest,
         callback: Box<dyn RenderCallback>,
     ) -> Result<Box<dyn OutputStream>, AudioError>;
+    /// Devices with inputs (may include output devices that also capture).
+    fn input_devices(&self) -> Result<Vec<DeviceInfo>, AudioError> {
+        Ok(Vec::new())
+    }
+    /// Input channel count of an input device.
+    fn input_channels(&self, _device: &DeviceId) -> Result<u16, AudioError> {
+        Ok(0)
+    }
+    /// Opens a capture stream. A backend that cannot run it alongside the
+    /// output fails here; it never aggregates devices behind the scenes.
+    fn open_input(
+        &self,
+        _device: &DeviceId,
+        _request: &InputRequest,
+        _callback: Box<dyn CaptureCallback>,
+    ) -> Result<Box<dyn InputStream>, AudioError> {
+        Err(AudioError::Unsupported("this backend cannot record".into()))
+    }
     /// Opens the driver's own settings dialog where supported.
     fn open_control_panel(&self, _device: &DeviceId) -> Result<(), AudioError> {
         Err(AudioError::Unsupported(
@@ -261,6 +341,37 @@ pub fn validate_request(
         )));
     }
     Ok(())
+}
+
+/// Takes `channels` out of an interleaved device buffer with
+/// `device_channels` channels into `left`/`right` (mono: `left` only).
+/// Returns the frames written. Realtime-safe.
+#[inline]
+pub fn deinterleave_input<T: Copy>(
+    data: &[T],
+    device_channels: usize,
+    channels: InputChannels,
+    left: &mut [f32],
+    right: &mut [f32],
+    convert: impl Fn(T) -> f32,
+) -> usize {
+    if device_channels == 0 {
+        return 0;
+    }
+    let frames = (data.len() / device_channels)
+        .min(left.len())
+        .min(right.len());
+    for (i, frame) in data.chunks_exact(device_channels).take(frames).enumerate() {
+        let at = |c: u16| frame.get(usize::from(c)).map_or(0.0, |v| convert(*v));
+        match channels {
+            InputChannels::Mono(c) => left[i] = at(c),
+            InputChannels::Stereo(c) => {
+                left[i] = at(c);
+                right[i] = at(c + 1);
+            }
+        }
+    }
+    frames
 }
 
 /// Writes the stereo pair into an interleaved device buffer with
@@ -376,6 +487,18 @@ mod tests {
             BufferSizeCaps::Range { min: 100, max: 600 }.offered(),
             [128, 256, 512]
         );
+    }
+
+    #[test]
+    fn deinterleave_takes_the_chosen_inputs() {
+        let data = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let (mut l, mut r) = ([0.0; 4], [0.0; 4]);
+        let n = deinterleave_input(&data, 3, InputChannels::Stereo(1), &mut l, &mut r, |x| x);
+        assert_eq!((n, &l[..2], &r[..2]), (2, &[2.0, 5.0][..], &[3.0, 6.0][..]));
+        let n = deinterleave_input(&data, 3, InputChannels::Mono(2), &mut l, &mut r, |x| x);
+        assert_eq!((n, &l[..2]), (2, &[3.0, 6.0][..]));
+        assert_eq!(InputChannels::Stereo(0).label(), "Input 1+2");
+        assert_eq!(InputChannels::Mono(2).needed(), 3);
     }
 
     #[test]

@@ -166,6 +166,7 @@ pub(crate) fn rgb(c: [u8; 3]) -> Color32 {
 pub(crate) enum Icon {
     Play,
     Stop,
+    Record,
 }
 
 /// A square button with a drawn icon; `on` fills it with the accent.
@@ -173,9 +174,10 @@ pub(crate) fn icon_button(ui: &mut egui::Ui, icon: Icon, on: bool, label: &str) 
     let size = vec2(34.0, 28.0);
     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
     let visuals = ui.style().interact(&resp);
-    let fill = if on { AMBER } else { visuals.bg_fill };
+    let accent = if icon == Icon::Record { RED } else { AMBER };
+    let fill = if on { accent } else { visuals.bg_fill };
     let stroke = if on {
-        Stroke::new(1.0, AMBER)
+        Stroke::new(1.0, accent)
     } else {
         visuals.bg_stroke
     };
@@ -204,6 +206,9 @@ pub(crate) fn icon_button(ui: &mut egui::Ui, icon: Icon, on: bool, label: &str) 
                 CornerRadius::same(1),
                 color,
             );
+        }
+        Icon::Record => {
+            painter.circle_filled(c, 5.5, if on { ON_AMBER } else { RED });
         }
     }
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));

@@ -6,7 +6,7 @@
 
 use jdance_audio_api::{
     ActiveStreamInfo, AudioError, BackendId, DeviceCapabilities, DeviceInfo, DeviceKey,
-    DeviceSettings, StatsReading, StreamState,
+    DeviceSettings, InputChannels, StatsReading, StreamState,
 };
 use jdance_domain::{ExportOptions, PatternId, PluginTarget, Project, SampleRef, TrackId};
 use jdance_plugin_api::{ParamInfo, PluginDescriptor};
@@ -165,6 +165,67 @@ pub struct IndexStatus {
     pub cancelled: bool,
 }
 
+/// A device that can record, on the current audio backend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputDevice {
+    pub id: String,
+    pub name: String,
+    pub channels: u16,
+    pub is_default: bool,
+}
+
+/// Recording input (spec 0.2.0 §7); a user setting, not part of projects.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecordingSettings {
+    /// `None` = no input open.
+    pub device: Option<String>,
+    pub channels: InputChannels,
+    /// Input heard through the output; off by default.
+    pub monitor: bool,
+    /// Manual alignment: positive moves recordings later.
+    pub offset_ms: f32,
+}
+
+impl Default for RecordingSettings {
+    fn default() -> Self {
+        Self {
+            device: None,
+            channels: InputChannels::Mono(0),
+            monitor: false,
+            offset_ms: 0.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum RecordingState {
+    /// No input is open (the reason, for display).
+    NoInput(String),
+    Ready,
+    Recording {
+        seconds: f64,
+    },
+    /// The writer is finishing the file.
+    Finishing,
+}
+
+/// What to do with a take left unfinished by a crash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Recovery {
+    /// Repair it and add it to the project's samples.
+    Import,
+    /// Repair it and leave it as a file.
+    KeepFile,
+    Delete,
+}
+
+/// A finished take: the file as imported, and why it ended early.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FinishedTake {
+    pub audio: ImportedAudio,
+    pub problem: Option<String>,
+}
+
 /// An audio file read for import (spec 0.2.0 §2): copied into the
 /// project's `assets/` folder when the project has one.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -308,6 +369,47 @@ pub trait Host {
     }
     fn take_imports(&mut self) -> Vec<(u64, Result<ImportedAudio, String>)> {
         Vec::new()
+    }
+
+    /// Recording devices of the current backend.
+    fn input_devices(&mut self) -> Vec<InputDevice> {
+        Vec::new()
+    }
+    fn recording_settings(&self) -> RecordingSettings {
+        RecordingSettings::default()
+    }
+    /// Stores the settings and (re)opens the input at the output's rate.
+    fn set_recording_settings(&mut self, _settings: RecordingSettings) -> Result<(), String> {
+        Err("recording is not available".into())
+    }
+    /// Input peaks since the last call.
+    fn input_meter(&mut self) -> (f32, f32) {
+        (0.0, 0.0)
+    }
+    fn recording_state(&self) -> RecordingState {
+        RecordingState::NoInput("recording is not available".into())
+    }
+    /// Starts writing a take named `name`; the caller starts playback
+    /// right after.
+    fn start_recording(&mut self, _name: &str, _project_dir: Option<&Path>) -> Result<(), String> {
+        Err("recording is not available".into())
+    }
+    fn stop_recording(&mut self) {}
+    /// The finished take, once its file is complete.
+    fn take_recording(&mut self) -> Option<Result<FinishedTake, String>> {
+        None
+    }
+    /// Takes left unfinished by a crash.
+    fn unfinished_recordings(&mut self, _project_dir: Option<&Path>) -> Vec<PathBuf> {
+        Vec::new()
+    }
+    fn resolve_unfinished(
+        &mut self,
+        _path: &Path,
+        _action: Recovery,
+        _project_dir: Option<&Path>,
+    ) -> Result<Option<ImportedAudio>, String> {
+        Err("recording is not available".into())
     }
 
     /// Peak level per bucket of a loaded sample (waveform display).

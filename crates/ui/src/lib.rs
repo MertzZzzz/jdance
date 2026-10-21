@@ -18,6 +18,7 @@ mod playlist;
 mod plugins;
 mod project_browser;
 mod rack;
+mod recording;
 mod sample_editor;
 mod settings;
 mod theme;
@@ -25,9 +26,9 @@ mod toolbar;
 mod widgets;
 
 pub use host::{
-    DirEntry, Host, ImportedAudio, IndexStatus, LatencyInfo, LibraryRoot, Listing, MeterReadings,
-    Notice, NoticeLevel, PluginParamView, SampleStatus, StreamStatus, TransportMode,
-    TransportStatus,
+    DirEntry, FinishedTake, Host, ImportedAudio, IndexStatus, InputDevice, LatencyInfo,
+    LibraryRoot, Listing, MeterReadings, Notice, NoticeLevel, PluginParamView, RecordingSettings,
+    RecordingState, Recovery, SampleStatus, StreamStatus, TransportMode, TransportStatus,
 };
 
 use egui::{Key, KeyboardShortcut, Modifiers};
@@ -116,6 +117,15 @@ pub struct JdanceApp<H: Host, S: ProjectStore> {
     automation_editors: Vec<automation_editor::AutomationEditor>,
     sample_picker: Option<library::SamplePicker>,
     show_library: bool,
+    show_recording: bool,
+    recording_panel: recording::RecordingPanel,
+    /// Lane and start tick of the take being recorded.
+    record_target: Option<(LaneId, u64)>,
+    /// Record was pressed with the loop on: ask first.
+    loop_prompt: bool,
+    recovery: Option<recording::RecoveryDialog>,
+    /// Project path whose folders were checked for unfinished takes.
+    recovery_checked: Option<Option<PathBuf>>,
     /// Audio imports in flight: ticket → where the clip goes (`None` =
     /// add the file only).
     pending_imports: std::collections::BTreeMap<u64, Option<(Option<LaneId>, u64)>>,
@@ -188,6 +198,12 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             automation_editors: Vec::new(),
             sample_picker: None,
             show_library: false,
+            show_recording: false,
+            recording_panel: recording::RecordingPanel::default(),
+            record_target: None,
+            loop_prompt: false,
+            recovery: None,
+            recovery_checked: None,
             pending_imports: std::collections::BTreeMap::new(),
             project_browser: project_browser::ProjectBrowser::default(),
             confirm_delete: None,
@@ -599,6 +615,10 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                     self.show_library = true;
                     ui.close();
                 }
+                if ui.button("Recording…").clicked() {
+                    self.show_recording = true;
+                    ui.close();
+                }
             });
             let name = self.path.as_ref().and_then(|p| p.file_name()).map_or_else(
                 || "Untitled".to_owned(),
@@ -614,7 +634,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
     fn toolbar(&mut self, ui: &mut egui::Ui, now: f64) {
         let transport = self.host.transport();
         ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.spacing_mut().item_spacing.x = 5.0;
             // Transport.
             let playing = transport.playing;
             if theme::icon_button(ui, theme::Icon::Play, playing, "Play")
@@ -627,12 +647,29 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 .on_hover_text("Stop; when already stopped, return to the song start")
                 .clicked()
             {
+                if self.record_target.is_some() {
+                    self.host.stop_recording();
+                }
                 if playing {
                     self.host.stop();
                 } else {
                     self.host.seek_ticks(0);
                 }
             }
+            let rec_state = self.host.recording_state();
+            let recording = matches!(rec_state, RecordingState::Recording { .. });
+            if theme::icon_button(ui, theme::Icon::Record, recording, "Record")
+                .on_hover_text("Record the input onto the armed lane from the playhead")
+                .clicked()
+            {
+                if recording {
+                    self.host.stop_recording();
+                    self.host.stop();
+                } else {
+                    self.begin_recording(now);
+                }
+            }
+
             if ui
                 .button("Panic")
                 .on_hover_text("Silence all sounding notes and voices")
@@ -752,7 +789,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
         });
     }
 
-    fn status_bar(&self, ui: &mut egui::Ui) {
+    fn status_bar(&mut self, ui: &mut egui::Ui) {
         let t = self.host.transport();
         ui.horizontal(|ui| {
             let changes = if self.history.is_dirty() {
@@ -771,6 +808,27 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                     theme::WARN,
                     format!("Dropped commands {}", t.dropped_commands),
                 );
+            }
+            // Armed input: its level, and the take's length while recording.
+            let rec_state = self.host.recording_state();
+            if let RecordingState::Recording { seconds } = rec_state {
+                ui.label(
+                    egui::RichText::new(format!("REC {seconds:.1} s"))
+                        .font(theme::mono(11.0))
+                        .color(theme::RED),
+                );
+                ui.ctx().request_repaint_after_secs(0.1);
+            }
+            if self.playlist_view.armed.is_some()
+                && matches!(
+                    rec_state,
+                    RecordingState::Ready | RecordingState::Recording { .. }
+                )
+            {
+                ui.label(egui::RichText::new("Input").size(11.0).color(theme::MUTED));
+                let meter = self.recording_panel.update_meter(&mut self.host);
+                recording::input_meter(ui, meter, 80.0);
+                ui.ctx().request_repaint_after_secs(0.05);
             }
             ui.with_layout(
                 egui::Layout::right_to_left(egui::Align::Center),
@@ -1537,7 +1595,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
         let (current_name, current_len) = (current.name.clone(), current.length_steps);
         let mut selected = self.current_pattern;
         egui::ComboBox::from_id_salt("pattern")
-            .width(110.0)
+            .width(92.0)
             .selected_text(current_name)
             .show_ui(ui, |ui| {
                 for p in &self.project.patterns {
@@ -1752,6 +1810,211 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 }
                 self.sync_needed = true;
             }
+        }
+    }
+
+    /// Record pressed: needs an armed lane and an open input; the loop
+    /// is turned off first, after asking (spec 0.2.0 §7).
+    fn begin_recording(&mut self, now: f64) {
+        if self.playlist_view.armed.is_none() {
+            self.notify(
+                Notice::info("Arm a Playlist lane for recording: the ring next to its name"),
+                now,
+            );
+            return;
+        }
+        if let RecordingState::NoInput(why) = self.host.recording_state() {
+            self.show_recording = true;
+            self.notify(Notice::warning(why), now);
+            return;
+        }
+        if self.host.transport().playing {
+            self.notify(
+                Notice::info("Stop playback and place the playhead, then press Record"),
+                now,
+            );
+            return;
+        }
+        if self.project.playlist.loop_enabled && self.project.playlist.loop_range.is_some() {
+            self.loop_prompt = true;
+            return;
+        }
+        self.start_recording(now);
+    }
+
+    fn start_recording(&mut self, now: f64) {
+        let Some(lane) = self.playlist_view.armed else {
+            return;
+        };
+        let start = self.host.transport().position_ticks.unwrap_or(0);
+        let n = self
+            .project
+            .assets
+            .iter()
+            .filter(|a| a.name.starts_with("Recording"))
+            .count()
+            + 1;
+        let dir = self.project_dir().map(Path::to_path_buf);
+        match self
+            .host
+            .start_recording(&format!("Recording {n}"), dir.as_deref())
+        {
+            Ok(()) => {
+                self.record_target = Some((lane, start));
+                if self.sync_needed {
+                    // The engine must have the current project (loop off).
+                    self.sync_needed = false;
+                    let dir = self.project_dir().map(Path::to_path_buf);
+                    self.host.set_project(&self.project, dir.as_deref());
+                }
+                self.song_mode = true;
+                self.host.set_mode(TransportMode::Song);
+                self.mode_sent = Some(TransportMode::Song);
+                self.host.play();
+            }
+            Err(e) => self.notify(Notice::error(format!("Cannot record: {e}")), now),
+        }
+    }
+
+    /// Loop on at Record: turn it off and record, or cancel.
+    fn loop_prompt_dialog(&mut self, ctx: &egui::Context, now: f64) {
+        if !self.loop_prompt {
+            return;
+        }
+        let mut choice = None;
+        egui::Modal::new(egui::Id::unique("record_loop")).show(ctx, |ui| {
+            ui.set_width(360.0);
+            ui.heading("The loop is on");
+            ui.label("Recording does not loop. Turn the loop off and record?");
+            ui.horizontal(|ui| {
+                if ui.button("Turn loop off and record").clicked() {
+                    choice = Some(true);
+                }
+                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
+                    choice = Some(false);
+                }
+            });
+        });
+        if let Some(go) = choice {
+            self.loop_prompt = false;
+            if go {
+                let range = self.project.playlist.loop_range;
+                self.apply(
+                    Edit::SetLoop {
+                        range,
+                        enabled: false,
+                    },
+                    false,
+                    now,
+                );
+                self.sync_needed = true;
+                self.start_recording(now);
+            }
+        }
+    }
+
+    /// A finished take becomes an asset and a clip on the armed lane at
+    /// the start position plus the offset; one undo step (undo keeps the
+    /// file).
+    fn finish_recording(&mut self, now: f64) {
+        let Some(result) = self.host.take_recording() else {
+            return;
+        };
+        let target = self.record_target.take();
+        let take = match result {
+            Ok(t) => t,
+            Err(e) => {
+                self.notify(Notice::error(format!("Recording failed: {e}")), now);
+                return;
+            }
+        };
+        if let Some(problem) = &take.problem {
+            self.notify(Notice::error(problem.clone()), now);
+        }
+        let Some((lane, start)) = target else {
+            return;
+        };
+        let audio = take.audio;
+        let offset_ms = self.host.recording_settings().offset_ms;
+        let p = &mut self.project;
+        let asset = jdance_domain::AudioAsset {
+            id: jdance_domain::AssetId(p.ids.next()),
+            name: audio.name.clone(),
+            path: audio.path.clone(),
+            hash: audio.hash,
+            size: audio.size,
+            sample_rate: audio.sample_rate,
+            channels: audio.channels,
+            frames: audio.frames,
+        };
+        let fpt = jdance_domain::frames_per_tick(p.tempo_bpm, p.timebase_rate);
+        let at = (start as f64 * fpt).round() as i64
+            + (f64::from(offset_ms) / 1000.0 * f64::from(p.timebase_rate)).round() as i64;
+        let cid = ClipId(p.ids.next());
+        let mut clip = audio_clip_for(&asset, cid, lane, at.max(0) as u64);
+        if at < 0 {
+            // Earlier than the song start: the first part is trimmed.
+            let skip = (-at as f64 * f64::from(asset.sample_rate) / f64::from(p.timebase_rate))
+                .round() as u64;
+            clip.source_in = skip.min(clip.source_out.saturating_sub(1));
+        }
+        let seconds = asset.frames as f64 / f64::from(asset.sample_rate.max(1));
+        let edits = vec![Edit::AddAsset(asset), Edit::AddAudioClip(clip)];
+        match self.history.execute(&mut self.project, Edit::Batch(edits)) {
+            Ok(()) => {
+                self.sync_needed = true;
+                self.playlist_view.select_only(&[cid]);
+                self.notify(Notice::info(format!("Recorded {seconds:.1} s")), now);
+            }
+            Err(e) => self.notify(Notice::error(format!("Recording not added: {e}")), now),
+        }
+    }
+
+    /// Looks for unfinished takes once per project folder.
+    fn check_recovery(&mut self, ctx: &egui::Context, now: f64) {
+        if self.recovery_checked.as_ref() != Some(&self.path) {
+            self.recovery_checked = Some(self.path.clone());
+            let dir = self.project_dir().map(Path::to_path_buf);
+            let files = self.host.unfinished_recordings(dir.as_deref());
+            if !files.is_empty() {
+                self.recovery = Some(recording::RecoveryDialog::new(files));
+            }
+        }
+        let Some(dialog) = &mut self.recovery else {
+            return;
+        };
+        let choices = dialog.show(ctx);
+        let done = dialog.files.is_empty();
+        let dir = self.project_dir().map(Path::to_path_buf);
+        for (path, action) in choices {
+            match self.host.resolve_unfinished(&path, action, dir.as_deref()) {
+                Ok(Some(audio)) => {
+                    let p = &mut self.project;
+                    let asset = jdance_domain::AudioAsset {
+                        id: jdance_domain::AssetId(p.ids.next()),
+                        name: audio.name.clone(),
+                        path: audio.path.clone(),
+                        hash: audio.hash,
+                        size: audio.size,
+                        sample_rate: audio.sample_rate,
+                        channels: audio.channels,
+                        frames: audio.frames,
+                    };
+                    self.apply(Edit::AddAsset(asset), false, now);
+                    self.notify(
+                        Notice::info(format!(
+                            "{} recovered into the project's samples",
+                            audio.name
+                        )),
+                        now,
+                    );
+                }
+                Ok(None) => {}
+                Err(e) => self.notify(Notice::error(format!("Recovery failed: {e}")), now),
+            }
+        }
+        if done {
+            self.recovery = None;
         }
     }
 
@@ -2237,6 +2500,12 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
         self.confirm_delete_dialog(&ctx, now);
         self.sample_editor_window(&ctx, now);
         self.automation_editor_windows(&ctx, now);
+        if self.show_recording {
+            self.show_recording = self.recording_panel.window(&ctx, &mut self.host);
+        }
+        self.finish_recording(now);
+        self.loop_prompt_dialog(&ctx, now);
+        self.check_recovery(&ctx, now);
         if self.show_library {
             self.show_library = library::library_window(&ctx, &mut self.host);
         }

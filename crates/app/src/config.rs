@@ -64,6 +64,33 @@ pub struct UserSettings {
     /// Favorite Browser folders.
     #[serde(default)]
     pub favorite_folders: Vec<PathBuf>,
+    /// Recording input (monitoring is never stored: it starts off).
+    #[serde(default)]
+    pub recording: RecordingConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecordingConfig {
+    #[serde(default)]
+    pub device: Option<String>,
+    #[serde(default = "first_input")]
+    pub channels: jdance_audio_api::InputChannels,
+    #[serde(default)]
+    pub offset_ms: f32,
+}
+
+fn first_input() -> jdance_audio_api::InputChannels {
+    jdance_audio_api::InputChannels::Mono(0)
+}
+
+impl Default for RecordingConfig {
+    fn default() -> Self {
+        Self {
+            device: None,
+            channels: first_input(),
+            offset_ms: 0.0,
+        }
+    }
 }
 
 /// Unit tests point the configuration directory here.

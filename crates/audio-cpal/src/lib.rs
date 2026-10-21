@@ -12,9 +12,10 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SizedSample};
 use jdance_audio_api::{
-    ActiveStreamInfo, AudioBackend, AudioError, BackendId, BufferRequest, BufferSizeCaps,
-    DeviceCapabilities, DeviceId, DeviceInfo, OutputStream, RenderCallback, SampleFormat,
-    SampleRates, StreamRequest, StreamState, StreamStats, interleave_pair, validate_request,
+    ActiveInputInfo, ActiveStreamInfo, AudioBackend, AudioError, BackendId, BufferRequest,
+    BufferSizeCaps, CaptureCallback, DeviceCapabilities, DeviceId, DeviceInfo, InputRequest,
+    InputStream, OutputStream, RenderCallback, SampleFormat, SampleRates, StreamRequest,
+    StreamState, StreamStats, deinterleave_input, interleave_pair, validate_request,
 };
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::str::FromStr;
@@ -247,6 +248,166 @@ impl AudioBackend for CpalBackend {
                 first_output_channel: request.first_output_channel,
             },
         }))
+    }
+
+    fn input_devices(&self) -> Result<Vec<DeviceInfo>, AudioError> {
+        let default_id = self.host.default_input_device().and_then(|d| d.id().ok());
+        let mut out = Vec::new();
+        for device in self.host.input_devices().map_err(map_err)? {
+            let Ok(id) = device.id() else { continue };
+            let name = device
+                .description()
+                .map(|d| d.name().to_owned())
+                .unwrap_or_else(|_| id.id().to_owned());
+            out.push(DeviceInfo {
+                is_default: default_id.as_ref() == Some(&id),
+                id: DeviceId(id.to_string()),
+                name,
+                stable_id: true,
+            });
+        }
+        Ok(out)
+    }
+
+    fn input_channels(&self, id: &DeviceId) -> Result<u16, AudioError> {
+        Ok(self
+            .device(id)?
+            .supported_input_configs()
+            .map_err(map_err)?
+            .map(|r| r.channels())
+            .max()
+            .unwrap_or(0))
+    }
+
+    fn open_input(
+        &self,
+        id: &DeviceId,
+        request: &InputRequest,
+        callback: Box<dyn CaptureCallback>,
+    ) -> Result<Box<dyn InputStream>, AudioError> {
+        let device = self.device(id)?;
+        let needed = request.channels.needed();
+        let range = device
+            .supported_input_configs()
+            .map_err(map_err)?
+            .filter(|r| r.channels() >= needed && r.contains_rate(request.sample_rate))
+            .min_by_key(|r| (format_rank(r.sample_format()), r.channels()))
+            .ok_or_else(|| {
+                AudioError::InvalidConfig(format!(
+                    "the input device has no configuration with {needed} channels at {} Hz \
+                     (the output's rate); recording needs one shared rate",
+                    request.sample_rate
+                ))
+            })?;
+        let format = range.sample_format();
+        let config = cpal::StreamConfig {
+            channels: range.channels(),
+            sample_rate: request.sample_rate,
+            buffer_size: cpal::BufferSize::Default,
+        };
+        let stats = Arc::new(StreamStats::default());
+        let ch = request.channels;
+        let stream = match format {
+            cpal::SampleFormat::F32 => build_input::<f32>(&device, &config, ch, callback, &stats),
+            cpal::SampleFormat::I32 => build_input::<i32>(&device, &config, ch, callback, &stats),
+            cpal::SampleFormat::I24 => {
+                build_input::<cpal::I24>(&device, &config, ch, callback, &stats)
+            }
+            cpal::SampleFormat::I16 => build_input::<i16>(&device, &config, ch, callback, &stats),
+            cpal::SampleFormat::F64 => build_input::<f64>(&device, &config, ch, callback, &stats),
+            cpal::SampleFormat::U8 => build_input::<u8>(&device, &config, ch, callback, &stats),
+            other => Err(AudioError::Unsupported(format!("sample format {other:?}"))),
+        }?;
+        stream.play().map_err(map_err)?;
+        let device_name = device
+            .description()
+            .map(|d| d.name().to_owned())
+            .unwrap_or_else(|_| id.0.clone());
+        Ok(Box::new(CpalInput {
+            _stream: stream,
+            stats,
+            info: ActiveInputInfo {
+                device: id.clone(),
+                device_name,
+                sample_rate: config.sample_rate,
+                device_channels: config.channels,
+                channels: ch,
+            },
+        }))
+    }
+}
+
+fn build_input<T>(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    channels: jdance_audio_api::InputChannels,
+    mut callback: Box<dyn CaptureCallback>,
+    stats: &Arc<StreamStats>,
+) -> Result<cpal::Stream, AudioError>
+where
+    T: SizedSample + Send + 'static,
+    f32: FromSample<T>,
+{
+    let device_channels = usize::from(config.channels);
+    // Allocated here, before the stream starts; never resized afterwards.
+    let mut left = vec![0.0f32; SCRATCH_FRAMES];
+    let mut right = vec![0.0f32; SCRATCH_FRAMES];
+    let rt_stats = Arc::clone(stats);
+    let err_stats = Arc::clone(stats);
+    let mono = matches!(channels, jdance_audio_api::InputChannels::Mono(_));
+    let data_callback = move |data: &[T], _: &cpal::InputCallbackInfo| {
+        let frames = data.len() / device_channels.max(1);
+        rt_stats.note_callback(frames as u32);
+        if rt_stats.is_panicked() {
+            return;
+        }
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            for chunk in data.chunks(SCRATCH_FRAMES * device_channels.max(1)) {
+                let n = deinterleave_input(
+                    chunk,
+                    device_channels,
+                    channels,
+                    &mut left,
+                    &mut right,
+                    <f32 as FromSample<T>>::from_sample_,
+                );
+                if mono {
+                    callback.capture(&left[..n], &left[..n]);
+                } else {
+                    callback.capture(&left[..n], &right[..n]);
+                }
+            }
+        }));
+        if let Err(payload) = result {
+            std::mem::forget(payload);
+            rt_stats.note_panic();
+        }
+    };
+    let error_callback = move |e: cpal::Error| err_stats.set_error(e.to_string());
+    device
+        .build_input_stream::<T, _, _>(*config, data_callback, error_callback, None)
+        .map_err(map_err)
+}
+
+struct CpalInput {
+    _stream: cpal::Stream,
+    stats: Arc<StreamStats>,
+    info: ActiveInputInfo,
+}
+
+impl InputStream for CpalInput {
+    fn info(&self) -> &ActiveInputInfo {
+        &self.info
+    }
+
+    fn state(&self) -> StreamState {
+        match self.stats.read() {
+            r if r.panicked => StreamState::Failed("the recording input crashed (panic)".into()),
+            r => match r.error {
+                Some(e) => StreamState::Failed(e),
+                None => StreamState::Running,
+            },
+        }
     }
 }
 

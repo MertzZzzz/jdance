@@ -608,15 +608,17 @@ mod tests {
                 pt(60, 0.5, Curve::Linear),
             ],
         });
-        p.playlist.automation_clips.push(jdance_domain::AutomationClip {
-            id: jdance_domain::ClipId(p.ids.next()),
-            lane: p.playlist.lanes[0].id,
-            source,
-            start: 0,
-            offset: 0,
-            duration: 2 * 3840,
-            muted: false,
-        });
+        p.playlist
+            .automation_clips
+            .push(jdance_domain::AutomationClip {
+                id: jdance_domain::ClipId(p.ids.next()),
+                lane: p.playlist.lanes[0].id,
+                source,
+                start: 0,
+                offset: 0,
+                duration: 2 * 3840,
+                muted: false,
+            });
         p.playlist.loop_range = Some((0, 3840));
         p.playlist.loop_enabled = true;
         let setup_info = ProcessSetupInfo {
