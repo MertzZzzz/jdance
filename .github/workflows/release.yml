@@ -3,12 +3,17 @@
 #
 # A `v*` tag builds the MSI, installs it on the runner, checks the
 # installed program, uninstalls it and publishes a release with the MSI.
-# A manual run (workflow_dispatch) does the same without publishing.
+# A manual run, or a branch push that changes the packaging, does the
+# same without publishing.
 name: Release
 
 on:
   push:
     tags: ["v*"]
+    branches: ["claude/**"]
+    paths:
+      - "packaging/**"
+      - ".github/workflows/release.yml"
   workflow_dispatch:
 
 permissions:
