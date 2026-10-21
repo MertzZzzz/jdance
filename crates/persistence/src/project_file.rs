@@ -332,6 +332,14 @@ fn validate(p: &Project) -> Result<(), PersistError> {
         {
             return bad(format!("channel {:?} has invalid volume/pan", c.id));
         }
+        if c.pitch.abs() > jdance_domain::MAX_CHANNEL_PITCH
+            || c.polyphony > jdance_domain::MAX_POLYPHONY
+        {
+            return bad(format!("channel {:?} has invalid pitch/polyphony", c.id));
+        }
+        c.sampler
+            .validate()
+            .map_err(|e| PersistError::Corrupt(format!("channel {:?}: {e}", c.id)))?;
     }
     if p.channels.len() > jdance_domain::MAX_CHANNELS {
         return bad("too many channels".into());
@@ -431,6 +439,39 @@ mod tests {
         assert!(text.contains("\"kind\": \"track_volume\""), "{text}");
         assert!(text.contains("\"curve\": \"curve\""));
         assert_eq!(load_project(&file).unwrap(), p);
+    }
+
+    #[test]
+    fn channel_settings_round_trip_and_are_validated() {
+        let mut p = sample_project("a.wav");
+        let ch = &mut p.channels[0];
+        ch.color = Some([1, 2, 3]);
+        ch.pitch = -7;
+        ch.polyphony = 4;
+        ch.mono = true;
+        ch.sampler.start = 0.1;
+        ch.sampler.mode = jdance_domain::PlaybackMode::Loop;
+        ch.sampler.envelope = true;
+        ch.sampler.root_key = 57;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.jdance");
+        save_project(&file, &p).unwrap();
+        assert_eq!(load_project(&file).unwrap(), p);
+        // Defaults are not written (older files stay small and readable).
+        let plain = sample_project("a.wav");
+        save_project(&file, &plain).unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(
+            !text.contains("\"sampler\":") && !text.contains("polyphony"),
+            "{text}"
+        );
+        // Broken markers are rejected on load.
+        let bad = text.replace(
+            "\"muted\": false",
+            "\"muted\": false, \"sampler\": {\"start\": 0.9, \"end\": 0.1}",
+        );
+        std::fs::write(&file, bad).unwrap();
+        assert!(load_project(&file).is_err());
     }
 
     #[test]

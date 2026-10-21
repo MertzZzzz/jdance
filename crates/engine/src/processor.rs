@@ -488,12 +488,12 @@ impl EngineProcessor {
                 while let Some(e) = snap.events.get(k).copied().filter(|e| e.pos < seg_end) {
                     let offset = done + (e.pos - p) as usize;
                     k += 1;
-                    if let Some(inst) = snap
-                        .channels
-                        .get_mut(e.channel)
-                        .and_then(|c| c.instrument.as_mut())
+                    if let Some(c) = snap.channels.get_mut(e.channel)
+                        && let Some(inst) = c.instrument.as_mut()
                     {
-                        inst.note_on(offset, e.pos, e.key, e.velocity, e.length);
+                        inst.make_room(offset, c.mono, c.polyphony);
+                        let key = transpose(e.key, c.pitch);
+                        inst.note_on(offset, e.pos, key, e.velocity, e.length);
                         continue;
                     }
                     render_voices(snap, voices, channels, cursor, offset);
@@ -897,6 +897,11 @@ fn render_voices(
     }
 }
 
+/// `key` moved by `semitones`, kept in the MIDI range.
+fn transpose(key: u8, semitones: i32) -> u8 {
+    (i32::from(key) + semitones).clamp(0, 127) as u8
+}
+
 fn trigger(
     snap: &PlaybackSnapshot,
     voices: &mut [Voice],
@@ -909,6 +914,28 @@ fn trigger(
     };
     if ch.sample.is_none() {
         return;
+    }
+    let fade = release_len(snap.sample_rate);
+    // Voice limits of the channel: mono cuts every voice, a polyphony
+    // limit the oldest ones (short fades, no clicks).
+    let mine =
+        |v: &Voice| v.inner.is_active() && !v.inner.is_releasing() && v.inner.slot == e.channel;
+    if ch.mono {
+        for v in voices.iter_mut().filter(|v| mine(v)) {
+            v.inner.release(fade);
+        }
+    } else if ch.polyphony > 0 {
+        let mut held = voices.iter().filter(|v| mine(v)).count();
+        while held >= usize::from(ch.polyphony) {
+            if let Some(v) = voices
+                .iter_mut()
+                .filter(|v| mine(v))
+                .min_by_key(|v| v.inner.started_at)
+            {
+                v.inner.release(fade);
+            }
+            held -= 1;
+        }
     }
     let index = match voices.iter().position(|v| !v.inner.is_active()) {
         Some(i) => i,
@@ -925,11 +952,18 @@ fn trigger(
     *serial += 1;
     let v = &mut voices[index];
     v.channel = ch.id;
-    v.inner.start_pitched(
+    let s = &ch.sampler;
+    let mut playback = s.playback;
+    if s.gated {
+        playback.gate = Some(e.length.max(1));
+    }
+    let gain = e.velocity * s.gain;
+    v.inner.start_with(
         e.channel,
         *serial,
-        e.velocity,
-        e.velocity,
-        jdance_dsp::key_rate(e.key, jdance_domain::ROOT_KEY),
+        gain,
+        gain,
+        jdance_dsp::key_rate(transpose(e.key, ch.pitch), s.root_key),
+        playback,
     );
 }

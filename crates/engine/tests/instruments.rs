@@ -224,6 +224,37 @@ fn panic_turns_notes_off_and_playback_continues() {
 }
 
 #[test]
+fn transposition_and_mono_apply_to_instruments() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let a = Note {
+        start: 0,
+        length: 4 * TICKS_PER_STEP,
+        key: 60,
+        velocity: 1.0,
+    };
+    let b = Note {
+        start: TICKS_PER_STEP,
+        key: 64,
+        ..a
+    };
+    let (mut p, ch, pid) = project(&[], vec![a, b]);
+    let c = p.channel_mut(ch).unwrap();
+    c.pitch = -12;
+    c.mono = true;
+    let (mut h, mut e) = create_engine(SR);
+    h.set_snapshot(compile(&p, pid, Some(synth(&log, 0))))
+        .unwrap();
+    h.play().unwrap();
+    render(&mut e, 6 * STEP as usize, 512);
+    let l = log.lock().unwrap();
+    assert_eq!(
+        l[..3],
+        [(0, 48, true), (STEP, 48, false), (STEP, 52, true)],
+        "an octave down; the second note cuts the first"
+    );
+}
+
+#[test]
 fn instrument_latency_is_compensated_against_other_channels() {
     let log = Arc::new(Mutex::new(Vec::new()));
     let (mut p, _, pid) = project(&[0], Vec::new());

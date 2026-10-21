@@ -518,6 +518,15 @@ impl Host for AudioHost {
             .status(&resolve_sample_path(project_dir, sample))
     }
 
+    fn sample_peaks(
+        &self,
+        sample: &SampleRef,
+        project_dir: Option<&Path>,
+    ) -> Option<std::sync::Arc<Vec<f32>>> {
+        self.samples
+            .peaks(&resolve_sample_path(project_dir, sample))
+    }
+
     fn backends(&self) -> Vec<(BackendId, String)> {
         self.backends
             .iter()

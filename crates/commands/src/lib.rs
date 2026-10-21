@@ -13,10 +13,10 @@ pub use playlist::{add_clip, add_lane, add_pattern, duplicate_clips, make_unique
 
 use jdance_domain::{
     AutoPoint, AutomationId, AutomationLane, AutomationTarget, Channel, ChannelId, ClipId, Curve,
-    Effect, InsertId, Lane, LaneId, LimiterSettings, MAX_CHANNELS, MAX_NOTES_PER_ROW,
-    MAX_TEMPO_BPM, MAX_VOLUME, MIN_TEMPO_BPM, Mixer, MixerTrack, Note, Pattern, PatternClip,
-    PatternId, Playlist, Project, RoutingError, SampleRef, SendId, Sidechain, Step, StepRow,
-    TrackId, sort_notes, sort_points,
+    Effect, InsertId, Lane, LaneId, LimiterSettings, MAX_CHANNEL_PITCH, MAX_CHANNELS,
+    MAX_NOTES_PER_ROW, MAX_POLYPHONY, MAX_TEMPO_BPM, MAX_VOLUME, MIN_TEMPO_BPM, Mixer, MixerTrack,
+    Note, Pattern, PatternClip, PatternId, Playlist, Project, RoutingError, SampleRef,
+    SamplerSettings, SendId, Sidechain, Step, StepRow, TrackId, sort_notes, sort_points,
 };
 use thiserror::Error;
 
@@ -80,6 +80,15 @@ pub enum Edit {
     SetChannelColor(ChannelId, Option<[u8; 3]>),
     /// Moves a channel to `index` (clamped) in the rack.
     MoveChannel(ChannelId, usize),
+    /// Transposition, polyphony limit and mono mode of a channel.
+    SetChannelPlayback {
+        channel: ChannelId,
+        pitch: i32,
+        polyphony: u16,
+        mono: bool,
+    },
+    /// Sample playback settings (markers, loop, envelope, root key).
+    SetSampler(ChannelId, SamplerSettings),
     SetChannelSample(ChannelId, Option<SampleRef>),
     SetMasterVolume(f32),
     SetChannelTrack(ChannelId, TrackId),
@@ -200,6 +209,8 @@ pub enum MergeKey {
     InsertEffect(InsertId),
     Limiter,
     Notes(PatternId, ChannelId),
+    ChannelPlayback(ChannelId),
+    Sampler(ChannelId),
     Automation(AutomationId),
 }
 
@@ -217,6 +228,8 @@ impl Edit {
             Edit::RenameChannel(..) => "Rename channel",
             Edit::SetChannelColor(..) => "Change channel color",
             Edit::MoveChannel(..) => "Move channel",
+            Edit::SetChannelPlayback { .. } => "Change channel settings",
+            Edit::SetSampler(..) => "Change sampler",
             Edit::SetChannelSample(..) => "Change sample",
             Edit::SetMasterVolume(_) => "Change master volume",
             Edit::SetChannelTrack(..) => "Route channel",
@@ -280,6 +293,8 @@ impl Edit {
                 pattern, channel, ..
             } => Some(MergeKey::Notes(*pattern, *channel)),
             Edit::SetAutomation { id, lane: Some(_) } => Some(MergeKey::Automation(*id)),
+            Edit::SetChannelPlayback { channel, .. } => Some(MergeKey::ChannelPlayback(*channel)),
+            Edit::SetSampler(id, _) => Some(MergeKey::Sampler(*id)),
             _ => None,
         }
     }
@@ -465,6 +480,40 @@ impl Edit {
                 Ok(Edit::SetChannelColor(
                     *id,
                     std::mem::replace(&mut ch.color, *color),
+                ))
+            }
+            Edit::SetChannelPlayback {
+                channel,
+                pitch,
+                polyphony,
+                mono,
+            } => {
+                if pitch.abs() > MAX_CHANNEL_PITCH {
+                    return Err(EditError::OutOfRange(f64::from(*pitch)));
+                }
+                if *polyphony > MAX_POLYPHONY {
+                    return Err(EditError::OutOfRange(f64::from(*polyphony)));
+                }
+                let ch = p
+                    .channel_mut(*channel)
+                    .ok_or(EditError::NoSuchChannel(*channel))?;
+                let old = Edit::SetChannelPlayback {
+                    channel: *channel,
+                    pitch: ch.pitch,
+                    polyphony: ch.polyphony,
+                    mono: ch.mono,
+                };
+                ch.pitch = *pitch;
+                ch.polyphony = *polyphony;
+                ch.mono = *mono;
+                Ok(old)
+            }
+            Edit::SetSampler(id, settings) => {
+                settings.validate().map_err(EditError::Arrangement)?;
+                let ch = p.channel_mut(*id).ok_or(EditError::NoSuchChannel(*id))?;
+                Ok(Edit::SetSampler(
+                    *id,
+                    std::mem::replace(&mut ch.sampler, *settings),
                 ))
             }
             Edit::MoveChannel(id, index) => {

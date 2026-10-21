@@ -88,6 +88,56 @@ pub struct ChannelRt {
     pub muted: bool,
     /// Plugin instrument instead of the sampler.
     pub instrument: Option<InstrumentRt>,
+    /// Transposition in semitones.
+    pub pitch: i32,
+    /// 0 = no limit.
+    pub polyphony: u16,
+    pub mono: bool,
+    pub sampler: SamplerRt,
+}
+
+/// Sampler settings in frames of the loaded sample and samples of the
+/// engine rate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SamplerRt {
+    pub playback: jdance_dsp::Playback,
+    /// The voice follows note length (envelope or loop mode).
+    pub gated: bool,
+    /// Linear sampler gain.
+    pub gain: f32,
+    pub root_key: u8,
+}
+
+impl SamplerRt {
+    pub fn new(s: &jdance_domain::SamplerSettings, frames: usize, sample_rate: u32) -> Self {
+        let at = |f: f32| ((f64::from(f) * frames as f64).round() as usize).min(frames);
+        let ms = |v: f32| (f64::from(v) * f64::from(sample_rate) / 1000.0).round() as u32;
+        let looping = s.mode == jdance_domain::PlaybackMode::Loop;
+        let (start, end) = (
+            at(s.start),
+            at(s.end).max(at(s.start) + 1).min(frames.max(1)),
+        );
+        let whole = start == 0 && end >= frames;
+        let playback = jdance_dsp::Playback {
+            start,
+            end: if whole { usize::MAX } else { end },
+            loop_range: looping.then(|| (at(s.loop_start), at(s.loop_end))),
+            adsr: s.envelope.then(|| jdance_dsp::Adsr {
+                attack: ms(s.attack_ms),
+                decay: ms(s.decay_ms),
+                sustain: s.sustain,
+                release: ms(s.release_ms),
+            }),
+            gate: None,
+            gate_release: (sample_rate / 200).max(1),
+        };
+        Self {
+            playback,
+            gated: s.envelope || looping,
+            gain: 10f32.powf(s.gain_db / 20.0),
+            root_key: s.root_key,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -561,17 +611,23 @@ pub fn compile_full(
             let g = if c.muted { 0.0 } else { c.volume };
             let instrument = instruments[i].take();
             let own = instrument.as_ref().map_or(0, |x| x.plugin.latency());
+            let sample = c
+                .sample()
+                .and_then(&samples)
+                .filter(|s| s.sample_rate == sample_rate);
+            let frames = sample.as_ref().map_or(0, |s| s.len());
             ChannelRt {
                 id: c.id,
-                sample: c
-                    .sample()
-                    .and_then(&samples)
-                    .filter(|s| s.sample_rate == sample_rate),
+                sample,
                 track,
                 gain: StereoGain::new((l * g, r * g), ramp),
                 delay: pdc.line(in_lat[track] - own),
                 muted: c.muted,
                 instrument,
+                pitch: c.pitch,
+                polyphony: c.polyphony,
+                mono: c.mono,
+                sampler: SamplerRt::new(&c.sampler, frames, sample_rate),
             }
         })
         .collect();

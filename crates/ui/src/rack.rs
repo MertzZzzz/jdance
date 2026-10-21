@@ -44,6 +44,8 @@ pub(crate) struct RackOutput {
     /// Toggle the instrument's editor window / parameter window.
     pub toggle_editor: Option<ChannelId>,
     pub show_params: Option<ChannelId>,
+    /// Open Channel Settings (`true`: on the sample tab).
+    pub open_settings: Option<(ChannelId, bool)>,
     pub clone: Vec<ChannelId>,
     /// Channels to delete after the user confirms.
     pub delete: Vec<ChannelId>,
@@ -403,7 +405,7 @@ impl RackView {
                 "{} ({})\nDouble-click: open its editor",
                 slot.name, slot.vendor
             ),
-            (None, None, _) => "No sample — drop a WAV file here or use the menu".to_owned(),
+            (None, None, _) => "No sample — drop a WAV file here or double-click".to_owned(),
             (
                 None,
                 Some(s),
@@ -412,7 +414,10 @@ impl RackView {
                     source_rate,
                 })),
             ) => {
-                format!("{}\n{frames} frames, {source_rate} Hz", s.path)
+                format!(
+                    "{}\n{frames} frames, {source_rate} Hz\nDouble-click: sample settings",
+                    s.path
+                )
             }
             (None, Some(s), Some(Some(SampleStatus::Failed(e)))) => {
                 format!("{}\nFailed: {e}", s.path)
@@ -427,7 +432,7 @@ impl RackView {
             if ch.instrument().is_some() {
                 out.toggle_editor = Some(ch.id);
             } else {
-                out.rename = Some(crate::RenameTarget::Channel(ch.id));
+                out.open_settings = Some((ch.id, true));
             }
         }
         if resp.secondary_clicked() && !self.selection.contains(&ch.id) {
@@ -448,6 +453,10 @@ impl RackView {
         resp.context_menu(|ui| {
             if ui.button("Open Piano Roll").clicked() {
                 out.open_piano = Some(ch.id);
+                ui.close();
+            }
+            if ui.button("Channel settings…").clicked() {
+                out.open_settings = Some((ch.id, false));
                 ui.close();
             }
             if ch.instrument().is_some() {

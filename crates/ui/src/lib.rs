@@ -5,6 +5,7 @@
 //! through `jdance-commands`, and tells the [`Host`] when it changed.
 
 mod automation;
+mod channel_settings;
 mod host;
 mod mixer;
 mod piano;
@@ -99,8 +100,8 @@ pub struct JdanceApp<H: Host, S: ProjectStore> {
     delete_channels: Option<Vec<ChannelId>>,
     /// Piano roll shown instead of the playlist.
     piano: Option<piano::PianoRoll>,
-    /// Instrument channel whose parameter window is open.
-    instrument_params: Option<ChannelId>,
+    /// Open Channel Settings window.
+    channel_settings: Option<channel_settings::ChannelSettingsWindow>,
     /// Shortening that needs confirmation: (pattern, steps, dropped).
     pending_length: Option<(PatternId, u32, usize)>,
     notices: Vec<(Notice, f64)>,
@@ -157,7 +158,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             rack_view: rack::RackView::default(),
             delete_channels: None,
             piano: None,
-            instrument_params: None,
+            channel_settings: None,
             pending_length: None,
             notices: Vec::new(),
             pending: None,
@@ -1403,7 +1404,14 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
             self.delete_channels = Some(std::mem::take(&mut out.delete));
         }
         if let Some(id) = out.show_params {
-            self.instrument_params = Some(id);
+            self.channel_settings = Some(channel_settings::ChannelSettingsWindow::instrument(id));
+        }
+        if let Some((id, sample)) = out.open_settings {
+            self.channel_settings = Some(if sample {
+                channel_settings::ChannelSettingsWindow::sample(id)
+            } else {
+                channel_settings::ChannelSettingsWindow::new(id)
+            });
         }
         for d in std::mem::take(&mut out.new_instruments) {
             let slot = PluginSlot {
@@ -1447,33 +1455,30 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
             self.show_plugins = plugins::window(&ctx, &mut self.host);
         }
         let mut instrument_automation = Vec::new();
-        if let Some(id) = self.instrument_params {
-            match self
-                .project
-                .channel(id)
-                .and_then(|c| c.instrument().map(|s| (c, s)))
-            {
-                Some((ch, slot)) => {
-                    let mut open = true;
-                    let automation = &self.project.automation;
-                    egui::Window::new(format!("{} · parameters", ch.name))
-                        .id(egui::Id::unique(("instrument_params", id.0)))
-                        .open(&mut open)
-                        .show(&ctx, |ui| {
-                            mixer::plugin_params_ui(
-                                ui,
-                                jdance_domain::PluginTarget::Channel(id),
-                                Some(slot),
-                                automation,
-                                &mut self.host,
-                                &mut instrument_automation,
-                            );
-                        });
-                    if !open {
-                        self.instrument_params = None;
-                    }
-                }
-                None => self.instrument_params = None,
+        if let Some(mut w) = self.channel_settings.take() {
+            let dir = self
+                .path
+                .as_deref()
+                .and_then(Path::parent)
+                .map(Path::to_path_buf);
+            let (o, open) = w.show(&ctx, &self.project, &mut self.host, dir.as_deref());
+            for (edit, merging) in o.edits {
+                self.apply(edit, merging, now);
+            }
+            if o.end_gesture {
+                self.history.end_gesture();
+            }
+            if o.toggle_editor {
+                let title = self
+                    .project
+                    .channel(w.channel)
+                    .map_or_else(String::new, |c| c.name.clone());
+                self.host
+                    .toggle_plugin_editor(jdance_domain::PluginTarget::Channel(w.channel), &title);
+            }
+            instrument_automation = o.automation;
+            if open {
+                self.channel_settings = Some(w);
             }
         }
         for request in instrument_automation {

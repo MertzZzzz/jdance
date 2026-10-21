@@ -482,6 +482,29 @@ impl InstrumentRt {
         }
     }
 
+    /// Applies the channel's voice limits before a new note at block
+    /// `offset`: mono ends every sounding note, a polyphony limit ends the
+    /// oldest ones.
+    pub fn make_room(&mut self, offset: usize, mono: bool, polyphony: u16) {
+        if mono {
+            self.all_off(offset);
+            return;
+        }
+        let limit = usize::from(polyphony);
+        while limit > 0 && self.sounding.len() >= limit {
+            let oldest = (0..self.sounding.len())
+                .min_by_key(|&i| self.sounding[i].2.wrapping_sub(self.next_id))
+                .expect("non-empty");
+            let (_, key, note_id) = self.sounding.swap_remove(oldest);
+            self.push(jdance_plugin_api::NoteEvent {
+                offset: offset as u32,
+                note_id,
+                key,
+                kind: jdance_plugin_api::NoteKind::Off,
+            });
+        }
+    }
+
     /// A note-on at block `offset`, timeline `pos`, gate `length` samples.
     pub fn note_on(&mut self, offset: usize, pos: u64, key: u8, velocity: f32, length: u64) {
         if self.sounding.len() == self.sounding.capacity() {

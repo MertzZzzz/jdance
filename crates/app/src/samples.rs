@@ -15,6 +15,8 @@ enum Entry {
     Loading,
     Ready {
         original: Arc<SampleBuffer>,
+        /// Peak level per bucket of the original, for waveform displays.
+        peaks: Arc<Vec<f32>>,
         /// Converted to the current engine rate; `None` while converting.
         converted: Option<Arc<SampleBuffer>>,
     },
@@ -23,7 +25,11 @@ enum Entry {
 
 #[derive(Debug)]
 enum Loaded {
-    Decoded(PathBuf, Result<(SampleBuffer, SampleBuffer), String>, u32),
+    Decoded(
+        PathBuf,
+        Result<(SampleBuffer, SampleBuffer, Vec<f32>), String>,
+        u32,
+    ),
     Converted(PathBuf, SampleBuffer),
 }
 
@@ -54,7 +60,10 @@ impl SampleCache {
         self.entries.insert(path.to_path_buf(), Entry::Loading);
         let (tx, path, rate) = (self.tx.clone(), path.to_path_buf(), self.rate);
         std::thread::spawn(move || {
-            let result = load_sample(&path, rate);
+            let result = load_sample(&path, rate).map(|(o, c)| {
+                let peaks = peaks(&o, PEAK_BUCKETS);
+                (o, c, peaks)
+            });
             let _ = tx.send(Loaded::Decoded(path, result, rate));
         });
     }
@@ -69,6 +78,7 @@ impl SampleCache {
             if let Entry::Ready {
                 original,
                 converted,
+                ..
             } = entry
             {
                 *converted = None;
@@ -88,8 +98,9 @@ impl SampleCache {
             match msg {
                 Loaded::Decoded(path, result, rate) => {
                     let entry = match result {
-                        Ok((original, converted)) => {
+                        Ok((original, converted, peaks)) => {
                             let original = Arc::new(original);
+                            let peaks = Arc::new(peaks);
                             let converted = (rate == self.rate).then(|| Arc::new(converted));
                             if converted.is_none() {
                                 let (tx, p, o, r) = (
@@ -104,6 +115,7 @@ impl SampleCache {
                             }
                             Entry::Ready {
                                 original,
+                                peaks,
                                 converted,
                             }
                         }
@@ -124,6 +136,14 @@ impl SampleCache {
         changed
     }
 
+    /// Waveform peaks of a loaded sample.
+    pub fn peaks(&self, path: &Path) -> Option<Arc<Vec<f32>>> {
+        match self.entries.get(path)? {
+            Entry::Ready { peaks, .. } => Some(Arc::clone(peaks)),
+            _ => None,
+        }
+    }
+
     pub fn converted(&self, path: &Path) -> Option<Arc<SampleBuffer>> {
         match self.entries.get(path)? {
             Entry::Ready { converted, .. } => converted.clone(),
@@ -137,6 +157,7 @@ impl SampleCache {
             Entry::Ready {
                 original,
                 converted,
+                ..
             } => match converted {
                 Some(_) => SampleStatus::Ready {
                     frames: original.len(),
@@ -147,4 +168,28 @@ impl SampleCache {
             Entry::Failed(e) => SampleStatus::Failed(e.clone()),
         })
     }
+}
+
+/// Resolution of waveform peaks.
+const PEAK_BUCKETS: usize = 2_048;
+
+/// Largest absolute value of either channel per bucket.
+fn peaks(s: &SampleBuffer, buckets: usize) -> Vec<f32> {
+    let n = s.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let buckets = buckets.min(n);
+    (0..buckets)
+        .map(|b| {
+            let (a, z) = (
+                b * n / buckets,
+                ((b + 1) * n / buckets).max(b * n / buckets + 1),
+            );
+            s.left[a..z]
+                .iter()
+                .chain(&s.right[a..z])
+                .fold(0.0f32, |m, v| m.max(v.abs()))
+        })
+        .collect()
 }

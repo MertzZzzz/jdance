@@ -21,7 +21,7 @@ pub use limiter::SafetyLimiter;
 pub use processor::{ParamEvent, ProcessContext, Processor, Tail, process_with_events};
 pub use resample::resample_cubic;
 pub use reverb::Reverb;
-pub use sampler::{SampleBuffer, SamplerVoice, key_rate};
+pub use sampler::{Adsr, Playback, SampleBuffer, SamplerVoice, key_rate};
 pub use tempo_delay::TempoDelay;
 
 /// Constant-power pan law, −3 dB at center (MIX-013 candidate).

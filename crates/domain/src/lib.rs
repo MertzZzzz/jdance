@@ -213,6 +213,118 @@ pub struct Channel {
     /// Display color; `None` = from [`PALETTE`] by position.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<[u8; 3]>,
+    /// Transposition in semitones applied to every note.
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub pitch: i32,
+    /// Most notes sounding at once; 0 = no limit (up to the engine's).
+    #[serde(default, skip_serializing_if = "is_zero_u16")]
+    pub polyphony: u16,
+    /// A new note cuts the sounding one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mono: bool,
+    /// Sample playback settings; ignored by instrument channels.
+    #[serde(default, skip_serializing_if = "SamplerSettings::is_default")]
+    pub sampler: SamplerSettings,
+}
+
+fn is_zero_i32(v: &i32) -> bool {
+    *v == 0
+}
+
+fn is_zero_u16(v: &u16) -> bool {
+    *v == 0
+}
+
+/// Transposition range of a channel, semitones.
+pub const MAX_CHANNEL_PITCH: i32 = 48;
+/// Polyphony limit range (0 = no limit).
+pub const MAX_POLYPHONY: u16 = 64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlaybackMode {
+    /// Plays to the sample end (or the end marker), ignoring note length
+    /// unless the envelope is on.
+    #[default]
+    OneShot,
+    /// Repeats the loop region while the note is held, then releases.
+    Loop,
+}
+
+/// Sample playback of a sampler channel (spec "DAW UI clean room", §12).
+/// Positions are fractions of the sample length, so they stay valid when
+/// the sample is replaced or resampled.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SamplerSettings {
+    /// Key at which the sample plays at its original speed.
+    pub root_key: u8,
+    /// Extra gain in dB, `-24.0..=12.0`.
+    pub gain_db: f32,
+    /// Start and end markers, `0.0 <= start < end <= 1.0`.
+    pub start: f32,
+    pub end: f32,
+    pub mode: PlaybackMode,
+    /// Loop region inside `start..end`, used in [`PlaybackMode::Loop`].
+    pub loop_start: f32,
+    pub loop_end: f32,
+    /// ADSR on; off plays the sample as is (one-shot ignores note length).
+    pub envelope: bool,
+    pub attack_ms: f32,
+    pub decay_ms: f32,
+    /// Sustain level `0.0..=1.0`.
+    pub sustain: f32,
+    pub release_ms: f32,
+}
+
+/// Longest envelope stage, ms.
+pub const MAX_ENVELOPE_MS: f32 = 10_000.0;
+
+impl Default for SamplerSettings {
+    fn default() -> Self {
+        Self {
+            root_key: ROOT_KEY,
+            gain_db: 0.0,
+            start: 0.0,
+            end: 1.0,
+            mode: PlaybackMode::OneShot,
+            loop_start: 0.0,
+            loop_end: 1.0,
+            envelope: false,
+            attack_ms: 2.0,
+            decay_ms: 120.0,
+            sustain: 0.7,
+            release_ms: 80.0,
+        }
+    }
+}
+
+impl SamplerSettings {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Checks ranges and marker order.
+    pub fn validate(&self) -> Result<(), String> {
+        let unit = |v: f32| (0.0..=1.0).contains(&v);
+        let ms = |v: f32| (0.0..=MAX_ENVELOPE_MS).contains(&v);
+        if self.root_key > 127 {
+            return Err("root key out of range".into());
+        }
+        if !(-24.0..=12.0).contains(&self.gain_db) {
+            return Err("sampler gain out of range".into());
+        }
+        if !(unit(self.start) && unit(self.end) && self.start < self.end) {
+            return Err("sample start must be before the end".into());
+        }
+        if !(unit(self.loop_start) && unit(self.loop_end) && self.loop_start < self.loop_end) {
+            return Err("loop start must be before the loop end".into());
+        }
+        if !(ms(self.attack_ms) && ms(self.decay_ms) && ms(self.release_ms) && unit(self.sustain)) {
+            return Err("envelope value out of range".into());
+        }
+        Ok(())
+    }
 }
 
 /// Default colors for channels and mixer tracks, used in order.
@@ -243,6 +355,10 @@ impl Channel {
             muted: false,
             track: TrackId::MASTER,
             color: None,
+            pitch: 0,
+            polyphony: 0,
+            mono: false,
+            sampler: SamplerSettings::default(),
         }
     }
 

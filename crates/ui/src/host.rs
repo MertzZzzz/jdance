@@ -170,6 +170,14 @@ pub trait Host {
     fn stream(&self) -> Option<StreamStatus>;
     fn sample_status(&self, sample: &SampleRef, project_dir: Option<&Path>)
     -> Option<SampleStatus>;
+    /// Peak level per bucket of a loaded sample (waveform display).
+    fn sample_peaks(
+        &self,
+        _sample: &SampleRef,
+        _project_dir: Option<&Path>,
+    ) -> Option<std::sync::Arc<Vec<f32>>> {
+        None
+    }
 
     fn backends(&self) -> Vec<(BackendId, String)>;
     fn devices(&self, backend: &BackendId) -> Result<Vec<DeviceInfo>, AudioError>;
