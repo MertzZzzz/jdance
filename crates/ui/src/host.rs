@@ -530,5 +530,10 @@ pub trait Host {
     }
     /// Stops the scan; modules not reached keep their earlier result.
     fn cancel_plugin_scan(&mut self) {}
+    /// Saved window layout (dock/undock), as written by the UI.
+    fn ui_layout(&self) -> String {
+        String::new()
+    }
+    fn set_ui_layout(&mut self, _layout: String) {}
     fn take_notices(&mut self) -> Vec<Notice>;
 }

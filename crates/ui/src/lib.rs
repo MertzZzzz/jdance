@@ -8,6 +8,7 @@ mod automation;
 mod automation_editor;
 mod browser;
 mod channel_settings;
+mod dock;
 mod host;
 mod icons;
 mod library;
@@ -116,6 +117,9 @@ pub struct JdanceApp<H: Host, S: ProjectStore> {
     playlist_view: playlist::PlaylistView,
     sample_editor: Option<sample_editor::SampleEditor>,
     automation_editors: Vec<automation_editor::AutomationEditor>,
+    /// Which panels are in their own windows (a user setting).
+    layout: dock::Layout,
+    show_project_browser: bool,
     sample_picker: Option<library::SamplePicker>,
     show_library: bool,
     show_recording: bool,
@@ -177,6 +181,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             .current_device()
             .is_none()
             .then(|| SettingsWindow::new(&host));
+        let layout = dock::Layout::from_text(&host.ui_layout());
         Self {
             host,
             store,
@@ -201,6 +206,8 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             playlist_view: playlist::PlaylistView::default(),
             sample_editor: None,
             automation_editors: Vec::new(),
+            layout,
+            show_project_browser: true,
             sample_picker: None,
             show_library: false,
             show_recording: false,
@@ -678,6 +685,33 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 ui.toggle_value(&mut self.show_rack, "Channel Rack");
                 ui.toggle_value(&mut self.show_playlist, "Playlist");
                 ui.toggle_value(&mut self.show_mixer, "Mixer");
+                ui.toggle_value(&mut self.show_project_browser, "Project Browser");
+                ui.separator();
+                ui.menu_button("Own windows", |ui| {
+                    for p in dock::Panel::ALL {
+                        let mut on = self.layout.is_undocked(p);
+                        if ui
+                            .checkbox(&mut on, p.name())
+                            .on_hover_text("Show this panel in its own window")
+                            .changed()
+                        {
+                            if on {
+                                self.layout.undock(p);
+                            } else {
+                                self.layout.dock(p);
+                            }
+                        }
+                    }
+                    ui.separator();
+                    if ui
+                        .button("Reset layout")
+                        .on_hover_text("Every panel back in the main window")
+                        .clicked()
+                    {
+                        self.layout.reset();
+                        ui.close();
+                    }
+                });
                 ui.separator();
                 ui.toggle_value(&mut self.show_plugins, "Plugins");
                 if ui.button("Tap Tempo").clicked() {
@@ -1261,6 +1295,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 u64::from(self.snap.max(1)),
                 &mut self.host,
                 &mut out,
+                &mut self.layout,
             )
         });
         // A window opened meanwhile (none can be) would be kept too.
@@ -1577,7 +1612,14 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             .and_then(Path::parent)
             .map(Path::to_path_buf);
         let mut out = sample_editor::SampleEditorOutput::default();
-        let open = ed.show(ctx, &self.project, &mut self.host, dir.as_deref(), &mut out);
+        let open = ed.show(
+            ctx,
+            &self.project,
+            &mut self.host,
+            dir.as_deref(),
+            &mut out,
+            &mut self.layout,
+        );
         let merging = !out.end_gesture;
         for edit in out.edits {
             self.apply(edit, merging, now);
@@ -2444,7 +2486,29 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
             self.browser_action(action, now);
         }
         let mut mix = mixer::MixerOutput::default();
-        if self.show_mixer {
+        let mixer_docked = !self.layout.is_undocked(dock::Panel::Mixer);
+        if self.show_mixer && !mixer_docked {
+            let latency = self.host.latency();
+            let meters = self.host.meters();
+            let event = self
+                .layout
+                .window(&ctx, dock::Panel::Mixer, 0, "Mixer", &mut |ui| {
+                    egui::ScrollArea::both().show(ui, |ui| {
+                        mix = mixer::show(
+                            ui,
+                            &self.project.mixer,
+                            &self.project.automation,
+                            &latency,
+                            &meters,
+                            &mut self.host,
+                        );
+                    });
+                });
+            if event == dock::WindowEvent::Closed {
+                self.show_mixer = false;
+            }
+        }
+        if self.show_mixer && mixer_docked {
             let latency = self.host.latency();
             let meters = self.host.meters();
             egui::Panel::bottom("mixer")
@@ -2496,10 +2560,57 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
         {
             self.piano = None;
         }
+        let piano_docked = !self.layout.is_undocked(dock::Panel::PianoRoll);
+        let browser_docked = !self.layout.is_undocked(dock::Panel::ProjectBrowser);
+        if !piano_docked
+            && let (Some(roll), Some(pattern)) =
+                (&mut self.piano, self.project.pattern(self.current_pattern))
+        {
+            let transport = self.host.transport();
+            let playhead = transport
+                .loop_pos
+                .filter(|_| transport.playing && !self.song_mode)
+                .map(|p| p * pattern.length_ticks() as f32);
+            let title = format!(
+                "Piano Roll · {}",
+                self.project
+                    .channel(roll.channel)
+                    .map_or("?", |c| c.name.as_str())
+            );
+            let (project, host, snap) = (&self.project, &mut self.host, self.snap);
+            let event = self
+                .layout
+                .window(&ctx, dock::Panel::PianoRoll, 0, &title, &mut |ui| {
+                    piano_out = roll.show(ui, project, pattern, host, playhead, snap);
+                });
+            if event == dock::WindowEvent::Closed {
+                piano_out.close = true;
+            }
+        }
+        if self.show_project_browser && !browser_docked {
+            let (browser, project, source, host) = (
+                &mut self.project_browser,
+                &self.project,
+                self.playlist_view.source,
+                &mut self.host,
+            );
+            let event = self.layout.window(
+                &ctx,
+                dock::Panel::ProjectBrowser,
+                0,
+                "Project Browser",
+                &mut |ui| {
+                    project_actions = browser.show(ui, project, source, host);
+                },
+            );
+            if event == dock::WindowEvent::Closed {
+                self.show_project_browser = false;
+            }
+        }
         egui::CentralPanel::default().show(ui, |ui| {
             let transport = self.host.transport();
             match (&mut self.piano, self.project.pattern(self.current_pattern)) {
-                (Some(roll), Some(pattern)) => {
+                (Some(roll), Some(pattern)) if piano_docked => {
                     // The playhead shows when this pattern loops.
                     let playhead = transport
                         .loop_pos
@@ -2520,15 +2631,17 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
                     let playhead = transport.position_ticks.filter(|_| self.song_mode);
                     let dir = self.path.as_deref().and_then(Path::parent);
                     ui.horizontal_top(|ui| {
-                        ui.vertical(|ui| {
-                            project_actions = self.project_browser.show(
-                                ui,
-                                &self.project,
-                                self.playlist_view.source,
-                                &mut self.host,
-                            );
-                        });
-                        ui.separator();
+                        if self.show_project_browser && browser_docked {
+                            ui.vertical(|ui| {
+                                project_actions = self.project_browser.show(
+                                    ui,
+                                    &self.project,
+                                    self.playlist_view.source,
+                                    &mut self.host,
+                                );
+                            });
+                            ui.separator();
+                        }
                         ui.vertical(|ui| {
                             pl_out = self.playlist_view.show(
                                 ui,
@@ -2702,6 +2815,10 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
         }
         self.confirm_dialog(&ctx, now);
         self.show_notices(&ctx, now);
+        if self.layout.changed {
+            self.layout.changed = false;
+            self.host.set_ui_layout(self.layout.to_text());
+        }
 
         if self.sync_needed {
             self.sync_needed = false;

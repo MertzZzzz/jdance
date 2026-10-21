@@ -1299,6 +1299,17 @@ impl Host for AudioHost {
         self.start_plugin_scan(false);
     }
 
+    fn ui_layout(&self) -> String {
+        self.settings.ui_layout.clone()
+    }
+
+    fn set_ui_layout(&mut self, layout: String) {
+        if self.settings.ui_layout != layout {
+            self.settings.ui_layout = layout;
+            self.save_settings();
+        }
+    }
+
     fn plugin_search_paths(&self) -> Vec<jdance_ui::PluginPath> {
         let disabled = &self.settings.disabled_plugin_paths;
         let entry = |path: PathBuf, system: bool| jdance_ui::PluginPath {

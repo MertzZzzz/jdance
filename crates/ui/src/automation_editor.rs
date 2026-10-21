@@ -116,16 +116,20 @@ impl AutomationEditor {
         grid: u64,
         host: &mut dyn Host,
         out: &mut EditorOutput,
+        layout: &mut crate::dock::Layout,
     ) -> bool {
         let Some(lane) = project.automation_lane(self.source) else {
             return false;
         };
-        let mut open = true;
-        egui::Window::new(format!("Automation · {}", lane.name))
-            .id(egui::Id::unique(("automation_editor", self.source.0)))
-            .default_size([720.0, 300.0])
-            .open(&mut open)
-            .show(ctx, |ui| {
+        let title = format!("Automation · {}", lane.name);
+        let source = self.source.0;
+        crate::dock::editor_window(
+            ctx,
+            layout,
+            crate::dock::Panel::AutomationEditor,
+            source,
+            &title,
+            &mut |ui| {
                 self.header(ui, project, lane, host, out);
                 ui.separator();
                 egui::ScrollArea::horizontal()
@@ -138,8 +142,8 @@ impl AutomationEditor {
                     .size(11.0)
                     .color(theme::MUTED),
                 );
-            });
-        open
+            },
+        )
     }
 
     fn header(

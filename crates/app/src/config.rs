@@ -67,6 +67,9 @@ pub struct UserSettings {
     /// Favorite Browser folders.
     #[serde(default)]
     pub favorite_folders: Vec<PathBuf>,
+    /// Undocked panels and their windows (`dock` text format of the UI).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub ui_layout: String,
     /// Recording input (monitoring is never stored: it starts off).
     #[serde(default)]
     pub recording: RecordingConfig,

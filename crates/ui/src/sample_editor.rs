@@ -157,24 +157,30 @@ impl SampleEditor {
         host: &mut dyn Host,
         dir: Option<&Path>,
         out: &mut SampleEditorOutput,
+        layout: &mut crate::dock::Layout,
     ) -> bool {
         let Some(v) = self.view(project, host, dir) else {
             return false;
         };
         let abs = resolve(dir, &v.path);
-        let mut open = true;
-        egui::Window::new(format!("Sample Editor · {}", v.name))
-            .id(egui::Id::unique("sample_editor"))
-            .default_size([760.0, 360.0])
-            .resizable(true)
-            .open(&mut open)
-            .show(ctx, |ui| {
+        let title = format!("Sample Editor · {}", v.name);
+        let open = crate::dock::editor_window(
+            ctx,
+            layout,
+            crate::dock::Panel::SampleEditor,
+            0,
+            &title,
+            &mut |ui| {
                 // Details.
                 ui.horizontal(|ui| {
                     if v.frames > 0 && v.rate > 0 {
                         let secs = v.frames as f64 / f64::from(v.rate);
                         let ch = v.channels.map_or_else(String::new, |c| {
-                            if c == 1 { " · mono".into() } else { format!(" · {c} ch") }
+                            if c == 1 {
+                                " · mono".into()
+                            } else {
+                                format!(" · {c} ch")
+                            }
                         });
                         ui.label(
                             RichText::new(format!(
@@ -208,7 +214,12 @@ impl SampleEditor {
                             .text("Zoom"),
                     );
                     let range = self.play_range(&v);
-                    if ui.button("Play").on_hover_text("Play the selection, the clip range or the whole file").clicked() && v.frames > 0 {
+                    if ui
+                        .button("Play")
+                        .on_hover_text("Play the selection, the clip range or the whole file")
+                        .clicked()
+                        && v.frames > 0
+                    {
                         let f = |x: u64| x as f64 / v.frames as f64;
                         host.preview_range(&abs, (f(range.0), f(range.1)));
                     }
@@ -236,7 +247,14 @@ impl SampleEditor {
                     .show(ui, |ui| {
                         let (rect, resp) =
                             ui.allocate_exact_size(vec2(total_w, WAVE_H), Sense::click_and_drag());
-                        self.waveform(ui, &v, peaks.as_deref().map(Vec::as_slice), rect, &resp, out);
+                        self.waveform(
+                            ui,
+                            &v,
+                            peaks.as_deref().map(Vec::as_slice),
+                            rect,
+                            &resp,
+                            out,
+                        );
                     });
 
                 ui.add_space(6.0);
@@ -249,7 +267,8 @@ impl SampleEditor {
                             .clicked()
                     {
                         let asset = v.asset.as_ref().expect("clip has an asset");
-                        out.edits.push(Edit::SetAudioClip(trimmed(c, asset, project, a, b)));
+                        out.edits
+                            .push(Edit::SetAudioClip(trimmed(c, asset, project, a, b)));
                         out.end_gesture = true;
                     }
                     if ui
@@ -268,7 +287,10 @@ impl SampleEditor {
                         .iter()
                         .filter(|c| matches!(c.source, ChannelSource::Sampler { .. }))
                         .collect();
-                    if self.sampler.is_some_and(|id| !samplers.iter().any(|c| c.id == id)) {
+                    if self
+                        .sampler
+                        .is_some_and(|id| !samplers.iter().any(|c| c.id == id))
+                    {
                         self.sampler = None;
                     }
                     let current = self
@@ -285,7 +307,9 @@ impl SampleEditor {
                         });
                     if ui
                         .button("Load into Sampler")
-                        .on_hover_text("The sampler plays this file; its start/end markers follow the range")
+                        .on_hover_text(
+                            "The sampler plays this file; its start/end markers follow the range",
+                        )
                         .clicked()
                         && v.frames > 0
                     {
@@ -305,7 +329,8 @@ impl SampleEditor {
                             .color(theme::MUTED),
                     );
                 }
-            });
+            },
+        );
         if !open {
             host.preview_file(None);
         }

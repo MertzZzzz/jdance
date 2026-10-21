@@ -134,7 +134,15 @@
    callback; ручной offset; восстановление незавершённых файлов при
    старте. Проверено с ALSA null-устройством (нули без тактирования);
    запись с реального железа — NOT RUN.
-8. **0.2-G** — Dock/Undock.
+8. **0.2-G** — Dock/Undock. Готово: Piano Roll, Sample Editor,
+   Automation Editor, Mixer, Project Browser выносятся в нативные окна
+   (egui viewports, `show_viewport_immediate`) той же сессии: View →
+   Own windows, кнопки Undock/Dock back, Reset layout; закрытие окна
+   скрывает панель; расположение и размер хранятся в user settings,
+   позиция за пределами экрана возвращается в видимую область.
+   Shortcuts редакторов работают в окне, где у них фокус; transport
+   (Space и т.п.) — в главном окне. Проверено под Xvfb (X11, без
+   оконного менеджера); Windows/macOS, multi-monitor и HiDPI — NOT RUN.
 9. **0.2-H** — пути плагинов и scan UI. Готово: стандартные и
    пользовательские пути VST3 с enable/disable (в user settings),
    add/remove, rescan/full rescan, прогресс по модулям, отмена
