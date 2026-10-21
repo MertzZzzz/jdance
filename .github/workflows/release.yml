@@ -1,19 +1,17 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Windows installer (MSI) and GitHub release.
 #
-# A `v*` tag builds the MSI, installs it on the runner, checks the
-# installed program, uninstalls it and publishes a release with the MSI.
-# A manual run, or a branch push that changes the packaging, does the
-# same without publishing.
+# Every push to master builds the MSI, installs it on the runner, checks
+# the installed program and uninstalls it. When the workspace version has
+# no release yet, it then publishes release `v<version>` (creating the tag
+# at that commit) with the MSI. A pushed `v*` tag publishes the same way.
+# A manual run only builds and checks.
 name: Release
 
 on:
   push:
+    branches: [master]
     tags: ["v*"]
-    branches: ["claude/**"]
-    paths:
-      - "packaging/**"
-      - ".github/workflows/release.yml"
   workflow_dispatch:
 
 permissions:
@@ -31,16 +29,25 @@ jobs:
       - uses: actions/checkout@v5
       - uses: Swatinem/rust-cache@v2
 
-      - name: Version from Cargo.toml (and the tag)
+      - name: Version from Cargo.toml; release needed?
         id: version
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
           if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "v$version" ]]; then
             echo "tag $GITHUB_REF_NAME does not match the workspace version $version" >&2
             exit 1
           fi
+          publish=false
+          if [[ "$GITHUB_REF_TYPE" == "tag" || "$GITHUB_REF" == "refs/heads/master" ]] \
+            && ! gh release view "v$version" > /dev/null 2>&1; then
+            publish=true
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
           echo "msi=jdance-$version-windows-x64.msi" >> "$GITHUB_OUTPUT"
 
       - name: Release build
@@ -98,13 +105,14 @@ jobs:
           retention-days: 30
 
       - name: Publish the release
-        if: github.ref_type == 'tag'
+        if: steps.version.outputs.publish == 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          notes="docs/releases/${GITHUB_REF_NAME}.md"
-          gh release create "$GITHUB_REF_NAME" \
+          tag="${{ steps.version.outputs.tag }}"
+          gh release create "$tag" \
             "${{ steps.version.outputs.msi }}" "${{ steps.version.outputs.msi }}.sha256" \
             --title "jdance ${{ steps.version.outputs.version }} — MVP" \
-            --notes-file "$notes"
+            --notes-file "docs/releases/$tag.md" \
+            --target "$GITHUB_SHA"
