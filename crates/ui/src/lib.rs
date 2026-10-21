@@ -125,6 +125,7 @@ pub struct JdanceApp<H: Host, S: ProjectStore> {
     layout: dock::Layout,
     show_project_browser: bool,
     lfo_dialog: Option<lfo_dialog::LfoDialog>,
+    mixer_view: mixer::MixerView,
     sample_picker: Option<library::SamplePicker>,
     show_library: bool,
     show_recording: bool,
@@ -214,6 +215,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             layout,
             show_project_browser: true,
             lfo_dialog: None,
+            mixer_view: mixer::MixerView::default(),
             sample_picker: None,
             show_library: false,
             show_recording: false,
@@ -2564,6 +2566,7 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
                             &latency,
                             &meters,
                             &mut self.host,
+                            &mut self.mixer_view,
                         );
                     });
                 });
@@ -2576,7 +2579,7 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
             let meters = self.host.meters();
             egui::Panel::bottom("mixer")
                 .resizable(true)
-                .default_size(330.0)
+                .default_size(430.0)
                 .min_size(120.0)
                 .show(ui, |ui| {
                     egui::ScrollArea::vertical().show(ui, |ui| {
@@ -2587,6 +2590,7 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
                             &latency,
                             &meters,
                             &mut self.host,
+                            &mut self.mixer_view,
                         );
                     });
                 });

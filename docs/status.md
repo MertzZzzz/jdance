@@ -2,7 +2,7 @@
 
 Статусы по разделу 0.2 Amendment 02. `PASS` только с артефактом:
 тест в репозитории, лог CI или acceptance-отчёт.
-Последнее обновление: 2026-10-20 (VST3-эффекты в микшере).
+Последнее обновление: 2026-10-21 (релиз 0.2.0).
 
 ## Milestone 0
 
@@ -239,3 +239,31 @@
 ## Известные ограничения текущей реализации
 
 - Ресемплинг сэмплов без anti-aliasing (BLD-041, ADR-012).
+
+
+## Релиз 0.2.0 (спецификация `docs/spec/spec-0.2.0.md`)
+
+Проверки на ветке `0.2.0`: `cargo test --workspace` — 300+ тестов
+зелёные; clippy `-D warnings` для Linux, Windows (gnu) и macOS
+(aarch64; для LAME build script пропускается через `DOCS_RS=1`, нативная
+сборка — в CI); `cargo xtask check`. GUI — под Xvfb (X11, без оконного
+менеджера) со скриншотами.
+
+| Пункт | Статус | Артефакт / комментарий |
+|---|---|---|
+| Аудиоклипы, timebase, миграция v11 (§2) | PASS | `engine/tests/audio_clips.rs`, `persistence` тесты; GUI: drop из Browser, waveform |
+| Двойной клик, Sample Editor (§3) | PASS (Xvfb) | маркеры IN/OUT меняют клип, Load into Sampler |
+| Resize за оба края, Slice, PatternClip offset/duration/loop (§4) | PASS | `commands` тесты `*_edge*`, `slice_*`; GUI |
+| Папки библиотеки, индекс, Sample Selection Dialog (§5) | PASS | `browser_fs` тесты (symlink-циклы), `config` тесты; GUI |
+| Пути плагинов, прогресс/отмена скана (§6) | PASS (Xvfb) | окно Plugins, full rescan с прогрессом; сканер в отдельном процессе был с 0.1.0 |
+| Запись входа (§7) | PASS (ALSA null, Xvfb) | `app/src/recording.rs` тесты: запись, overflow, восстановление, мониторинг; GUI-запись через ALSA null; реальное железо и выравнивание — NOT RUN |
+| Draw/Paint/Delete/Slice (§8) | PASS (Xvfb) | Playlist и Piano Roll |
+| Dock/Undock (§9) | PASS (Xvfb, X11) | Mixer в отдельном окне, Dock back; Windows/macOS, multi-monitor, HiDPI — NOT RUN |
+| Project Browser (§10) | PASS (Xvfb) | Patterns/Samples/Automations, перетаскивание, удаление с подтверждением |
+| Автоматизация клипами (§11) | PASS | `engine/tests/automation.rs` (golden без изменений, окна клипов, gain клипа), миграция v12; GUI: Automation Editor, запрет пересечений |
+| MP3 export (§12) | PASS (Linux) | `mp3` и `render` тесты: CBR, info-фрейм, отмена без файла; CLI `--format mp3`; Windows/macOS — в CI |
+| Миграция и сохранность (§13) | PASS | `persistence` тесты v10→v11→v12, резервная копия |
+| Piano Roll Tools (§18) | PASS | `commands::note_tools` 44+ тестов, `scripts` тесты (Bjorklund golden, Arpeggiator = Arpeggiate, Sprinkler = Chop, песочница, отмена); GUI: Riff machine, Humanize, LFO |
+| Последние настройки инструментов в user settings (§18.2) | PARTIAL | хранятся в памяти сеанса |
+| Mixer по UI-VIS §8 | PASS (Xvfb) | полосы Compact/Wide/Wide+FX, инспектор, маршрут кликом |
+| Windows MSI 0.2.0 | см. CI | workflow `Release` на ветке `0.2.0`: сборка, установка, проверка, удаление; артефакт `jdance-windows-msi` |

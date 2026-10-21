@@ -5,12 +5,13 @@
 # the installed program and uninstalls it. When the workspace version has
 # no release yet, it then publishes release `v<version>` (creating the tag
 # at that commit) with the MSI. A pushed `v*` tag publishes the same way.
-# A manual run only builds and checks.
+# A manual run, or a push to a release branch (`0.*`), only builds and
+# checks; the MSI is kept as a workflow artifact.
 name: Release
 
 on:
   push:
-    branches: [master]
+    branches: [master, "0.*"]
     tags: ["v*"]
   workflow_dispatch:
 
@@ -113,6 +114,6 @@ jobs:
           tag="${{ steps.version.outputs.tag }}"
           gh release create "$tag" \
             "${{ steps.version.outputs.msi }}" "${{ steps.version.outputs.msi }}.sha256" \
-            --title "jdance ${{ steps.version.outputs.version }} — MVP" \
+            --title "jdance ${{ steps.version.outputs.version }}" \
             --notes-file "docs/releases/$tag.md" \
             --target "$GITHUB_SHA"
