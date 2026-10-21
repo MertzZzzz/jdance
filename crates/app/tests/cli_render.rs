@@ -88,10 +88,18 @@ fn render_reports_missing_samples_and_bad_input() {
         .arg("render")
         .arg(&project_path)
         .arg(&out)
-        .args(["--format", "mp3"])
+        .args(["--format", "ogg"])
         .output()
         .unwrap();
     assert!(!r.status.success());
+    let r = bin()
+        .arg("render")
+        .arg(&project_path)
+        .arg(&out)
+        .args(["--format", "mp3", "--bitrate", "100"])
+        .output()
+        .unwrap();
+    assert!(!r.status.success(), "unsupported bitrate");
     let r = bin()
         .arg("render")
         .arg(&project_path)

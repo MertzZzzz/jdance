@@ -38,8 +38,8 @@ use jdance_commands::{
 };
 use jdance_domain::{
     ChannelId, ClipId, DEFAULT_EXPORT_TAIL_SECONDS, Effect, ExportFormat, ExportOptions,
-    ExportRange, LaneId, MAX_EXPORT_TAIL_SECONDS, MAX_TEMPO_BPM, MIN_TEMPO_BPM, PatternId,
-    PluginSlot, Project, TrackId,
+    ExportRange, LaneId, MAX_EXPORT_TAIL_SECONDS, MAX_TEMPO_BPM, MIN_TEMPO_BPM, Mp3Options,
+    PatternId, PluginSlot, Project, TrackId,
 };
 use settings::SettingsWindow;
 use std::path::{Path, PathBuf};
@@ -150,6 +150,10 @@ pub struct JdanceApp<H: Host, S: ProjectStore> {
     export_loops: u32,
     export_tail: f32,
     export_format: ExportFormat,
+    /// `Some` = export MP3.
+    export_mp3: Option<jdance_domain::Mp3Options>,
+    export_title: String,
+    export_artist: String,
     auto_close_after: Option<u32>,
     frames: u32,
 }
@@ -220,6 +224,9 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             export_loops: 4,
             export_tail: DEFAULT_EXPORT_TAIL_SECONDS,
             export_format: ExportFormat::default(),
+            export_mp3: None,
+            export_title: String::new(),
+            export_artist: String::new(),
             auto_close_after: None,
             frames: 0,
         }
@@ -374,6 +381,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             range,
             tail_seconds: self.export_tail,
             format: self.export_format,
+            mp3: self.export_mp3,
         };
         let estimate = self.host.estimated_tail_seconds(&self.project);
         self.export_dialog = Some((options, estimate));
@@ -386,7 +394,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
         let song_empty = self.project.arrangement_end_ticks() == 0;
         let mut choice = None;
         egui::Modal::new(egui::Id::unique("export")).show(ctx, |ui| {
-            ui.heading("Export WAV");
+            ui.heading("Export audio");
             egui::Grid::new("export_grid")
                 .num_columns(2)
                 .show(ui, |ui| {
@@ -425,14 +433,50 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                     );
                     ui.end_row();
                     ui.label("Format");
-                    egui::ComboBox::from_id_salt("export_format")
-                        .selected_text(options.format.label())
-                        .show_ui(ui, |ui| {
-                            for f in ExportFormat::ALL {
-                                ui.selectable_value(&mut options.format, f, f.label());
-                            }
-                        });
+                    ui.horizontal(|ui| {
+                        if ui.selectable_label(options.mp3.is_none(), "WAV").clicked() {
+                            options.mp3 = None;
+                        }
+                        if ui.selectable_label(options.mp3.is_some(), "MP3").clicked() {
+                            options.mp3.get_or_insert_with(Mp3Options::default);
+                        }
+                    });
                     ui.end_row();
+                    match &mut options.mp3 {
+                        None => {
+                            ui.label("Samples");
+                            egui::ComboBox::from_id_salt("export_format")
+                                .selected_text(options.format.label())
+                                .show_ui(ui, |ui| {
+                                    for f in ExportFormat::ALL {
+                                        ui.selectable_value(&mut options.format, f, f.label());
+                                    }
+                                });
+                            ui.end_row();
+                        }
+                        Some(m) => {
+                            ui.label("Bitrate");
+                            ui.horizontal(|ui| {
+                                for k in [128u16, 192, 256, 320] {
+                                    ui.selectable_value(&mut m.kbps, k, format!("{k}"));
+                                }
+                                ui.label("kbit/s CBR, stereo");
+                            });
+                            ui.end_row();
+                            ui.label("Sample rate");
+                            ui.horizontal(|ui| {
+                                ui.selectable_value(&mut m.sample_rate, 44_100, "44.1 kHz");
+                                ui.selectable_value(&mut m.sample_rate, 48_000, "48 kHz");
+                            });
+                            ui.end_row();
+                            ui.label("Title");
+                            ui.text_edit_singleline(&mut self.export_title);
+                            ui.end_row();
+                            ui.label("Artist");
+                            ui.text_edit_singleline(&mut self.export_artist);
+                            ui.end_row();
+                        }
+                    }
                 });
             if let Some(w) = options.tail_warning(estimate) {
                 ui.colored_label(ui.visuals().warn_fg_color, w);
@@ -458,6 +502,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
         }
         self.export_tail = options.tail_seconds;
         self.export_format = options.format;
+        self.export_mp3 = options.mp3;
         self.export_dialog = match choice {
             None => Some((options, estimate)),
             Some(go) => {
@@ -470,19 +515,56 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
     }
 
     fn export(&mut self, options: ExportOptions) {
+        let ext = options.extension();
+        let (filter, name) = if options.mp3.is_some() {
+            ("MP3 audio", "render.mp3")
+        } else {
+            ("WAV audio", "render.wav")
+        };
         let Some(mut out) = rfd::FileDialog::new()
-            .add_filter("WAV audio", &["wav"])
-            .set_file_name("render.wav")
+            .add_filter(filter, &[ext])
+            .set_file_name(name)
             .save_file()
         else {
             return;
         };
         if out.extension().is_none() {
-            out.set_extension("wav");
+            out.set_extension(ext);
         }
         let dir = self.project_dir().map(Path::to_path_buf);
-        self.host
-            .export_wav(&self.project, dir.as_deref(), out, options);
+        self.host.export_audio(
+            &self.project,
+            dir.as_deref(),
+            out,
+            options,
+            self.export_title.trim().to_owned(),
+            self.export_artist.trim().to_owned(),
+        );
+    }
+
+    /// Progress and Cancel while an export runs.
+    fn export_progress_window(&mut self, ctx: &egui::Context) {
+        let Some(f) = self.host.export_progress() else {
+            return;
+        };
+        egui::Window::new("Exporting")
+            .id(egui::Id::unique("export_progress"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -40.0])
+            .show(ctx, |ui| {
+                ui.set_width(320.0);
+                let stage = if f < 0.9 {
+                    "Rendering"
+                } else {
+                    "Writing the file"
+                };
+                ui.add(egui::ProgressBar::new(f).text(format!("{stage} · {:.0}%", f * 100.0)));
+                if ui.button("Cancel").clicked() {
+                    self.host.cancel_export();
+                }
+            });
+        ctx.request_repaint_after_secs(0.1);
     }
 
     fn title(&self) -> String {
@@ -560,7 +642,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                     self.save(true, now);
                 }
                 ui.separator();
-                if ui.button("Export WAV…").clicked() {
+                if ui.button("Export audio…").clicked() {
                     self.open_export_dialog();
                 }
                 ui.separator();
@@ -2607,6 +2689,7 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
         self.delete_channels_dialog(&ctx, now);
         self.length_dialog(&ctx, now);
         self.export_dialog(&ctx);
+        self.export_progress_window(&ctx);
         let mode = if self.song_mode {
             TransportMode::Song
         } else {

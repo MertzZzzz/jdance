@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Offline rendering of a project to WAV, independent of audio devices
-//! (ARCH-002). Used by `jdance render` and by File → Export WAV.
+//! Offline rendering of a project to WAV or MP3, independent of audio
+//! devices (ARCH-002). Used by `jdance render` and by File → Export.
+//! Files are written under a temporary name and renamed when complete:
+//! a cancelled or failed export leaves no file under the chosen name.
 
 use crate::plugins::{Catalog, ModuleCache, create_instance};
 use jdance_domain::{
     ClipId, ExportOptions, ExportRange, MAX_REPEAT, PatternClip, Playlist, Project, SampleRef,
 };
 use jdance_dsp::SampleBuffer;
-use jdance_engine::{OfflineRender, PlayMode, PluginRt, compile_full, render_offline};
+use jdance_engine::{OfflineRender, PlayMode, PluginRt, compile_full, render_offline_with};
 use jdance_persistence::{read_wav, resolve_sample_path, write_wav};
 use jdance_plugin_api::ProcessSetupInfo;
 use std::collections::HashMap;
@@ -82,12 +84,36 @@ pub struct ExportPlugins<'a> {
     pub modules: &'a ModuleCache,
 }
 
+#[cfg(test)]
 pub fn render_project(
     project: &Project,
     project_dir: Option<&Path>,
     sample_rate: u32,
     options: &ExportOptions,
     plugins: Option<&ExportPlugins>,
+) -> Result<RenderOutcome, String> {
+    render_project_with(
+        project,
+        project_dir,
+        sample_rate,
+        options,
+        plugins,
+        &mut |_| true,
+    )
+}
+
+/// Why an export stopped without a file.
+pub const CANCELLED: &str = "export cancelled";
+
+/// [`render_project`] reporting progress `0..=1`; `progress` returning
+/// `false` cancels.
+pub fn render_project_with(
+    project: &Project,
+    project_dir: Option<&Path>,
+    sample_rate: u32,
+    options: &ExportOptions,
+    plugins: Option<&ExportPlugins>,
+    progress: &mut dyn FnMut(f32) -> bool,
 ) -> Result<RenderOutcome, String> {
     let project = export_project(project, options.range)?;
     let mut warnings = Vec::new();
@@ -161,7 +187,14 @@ pub fn render_project(
     let tail = (f64::from(options.tail()) * f64::from(sample_rate)).round() as u64;
     let frames =
         usize::try_from(snapshot.end + tail).map_err(|_| "render is too long".to_owned())?;
-    let mut audio = render_offline(snapshot, frames + latency, || 1024);
+    let total = (frames + latency).max(1);
+    let mut audio = render_offline_with(
+        snapshot,
+        frames + latency,
+        || 1024,
+        |done| progress(done as f32 / total as f32),
+    )
+    .ok_or_else(|| CANCELLED.to_owned())?;
     // Instances are released after the render, controllers last.
     drop(controllers);
     audio.left.drain(..latency);
@@ -173,24 +206,102 @@ pub fn render_project(
     })
 }
 
-pub fn render_to_wav(
+/// Title and artist written into MP3 files.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExportTags {
+    pub title: String,
+    pub artist: String,
+}
+
+/// Renders and writes `out` (WAV, or MP3 at the MP3 rate): render
+/// progress up to 90 %, writing the rest. The file appears under its
+/// name only when complete.
+#[allow(clippy::too_many_arguments)]
+pub fn render_to_file(
     project: &Project,
     project_dir: Option<&Path>,
     out: &Path,
-    sample_rate: u32,
+    device_rate: u32,
     options: &ExportOptions,
+    tags: &ExportTags,
     plugins: Option<&ExportPlugins>,
+    progress: &mut dyn FnMut(f32) -> bool,
 ) -> Result<RenderOutcome, String> {
-    let outcome = render_project(project, project_dir, sample_rate, options, plugins)?;
-    write_wav(
-        out,
-        sample_rate,
-        &outcome.audio.left,
-        &outcome.audio.right,
-        options.format,
-    )
-    .map_err(|e| e.to_string())?;
+    let rate = options.mp3.map_or(device_rate, |m| m.sample_rate);
+    let mut outcome =
+        render_project_with(project, project_dir, rate, options, plugins, &mut |f| {
+            progress(f * 0.9)
+        })?;
+    let peak = outcome
+        .audio
+        .left
+        .iter()
+        .chain(&outcome.audio.right)
+        .fold(0.0f32, |m, s| m.max(s.abs()));
+    if peak > 1.0 && options.mp3.is_some() {
+        // No hidden normalization: say so instead.
+        outcome.warnings.push(format!(
+            "the mix peaks at {:+.1} dBFS and clips in the MP3; lower the master or turn on \
+             the limiter",
+            jdance_dsp::gain_to_db(peak)
+        ));
+    }
+    let mut part = out.as_os_str().to_owned();
+    part.push(".part");
+    let part = PathBuf::from(part);
+    let written = match options.mp3 {
+        None => write_wav(
+            &part,
+            rate,
+            &outcome.audio.left,
+            &outcome.audio.right,
+            options.format,
+        )
+        .map_err(|e| e.to_string()),
+        Some(m) => write_mp3(&part, &outcome.audio, m, tags, progress),
+    };
+    let published = written.and_then(|()| std::fs::rename(&part, out).map_err(|e| e.to_string()));
+    if let Err(e) = published {
+        let _ = std::fs::remove_file(&part);
+        return Err(e);
+    }
     Ok(outcome)
+}
+
+fn write_mp3(
+    path: &Path,
+    audio: &OfflineRender,
+    m: jdance_domain::Mp3Options,
+    tags: &ExportTags,
+    progress: &mut dyn FnMut(f32) -> bool,
+) -> Result<(), String> {
+    let mut enc = jdance_mp3::Mp3Writer::new(&jdance_mp3::Mp3Settings {
+        kbps: m.kbps,
+        sample_rate: m.sample_rate,
+        title: tags.title.clone(),
+        artist: tags.artist.clone(),
+    })?;
+    let file = std::fs::File::create(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut file = std::io::BufWriter::new(file);
+    const BLOCK: usize = 16_384;
+    let total = audio.left.len().max(1);
+    for (k, (l, r)) in audio
+        .left
+        .chunks(BLOCK)
+        .zip(audio.right.chunks(BLOCK))
+        .enumerate()
+    {
+        enc.write(l, r, &mut file)?;
+        let done = ((k + 1) * BLOCK).min(total);
+        if !progress(0.9 + 0.1 * done as f32 / total as f32) {
+            return Err(CANCELLED.into());
+        }
+    }
+    enc.finish(&mut file)?;
+    file.into_inner()
+        .map_err(|e| e.to_string())?
+        .sync_all()
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -256,7 +367,84 @@ mod tests {
             range,
             tail_seconds: tail,
             format: ExportFormat::Float32,
+            mp3: None,
         }
+    }
+
+    #[test]
+    fn mp3_export_publishes_a_file_and_cancel_leaves_none() {
+        let (dir, mut p) = setup(1);
+        add_clip(&mut p, 0, 2);
+        let out = dir.path().join("song.mp3");
+        let options = ExportOptions {
+            mp3: Some(jdance_domain::Mp3Options {
+                kbps: 192,
+                sample_rate: 44_100,
+            }),
+            ..opts(ExportRange::Song, 1.0)
+        };
+        let tags = ExportTags {
+            title: "T".into(),
+            artist: "A".into(),
+        };
+        let mut seen = Vec::new();
+        let o = render_to_file(
+            &p,
+            Some(dir.path()),
+            &out,
+            RATE,
+            &options,
+            &tags,
+            None,
+            &mut |f| {
+                seen.push(f);
+                true
+            },
+        )
+        .unwrap();
+        assert_eq!(o.audio.sample_rate, 44_100, "rendered at the MP3 rate");
+        assert!(seen.windows(2).all(|w| w[0] <= w[1]) && *seen.last().unwrap() >= 0.99);
+        let data = std::fs::read(&out).unwrap();
+        let (frames, rate) = jdance_mp3::count_frames(&data);
+        assert_eq!(rate, 44_100);
+        // 2 bars at 120 BPM + 1 s tail = 5 s; decoders trim delay/padding.
+        let samples = (frames - 1) * 1152;
+        let expected = o.audio.left.len();
+        assert!(
+            samples >= expected && samples < expected + 3 * 1152,
+            "{samples} vs {expected}"
+        );
+        assert!(!dir.path().join("song.mp3.part").exists());
+
+        // Cancel during encoding: no file under either name.
+        let out2 = dir.path().join("cancel.mp3");
+        let err = render_to_file(
+            &p,
+            Some(dir.path()),
+            &out2,
+            RATE,
+            &options,
+            &tags,
+            None,
+            &mut |f| f < 0.95,
+        )
+        .unwrap_err();
+        assert_eq!(err, CANCELLED);
+        assert!(!out2.exists() && !dir.path().join("cancel.mp3.part").exists());
+        // Cancel during the render.
+        let err = render_to_file(
+            &p,
+            Some(dir.path()),
+            &out2,
+            RATE,
+            &opts(ExportRange::Song, 1.0),
+            &tags,
+            None,
+            &mut |f| f < 0.3,
+        )
+        .unwrap_err();
+        assert_eq!(err, CANCELLED);
+        assert!(!out2.exists());
     }
 
     #[test]
@@ -348,13 +536,15 @@ mod tests {
         }
         add_clip(&mut p, 0, 1);
         let out = dir.path().join("out.wav");
-        let o = render_to_wav(
+        let o = render_to_file(
             &p,
             Some(dir.path()),
             &out,
             RATE,
             &opts(ExportRange::Song, 0.0),
+            &ExportTags::default(),
             None,
+            &mut |_| true,
         )
         .unwrap();
         let peak = o.audio.left.iter().fold(0.0f32, |m, v| m.max(v.abs()));

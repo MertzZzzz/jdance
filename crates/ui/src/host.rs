@@ -430,14 +430,22 @@ pub trait Host {
     fn close_device(&mut self);
     fn open_control_panel(&mut self, key: &DeviceKey) -> Result<(), AudioError>;
 
-    /// Starts an offline render to `out`; the result arrives as a notice.
-    fn export_wav(
+    /// Starts an offline render to `out` (WAV or MP3); the result arrives
+    /// as a notice. `title`/`artist` go into MP3 tags.
+    fn export_audio(
         &mut self,
         project: &Project,
         project_dir: Option<&Path>,
         out: PathBuf,
         options: ExportOptions,
+        title: String,
+        artist: String,
     );
+    /// Progress `0..=1` of the running export.
+    fn export_progress(&self) -> Option<f32> {
+        None
+    }
+    fn cancel_export(&mut self) {}
     /// How long the project's effects are expected to ring after the last
     /// note, for the export tail warning.
     fn estimated_tail_seconds(&mut self, project: &Project) -> f32;

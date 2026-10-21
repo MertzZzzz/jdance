@@ -17,8 +17,19 @@ pub struct OfflineRender {
 pub fn render_offline(
     snapshot: PlaybackSnapshot,
     frames: usize,
-    mut next_block: impl FnMut() -> usize,
+    next_block: impl FnMut() -> usize,
 ) -> OfflineRender {
+    render_offline_with(snapshot, frames, next_block, |_| true).expect("never cancelled")
+}
+
+/// [`render_offline`] reporting the frames done after each block;
+/// `progress` returning `false` cancels (`None`).
+pub fn render_offline_with(
+    snapshot: PlaybackSnapshot,
+    frames: usize,
+    mut next_block: impl FnMut() -> usize,
+    mut progress: impl FnMut(usize) -> bool,
+) -> Option<OfflineRender> {
     let sample_rate = snapshot.sample_rate;
     let (mut handle, mut processor) = create_engine(sample_rate);
     handle
@@ -34,10 +45,13 @@ pub fn render_offline(
         processor.render(&mut left[done..done + n], &mut right[done..done + n]);
         done += n;
         handle.collect_garbage();
+        if !progress(done) {
+            return None;
+        }
     }
-    OfflineRender {
+    Some(OfflineRender {
         sample_rate,
         left,
         right,
-    }
+    })
 }

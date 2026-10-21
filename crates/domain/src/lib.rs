@@ -28,6 +28,7 @@ pub use effects::{
 };
 pub use export::{
     DEFAULT_EXPORT_TAIL_SECONDS, ExportFormat, ExportOptions, ExportRange, MAX_EXPORT_TAIL_SECONDS,
+    Mp3Options,
 };
 pub use ids::{
     AssetId, AutomationId, ChannelId, ClipId, IdAllocator, InsertId, LaneId, PatternId, SendId,

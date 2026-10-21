@@ -5,7 +5,7 @@ use crate::browser_fs::BrowserFs;
 use crate::config::{self, UserSettings};
 use crate::plugins::{Catalog, PluginHost};
 use crate::recording::{self, MonitorControl, MonitorMix, Session, Shared};
-use crate::render::{estimated_tail_seconds, render_to_wav};
+use crate::render::{ExportTags, estimated_tail_seconds, render_to_file};
 use crate::samples::SampleCache;
 use jdance_audio_api::{
     AudioBackend, AudioError, BackendId, BufferRequest, DeviceCapabilities, DeviceId, DeviceInfo,
@@ -134,6 +134,11 @@ pub struct AudioHost {
     settings_path: Option<PathBuf>,
     notices: Vec<Notice>,
     exports: Vec<Receiver<Result<String, String>>>,
+    /// Progress (‰) and cancel flag of the running export.
+    export_state: Option<(
+        Arc<std::sync::atomic::AtomicU32>,
+        Arc<std::sync::atomic::AtomicBool>,
+    )>,
     plugins: PluginHost,
     /// Incremented for every new engine; instances sent to an older one
     /// are gone.
@@ -202,6 +207,7 @@ impl AudioHost {
             settings_path,
             notices,
             exports: Vec::new(),
+            export_state: None,
             plugins,
             engine_generation: 0,
             scan: None,
@@ -574,9 +580,13 @@ impl Host for AudioHost {
         for (i, rx) in self.exports.iter().enumerate() {
             if let Ok(result) = rx.try_recv() {
                 finished.push(i);
+                self.export_state = None;
                 self.notices.push(match result {
                     Ok(msg) => Notice::info(msg),
-                    Err(e) => Notice::error(format!("Export failed: {e}")),
+                    Err(e) if e == crate::render::CANCELLED => {
+                        Notice::info("Export cancelled; no file was written.")
+                    }
+                    Err(e) => Notice::error(format!("Export failed: {e}; no file was written.")),
                 });
             }
         }
@@ -1006,13 +1016,20 @@ impl Host for AudioHost {
             .open_control_panel(&key.device)
     }
 
-    fn export_wav(
+    fn export_audio(
         &mut self,
         project: &Project,
         project_dir: Option<&Path>,
         out: PathBuf,
         options: ExportOptions,
+        title: String,
+        artist: String,
     ) {
+        if self.export_state.is_some() {
+            self.notices
+                .push(Notice::warning("An export is already running."));
+            return;
+        }
         let (tx, rx) = channel();
         let mut project = project.clone();
         // The export uses its own instances, restored from the current
@@ -1022,25 +1039,35 @@ impl Host for AudioHost {
         let modules = std::sync::Arc::clone(&self.plugins.modules);
         let dir = project_dir.map(Path::to_path_buf);
         let rate = self.engine_rate();
+        let progress = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.export_state = Some((Arc::clone(&progress), Arc::clone(&cancel)));
         std::thread::spawn(move || {
             let plugins = crate::render::ExportPlugins {
                 catalog: &catalog,
                 modules: &modules,
             };
-            let result = render_to_wav(
+            let tags = ExportTags { title, artist };
+            let result = render_to_file(
                 &project,
                 dir.as_deref(),
                 &out,
                 rate,
                 &options,
+                &tags,
                 Some(&plugins),
+                &mut |f| {
+                    progress.store((f.clamp(0.0, 1.0) * 1000.0) as u32, Relaxed);
+                    !cancel.load(Relaxed)
+                },
             )
             .map(|o| {
+                let rate = o.audio.sample_rate;
                 let mut msg = format!(
                     "Exported {} ({} Hz, {})",
                     out.display(),
                     rate,
-                    options.format.label()
+                    options.describe()
                 );
                 if let Some(w) = o.warnings.first() {
                     let more = o.warnings.len() - 1;
@@ -1057,7 +1084,18 @@ impl Host for AudioHost {
             let _ = tx.send(result);
         });
         self.exports.push(rx);
-        self.notices.push(Notice::info("Exporting…"));
+    }
+
+    fn export_progress(&self) -> Option<f32> {
+        self.export_state
+            .as_ref()
+            .map(|(p, _)| p.load(Relaxed) as f32 / 1000.0)
+    }
+
+    fn cancel_export(&mut self) {
+        if let Some((_, c)) = &self.export_state {
+            c.store(true, Relaxed);
+        }
     }
 
     fn capture_plugin_states(&mut self, project: &mut Project) {

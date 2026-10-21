@@ -31,7 +31,7 @@ const USAGE: &str = "\
 usage:
   jdance [PROJECT] [--autoplay] [--smoke-test-frames N]
   jdance render PROJECT OUT.wav [--pattern NAME] [--loops N] [--tail SECONDS]
-                [--sample-rate HZ] [--format pcm16|pcm24|float32]
+                [--sample-rate HZ] [--format pcm16|pcm24|float32|mp3 [--bitrate 128|192|256|320]]
     Renders the playlist; with --pattern or --loops, one pattern N times
     (an empty playlist renders the first pattern). The tail defaults to 5 s.
   jdance devices
@@ -143,10 +143,31 @@ fn cmd_render(args: &[String]) -> Result<(), String> {
     if !(8_000..=384_000).contains(&rate) {
         return Err(format!("unsupported sample rate {rate}"));
     }
+    let mut mp3 = None;
     let format = match flag_value(args, "--format")?.unwrap_or("pcm24") {
         "pcm16" => WavExportFormat::Pcm16,
         "pcm24" => WavExportFormat::Pcm24,
         "float32" => WavExportFormat::Float32,
+        "mp3" => {
+            let kbps: u16 = parse(flag_value(args, "--bitrate")?, "--bitrate", 320)?;
+            if !jdance_mp3::BITRATES.contains(&kbps) {
+                return Err(format!(
+                    "--bitrate must be one of {:?}",
+                    jdance_mp3::BITRATES
+                ));
+            }
+            if !jdance_mp3::SAMPLE_RATES.contains(&rate) {
+                return Err(format!(
+                    "MP3 needs --sample-rate {:?}",
+                    jdance_mp3::SAMPLE_RATES
+                ));
+            }
+            mp3 = Some(jdance_domain::Mp3Options {
+                kbps,
+                sample_rate: rate,
+            });
+            WavExportFormat::Pcm24
+        }
         f => return Err(format!("unknown format {f}")),
     };
     let project_path = Path::new(project_path);
@@ -169,17 +190,20 @@ fn cmd_render(args: &[String]) -> Result<(), String> {
         range,
         tail_seconds: tail,
         format,
+        mp3,
     };
-    let outcome = render::render_to_wav(
+    let outcome = render::render_to_file(
         &project,
         project_path.parent(),
         Path::new(out),
         rate,
         &options,
+        &render::ExportTags::default(),
         Some(&render::ExportPlugins {
             catalog: &plugins::Catalog::load_cached(),
             modules: &plugins::ModuleCache::default(),
         }),
+        &mut |_| true,
     )?;
     if let Some(w) = &outcome.tail_warning {
         eprintln!("warning: {w}");

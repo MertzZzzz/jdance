@@ -39,12 +39,33 @@ impl ExportFormat {
     }
 }
 
+/// MP3 encoding (spec 0.2.0 §12): constant bitrate, stereo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Mp3Options {
+    /// 128, 192, 256 or 320 kbit/s.
+    pub kbps: u16,
+    /// 44 100 or 48 000 Hz; the render runs at this rate.
+    pub sample_rate: u32,
+}
+
+impl Default for Mp3Options {
+    fn default() -> Self {
+        Self {
+            kbps: 320,
+            sample_rate: 48_000,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ExportOptions {
     pub range: ExportRange,
     /// Seconds rendered after the range end, `0..=MAX_EXPORT_TAIL_SECONDS`.
     pub tail_seconds: f32,
+    /// WAV sample format (ignored for MP3).
     pub format: ExportFormat,
+    /// `Some` = MP3 instead of WAV.
+    pub mp3: Option<Mp3Options>,
 }
 
 impl ExportOptions {
@@ -53,7 +74,20 @@ impl ExportOptions {
             range: ExportRange::Song,
             tail_seconds: DEFAULT_EXPORT_TAIL_SECONDS,
             format: ExportFormat::default(),
+            mp3: None,
         }
+    }
+
+    /// "WAV, 24-bit PCM" or "MP3, 320 kbit/s".
+    pub fn describe(&self) -> String {
+        match self.mp3 {
+            Some(m) => format!("MP3, {} kbit/s", m.kbps),
+            None => format!("WAV, {}", self.format.label()),
+        }
+    }
+
+    pub fn extension(&self) -> &'static str {
+        if self.mp3.is_some() { "mp3" } else { "wav" }
     }
 
     /// The tail clamped to the supported range; NaN becomes the default.

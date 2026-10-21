@@ -24,7 +24,7 @@ mod snapshot;
 
 pub use effect_rt::{EffectRt, InsertRt, InstrumentRt, PluginRt, RESET_BUDGET};
 pub use feedback::{EngineFeedback, FeedbackReading, MeterSlot, Meters};
-pub use offline::{OfflineRender, render_offline};
+pub use offline::{OfflineRender, render_offline, render_offline_with};
 pub use param_diff::{ParamChange, param_only_changes};
 pub use processor::EngineProcessor;
 pub use snapshot::{
