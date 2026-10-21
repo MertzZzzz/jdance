@@ -199,7 +199,7 @@ impl ProjectBrowser {
                     if project.automation.is_empty() {
                         ui.label(
                             RichText::new(
-                                "No automation yet: right-click a mixer control or a clip and choose Automate",
+                                "No automation yet: right-click a mixer control, or open a clip's menu (the marker before its name, or Shift + right-click) and choose Automate",
                             )
                             .size(11.0)
                             .color(theme::MUTED),

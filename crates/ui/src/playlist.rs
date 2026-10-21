@@ -6,11 +6,14 @@
 //! (E). With Draw, Paint and Select a clip body drags (the selection
 //! moves) and either edge resizes; Ctrl-drag selects with a frame in any
 //! tool. Draw places one copy of the source, Paint a row of copies, Delete
-//! removes what it touches, Slice cuts at the pointer. Every gesture is
-//! one undo step. Files dropped from the Browser or the system become
-//! audio clips; below the last lane a new lane is made. Double-click opens
-//! a clip's editor. Ruler: click seeks, Shift-drag sets the loop. Alt
-//! disables snapping while dragging.
+//! removes what it touches, Slice cuts at the pointer. In every tool a
+//! right click deletes the clip under it, and holding the right button
+//! while moving deletes every clip passed over. The clip menu opens from
+//! the marker at the start of a clip's name or with Shift + right click.
+//! Every gesture is one undo step. Files dropped from the Browser or the
+//! system become audio clips; below the last lane a new lane is made.
+//! Double-click opens a clip's editor. Ruler: click seeks, Shift-drag sets
+//! the loop. Alt disables snapping while dragging.
 //!
 //! Automation clips (spec 0.2.0 §11) place a range of an automation
 //! source like any clip; their points are edited in the Automation
@@ -24,8 +27,8 @@ use crate::project_browser::ProjectItem;
 use crate::toolbar::bars_text;
 use crate::{Host, theme};
 use egui::{
-    Align2, Color32, CornerRadius, FontId, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, pos2,
-    vec2,
+    Align2, Color32, CornerRadius, FontId, PointerButton, Pos2, Rect, RichText, Sense, Stroke,
+    StrokeKind, pos2, vec2,
 };
 use jdance_commands::{Edge, Edit, audio_clip_edge, pattern_clip_edge};
 use jdance_domain::{
@@ -41,6 +44,7 @@ const HEADER_W: f32 = 212.0;
 const EDGE_PX: f32 = 6.0;
 const BAR_TICKS: u64 = 3_840;
 const NAME_H: f32 = 13.0;
+const MARKER_W: f32 = 12.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Tool {
@@ -66,7 +70,7 @@ impl Tool {
         (
             Self::Delete,
             Glyph::Delete,
-            "Delete (D): click or drag over clips",
+            "Delete (D): click or drag over clips · in every tool the right button deletes",
         ),
         (
             Self::Slice,
@@ -128,8 +132,10 @@ pub(crate) struct PlaylistView {
     /// Pattern current at the last frame: choosing another one makes it
     /// the source.
     last_pattern: Option<PatternId>,
-    /// Clips touched by a Delete drag.
+    /// Clips touched by a Delete drag or a right-button sweep.
     erased: BTreeSet<ClipId>,
+    /// Right-button delete gesture.
+    rmb: crate::widgets::RightSweep,
     /// Lane that receives the next recording (spec 0.2.0 §7).
     pub armed: Option<LaneId>,
 }
@@ -146,6 +152,7 @@ impl Default for PlaylistView {
             source: None,
             last_pattern: None,
             erased: BTreeSet::new(),
+            rmb: crate::widgets::RightSweep::default(),
             armed: None,
         }
     }
@@ -617,7 +624,7 @@ impl PlaylistView {
         };
         let press = ui.input(|i| i.pointer.press_origin());
 
-        if response.drag_started()
+        if response.drag_started_by(PointerButton::Primary)
             && let Some(p) = press.or(response.interact_pointer_pos())
         {
             let kind = if p.y < origin.y + RULER_H {
@@ -769,7 +776,7 @@ impl PlaylistView {
 
         // Delete sweep.
         if matches!(drag_kind, Some(DragKind::Erase))
-            && response.dragged()
+            && response.dragged_by(PointerButton::Primary)
             && let Some(p) = pointer
             && let Some((k, _)) = hit(p)
         {
@@ -777,7 +784,7 @@ impl PlaylistView {
         }
         // Frame selection.
         if let (Some(DragKind::Frame { add }), Some(d), Some(p)) = (drag_kind, self.drag, pointer)
-            && response.dragged()
+            && response.dragged_by(PointerButton::Primary)
         {
             let frame = Rect::from_two_pos(d.origin, p);
             let mut sel = if add {
@@ -794,7 +801,7 @@ impl PlaylistView {
         }
 
         // Commit on release: one undo step per gesture.
-        if response.drag_stopped()
+        if response.drag_stopped_by(PointerButton::Primary)
             && let Some(d) = self.drag.take()
         {
             match d.kind {
@@ -849,11 +856,57 @@ impl PlaylistView {
             }
         }
 
+        // Right button: a click deletes the clip under it, holding it and
+        // moving deletes every clip it passes over (one undo step), in
+        // every tool. Shift + right click opens the clip menu instead.
+        let visible = ui.clip_rect();
+        let mut open_menu = None;
+        let rmb_pressed = ui.input(|i| i.pointer.button_pressed(PointerButton::Secondary));
+        if rmb_pressed
+            && shift
+            && self.drag.is_none()
+            && let Some(p) = ui.ctx().pointer_latest_pos()
+            && rect.contains(p)
+            && visible.contains(p)
+            && in_lanes(p)
+        {
+            open_menu = Some(hit(p).map(|(k, _)| items[k].item.id()));
+        }
+        let drag_idle = self.drag.is_none();
+        let was_sweeping = self.rmb.active();
+        let sweep = self.rmb.update(ui, |p| {
+            !shift && drag_idle && visible.contains(p) && rect.contains(p) && in_lanes(p)
+        });
+        if let Some((points, ended)) = sweep {
+            if !was_sweeping {
+                self.erased.clear();
+            }
+            for p in points.into_iter().filter(|p| visible.contains(*p)) {
+                if let Some((k, _)) = hit(p) {
+                    self.erased.insert(items[k].item.id());
+                }
+            }
+            if ended {
+                let erased = std::mem::take(&mut self.erased);
+                if !erased.is_empty() {
+                    self.selection.retain(|id| !erased.contains(id));
+                    out.edits.push(delete_edits(project, &erased));
+                }
+            }
+        }
+
         // Clicks.
         if response.clicked()
             && let Some(p) = response.interact_pointer_pos()
         {
-            if p.y < origin.y + RULER_H {
+            // The marker at the start of a clip's name opens its menu.
+            let on_marker = hit(p).filter(|&(k, _)| {
+                let g = &items[k];
+                menu_marker(row_rect(g.lane, g.start, g.end)).is_some_and(|m| m.contains(p))
+            });
+            if let Some((k, _)) = on_marker {
+                open_menu = Some(Some(items[k].item.id()));
+            } else if p.y < origin.y + RULER_H {
                 out.actions
                     .push(PlaylistAction::Seek(snap(tick_at(p.x), grid).max(0) as u64));
             } else if in_lanes(p) {
@@ -910,21 +963,24 @@ impl PlaylistView {
             (lane, snapped(p.x) as u64)
         };
         let mut drop_ghost: Option<(Pos2, String)> = None;
+        // While another widget is dragged this one is not hovered, so its
+        // own pointer positions are empty: use the latest pointer.
+        let dnd_pointer = ui.ctx().pointer_latest_pos().filter(|p| rect.contains(*p));
         if let Some(item) = response.dnd_hover_payload::<BrowserItem>()
             && let BrowserItem::Sample(path) = &*item
-            && let Some(p) = pointer
+            && let Some(p) = dnd_pointer
             && in_lanes(p)
         {
             drop_ghost = Some((p, display_name(path)));
         }
         if let Some(item) = response.dnd_hover_payload::<ProjectItem>()
-            && let Some(p) = pointer
+            && let Some(p) = dnd_pointer
             && in_lanes(p)
         {
             drop_ghost = source_name(project, item.0).map(|n| (p, n));
         }
-        if let Some(item) = response.dnd_release_payload::<ProjectItem>()
-            && let Some(p) = pointer
+        if let Some(item) = dnd_release::<ProjectItem>(&response)
+            && let Some(p) = dnd_pointer
             && in_lanes(p)
         {
             let (lane, start) = drop_at(p);
@@ -936,9 +992,9 @@ impl PlaylistView {
                 count: 1,
             });
         }
-        if let Some(item) = response.dnd_release_payload::<BrowserItem>()
+        if let Some(item) = dnd_release::<BrowserItem>(&response)
             && let BrowserItem::Sample(path) = &*item
-            && let Some(p) = pointer
+            && let Some(p) = dnd_pointer
             && in_lanes(p)
         {
             let (lane, start) = drop_at(p);
@@ -979,10 +1035,9 @@ impl PlaylistView {
             }
         }
 
-        if response.secondary_clicked() {
-            let p = response.interact_pointer_pos();
-            self.context_clip = p.and_then(hit).map(|(k, _)| items[k].item.id());
-            if let Some(id) = self.context_clip
+        if let Some(clip) = open_menu {
+            self.context_clip = clip;
+            if let Some(id) = clip
                 && !self.selection.contains(&id)
             {
                 self.selection = BTreeSet::from([id]);
@@ -990,6 +1045,7 @@ impl PlaylistView {
         }
         // Stays open while the curve and tension are edited.
         egui::Popup::context_menu(&response)
+            .open_memory(open_menu.map(|_| egui::SetOpenCommand::Bool(true)))
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .show(|ui| {
                 let Some(id) = self.context_clip else {
@@ -1385,6 +1441,28 @@ fn route_box(
         ));
 }
 
+/// What of type `T` is dropped on `response` this frame. Unlike
+/// `Response::dnd_release_payload` it leaves a payload of another type in
+/// place (egui drops it on a type mismatch).
+pub(crate) fn dnd_release<T: std::any::Any + Send + Sync>(
+    response: &egui::Response,
+) -> Option<std::sync::Arc<T>> {
+    egui::DragAndDrop::has_payload_of_type::<T>(&response.ctx)
+        .then(|| response.dnd_release_payload::<T>())
+        .flatten()
+}
+
+/// The menu marker at the start of a clip's name strip, if the clip is
+/// wide enough to show one.
+fn menu_marker(r: Rect) -> Option<Rect> {
+    (r.width() >= 3.0 * EDGE_PX + 2.0 * MARKER_W).then(|| {
+        Rect::from_min_size(
+            pos2(r.left() + EDGE_PX - 2.0, r.top()),
+            vec2(MARKER_W, NAME_H.min(r.height())),
+        )
+    })
+}
+
 /// Draws one clip: body, name strip, and its content preview (pattern
 /// steps and notes, or the audio waveform).
 #[allow(clippy::too_many_arguments)]
@@ -1504,18 +1582,33 @@ fn draw_clip(
         Stroke::new(1.0, lane_color.gamma_multiply(0.9))
     };
     painter.rect_stroke(r, 4.0, stroke, StrokeKind::Inside);
+    let text_color = if audible {
+        theme::ON_AMBER
+    } else {
+        theme::MUTED
+    };
+    let mut name_x = r.left().max(visible.left()) + 4.0;
+    if let Some(m) = menu_marker(r) {
+        let c = m.center();
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                pos2(c.x - 3.5, c.y - 2.0),
+                pos2(c.x + 3.5, c.y - 2.0),
+                pos2(c.x, c.y + 2.5),
+            ],
+            text_color,
+            Stroke::NONE,
+        ));
+        name_x = name_x.max(m.right() + 2.0);
+    }
     painter
         .with_clip_rect(strip.intersect(ui.clip_rect()))
         .text(
-            pos2(r.left().max(visible.left()) + 4.0, strip.center().y),
+            pos2(name_x, strip.center().y),
             Align2::LEFT_CENTER,
             name,
             FontId::proportional(10.5),
-            if audible {
-                theme::ON_AMBER
-            } else {
-                theme::MUTED
-            },
+            text_color,
         );
 }
 
@@ -1630,5 +1723,47 @@ fn draw_waveform(
             Stroke::new(1.0, ink),
         );
         x += 1.0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::{Event, Modifiers, RawInput};
+
+    /// A drop checked for the wrong type first must still reach the
+    /// right one (egui's own check drops a mismatched payload).
+    #[test]
+    fn dnd_release_keeps_a_payload_of_another_type() {
+        let ctx = egui::Context::default();
+        let p = pos2(50.0, 50.0);
+        let mut got = (false, false);
+        let frames = [
+            vec![Event::PointerMoved(p)],
+            vec![Event::PointerButton {
+                pos: p,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Modifiers::NONE,
+            }],
+        ];
+        for (k, events) in frames.into_iter().enumerate() {
+            let input = RawInput {
+                events,
+                ..RawInput::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                if k == 0 {
+                    egui::DragAndDrop::set_payload(ui.ctx(), 7_u32);
+                }
+                let (_, r) = ui.allocate_exact_size(vec2(200.0, 200.0), Sense::hover());
+                if k == 1 {
+                    got.0 = dnd_release::<String>(&r).is_some();
+                    got.1 = dnd_release::<u32>(&r).is_some_and(|v| *v == 7);
+                }
+            });
+            out.textures_delta.clear();
+        }
+        assert_eq!(got, (false, true));
     }
 }

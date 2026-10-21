@@ -5,8 +5,9 @@
 //! Tools: Draw (click adds, drag sets the new note's length), Paint (drag
 //! adds a note on every grid cell), Select (drag selects with a frame),
 //! Delete (click or drag over notes). With every tool a note can be
-//! dragged (move, or resize at its right edge), right-clicked away, and
-//! Ctrl-drag on empty space selects with a frame. Clicking the keyboard
+//! dragged (move, or resize at its right edge), a right click deletes the
+//! note under it (holding the right button while moving deletes every
+//! note passed over), and Ctrl-drag on empty space selects with a frame. Clicking the keyboard
 //! plays the key. Every drag is one undo step; only visible notes are
 //! drawn.
 
@@ -15,8 +16,8 @@ use crate::piano_dialogs::{Dialog, Props};
 use crate::toolbar::{SNAPS, bars_text, snap_name};
 use crate::{Host, theme};
 use egui::{
-    Color32, CornerRadius, Event, FontId, Key, Pos2, Rect, RichText, Sense, Stroke, StrokeKind,
-    pos2, vec2,
+    Color32, CornerRadius, Event, FontId, Key, PointerButton, Pos2, Rect, RichText, Sense, Stroke,
+    StrokeKind, pos2, vec2,
 };
 use jdance_commands::Edit;
 use jdance_commands::notes::{self, Scale, ScaleMode};
@@ -64,7 +65,9 @@ impl Tool {
         match self {
             Self::Draw => "Draw (P): click adds a note, drag sets its length; edges resize",
             Self::Paint => "Paint (B): drag adds a note on every grid cell",
-            Self::Delete => "Delete (D): click or drag over notes",
+            Self::Delete => {
+                "Delete (D): click or drag over notes · in every tool the right button deletes"
+            }
             Self::Slice => "Slice (C): click a note to cut it in two (both retrigger)",
             Self::Select => "Select (E): drag a frame · Shift adds",
         }
@@ -145,6 +148,8 @@ pub(crate) struct PianoRoll {
     last_grid: u32,
     script_dialog: Option<crate::scripts::ScriptDialog>,
     scripts: Vec<jdance_commands::note_tools::ScriptInfo>,
+    /// Right-button delete gesture.
+    rmb: crate::widgets::RightSweep,
 }
 
 #[derive(Debug, Default)]
@@ -258,6 +263,7 @@ impl PianoRoll {
             last_grid: TICKS_PER_STEP,
             script_dialog: None,
             scripts: Vec::new(),
+            rmb: crate::widgets::RightSweep::default(),
         }
     }
 
@@ -955,24 +961,35 @@ impl PianoRoll {
                 self.selection = vec![notes[i]];
                 self.dialog = Some(Dialog::Properties(Props::of(&[notes[i]])));
             }
-            if response.secondary_clicked()
-                && let Some(p) = pointer
-                && let Some(i) = hit(p)
-            {
+            // Right button: a click deletes the note under it, holding it
+            // and moving deletes every note it passes over (one undo
+            // step), in every tool.
+            let visible = ui.clip_rect();
+            let drag_idle = self.drag.is_none();
+            let sweep = self
+                .rmb
+                .update(ui, |p| drag_idle && visible.contains(p) && on_grid(p));
+            if let Some((points, ended)) = sweep {
                 let mut new = notes.clone();
-                let removed = new.remove(i);
-                let keep: Vec<Note> = self
-                    .selection
-                    .iter()
-                    .copied()
-                    .filter(|s| *s != removed)
-                    .collect();
-                self.commit(&mut out, pattern, new, keep);
+                let mut removed = Vec::new();
+                for p in points
+                    .into_iter()
+                    .filter(|p| visible.contains(*p) && on_grid(*p))
+                {
+                    if let Some(i) = new.iter().rposition(|n| note_rect(n).contains(p)) {
+                        removed.push(new.remove(i));
+                    }
+                }
+                if !removed.is_empty() {
+                    self.selection.retain(|s| !removed.contains(s));
+                    out.edits.push((self.set(pattern, new), true));
+                }
+                out.end_gesture |= ended;
             }
 
             // Drags start where the button went down: by the time a drag
             // is recognized the pointer has already moved.
-            if response.drag_started()
+            if response.drag_started_by(PointerButton::Primary)
                 && let Some(p) = press.or(response.interact_pointer_pos())
                 && on_grid(p)
             {
@@ -1029,7 +1046,7 @@ impl PianoRoll {
             }
             if let Some(d) = self.drag.clone()
                 && let Some(p) = response.interact_pointer_pos()
-                && response.dragged()
+                && response.dragged_by(PointerButton::Primary)
             {
                 let dt = (p.x - d.start.x) / px_tick;
                 let dk = i32::from(to_key(p.y)) - i32::from(to_key(d.start.y));
@@ -1123,7 +1140,7 @@ impl PianoRoll {
                     }
                 }
             }
-            if response.drag_stopped() && self.drag.take().is_some() {
+            if response.drag_stopped_by(PointerButton::Primary) && self.drag.take().is_some() {
                 self.last_paint = None;
                 out.end_gesture = true;
                 self.sound(host, None);

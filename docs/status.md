@@ -266,4 +266,19 @@
 | Piano Roll Tools (§18) | PASS | `commands::note_tools` 44+ тестов, `scripts` тесты (Bjorklund golden, Arpeggiator = Arpeggiate, Sprinkler = Chop, песочница, отмена); GUI: Riff machine, Humanize, LFO |
 | Последние настройки инструментов в user settings (§18.2) | PARTIAL | хранятся в памяти сеанса |
 | Mixer по UI-VIS §8 | PASS (Xvfb) | полосы Compact/Wide/Wide+FX, инспектор, маршрут кликом |
-| Windows MSI 0.2.0 | см. CI | workflow `Release` на ветке `0.2.0`: сборка, установка, проверка, удаление; артефакт `jdance-windows-msi` |
+| Windows MSI 0.2.0 | PASS | [релиз v0.2.0](https://github.com/MertzZzzz/jdance/releases/tag/v0.2.0); workflow `Release`: сборка, установка, проверка, удаление | workflow `Release` на ветке `0.2.0`: сборка, установка, проверка, удаление; артефакт `jdance-windows-msi` |
+
+## Релиз 0.2.1
+
+Проверки на ветке `0.2.1`: `cargo test --workspace`, clippy `-D warnings`,
+`cargo xtask check`. GUI — под Xvfb со скриншотами.
+
+| Пункт | Статус | Артефакт / комментарий |
+|---|---|---|
+| Перетаскивание сэмпла из библиотеки в Playlist | PASS (Xvfb) | два бага: позиция курсора при drag-and-drop и `take_payload` egui, выбрасывающий payload другого типа; тест `playlist::tests::dnd_release_keeps_a_payload_of_another_type` |
+| Правая кнопка удаляет клипы (паттерны, аудио, автоматизация) | PASS (Xvfb) | клик, проход с зажатой кнопкой, один шаг отмены, Ctrl+Z |
+| Правая кнопка удаляет ноты в Piano Roll | PASS (Xvfb) | быстрый проход не пропускает ноты: тест `widgets::tests::right_sweep_*` |
+| Правая кнопка удаляет точки в Automation Editor; меню формы сегмента | PASS (Xvfb) | |
+| Меню клипа: маркер ▾ и Shift + правый клик | PASS (Xvfb) | |
+| Windows MSI 0.2.1 | см. CI | workflow `Release` |
+

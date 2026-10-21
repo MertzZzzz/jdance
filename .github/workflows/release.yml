@@ -18,6 +18,12 @@ on:
 permissions:
   contents: write
 
+# One run per ref at a time: a second run for the same push waits, then
+# finds the release already published and only builds.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
   WIX_VERSION: 5.0.2

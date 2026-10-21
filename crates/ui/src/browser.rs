@@ -180,10 +180,12 @@ impl BrowserView {
         history: &[&str],
         out: &mut Vec<BrowserAction>,
     ) {
+        // Sampler samples and the audio assets of Playlist clips.
         let mut assets: Vec<&str> = p
             .channels
             .iter()
             .filter_map(|c| c.sample().map(|s| s.path.as_str()))
+            .chain(p.assets.iter().map(|a| a.path.as_str()))
             .collect();
         assets.sort_unstable();
         assets.dedup();

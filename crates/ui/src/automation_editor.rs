@@ -1,13 +1,17 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Automation Editor (spec 0.2.0 §11 "Editor"): the points of one
 //! automation source. Double-click adds a point (or deletes the one under
-//! the pointer), drag moves a point, right-click sets the shape to the
-//! next point (Step, Linear, Curve). Points snap to the toolbar grid; Alt
-//! disables snapping. Every gesture is one undo step.
+//! the pointer), drag moves a point. A right click on a point deletes it;
+//! holding the right button and moving deletes every point passed over.
+//! A right click between points sets the shape of that segment (Step,
+//! Linear, Curve). Points snap to the toolbar grid; Alt disables
+//! snapping. Every gesture is one undo step.
 
 use crate::automation::{AUTOMATION_COLOR, label, value_text};
 use crate::{Host, theme};
-use egui::{Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, pos2, vec2};
+use egui::{
+    Align2, Color32, FontId, PointerButton, Pos2, Rect, RichText, Sense, Stroke, pos2, vec2,
+};
 use jdance_commands::Edit;
 use jdance_domain::{
     AutoPoint, AutomationId, AutomationLane, Curve, MAX_AUTOMATION_TICKS, Project,
@@ -35,8 +39,10 @@ pub(crate) struct AutomationEditor {
     zoom: f32,
     /// Point being dragged and where the drag began.
     drag: Option<(usize, Pos2)>,
-    /// Point under the last right-click.
+    /// Point starting the segment under the last right-click.
     context: Option<usize>,
+    /// Right-button delete gesture.
+    rmb: crate::widgets::RightSweep,
     name: String,
 }
 
@@ -104,6 +110,7 @@ impl AutomationEditor {
             zoom: 160.0,
             drag: None,
             context: None,
+            rmb: crate::widgets::RightSweep::default(),
             name: String::new(),
         }
     }
@@ -137,7 +144,7 @@ impl AutomationEditor {
                     .show(ui, |ui| self.canvas(ui, project, lane, grid, out));
                 ui.label(
                     RichText::new(
-                        "Double-click: add or delete a point · drag: move · right-click: Step / Linear / Curve · Alt: no snap",
+                        "Double-click: add or delete a point · drag: move · right-click a point: delete (hold to sweep) · right-click between points: Step / Linear / Curve · Alt: no snap",
                     )
                     .size(11.0)
                     .color(theme::MUTED),
@@ -304,13 +311,13 @@ impl AutomationEditor {
                 ..pt
             })
         };
-        if response.drag_started()
+        if response.drag_started_by(PointerButton::Primary)
             && let Some(p) = ui.input(|i| i.pointer.press_origin())
         {
             self.drag = hit(p).map(|k| (k, p));
         }
         let preview = self.drag.and_then(|(k, from)| Some((k, moved(k, from)?)));
-        if response.drag_stopped()
+        if response.drag_stopped_by(PointerButton::Primary)
             && let Some((k, _)) = self.drag.take()
             && let Some((_, pt)) = preview
             && lane.points[k] != pt
@@ -342,10 +349,39 @@ impl AutomationEditor {
                 }
             });
         }
-        if response.secondary_clicked() {
-            self.context = response.interact_pointer_pos().and_then(hit);
+        // Right button: on a point it deletes (and keeps deleting while
+        // held); between points it opens the segment's shape menu.
+        let visible = ui.clip_rect().intersect(row);
+        let mut open_menu = false;
+        let rmb_pressed = ui.input(|i| i.pointer.button_pressed(PointerButton::Secondary));
+        if rmb_pressed
+            && self.drag.is_none()
+            && let Some(p) = ui.ctx().pointer_latest_pos()
+            && visible.contains(p)
+            && hit(p).is_none()
+        {
+            let tick = tick_at(p.x).max(0) as u64;
+            self.context = lane.points.iter().rposition(|q| q.tick <= tick);
+            open_menu = true;
+        }
+        let drag_idle = self.drag.is_none();
+        let sweep = self
+            .rmb
+            .update(ui, |p| drag_idle && visible.contains(p) && hit(p).is_some());
+        if let Some((path, ended)) = sweep {
+            let near = |q: &AutoPoint| {
+                path.iter()
+                    .any(|p| visible.contains(*p) && point_pos(q).distance(*p) <= POINT_R + 3.0)
+            };
+            if lane.points.iter().any(near) {
+                let mut points = lane.points.clone();
+                points.retain(|q| !near(q));
+                out.gesture.push(with_points(lane, |pts| *pts = points));
+            }
+            out.end_gesture |= ended;
         }
         egui::Popup::context_menu(&response)
+            .open_memory(open_menu.then_some(egui::SetOpenCommand::Bool(true)))
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .show(|ui| point_menu(ui, project, lane, self.context, out));
 
@@ -413,7 +449,7 @@ impl AutomationEditor {
     }
 }
 
-/// Context menu of a point: its shape to the next point, delete.
+/// Context menu of a segment: the shape from point `point` to the next.
 fn point_menu(
     ui: &mut egui::Ui,
     project: &Project,
@@ -425,11 +461,15 @@ fn point_menu(
         ui.label("Double-click to add a point");
         return;
     };
+    if k + 1 >= lane.points.len() {
+        ui.label("No next point: double-click to add one");
+        return;
+    }
     let Some(pt) = lane.points.get(k).copied() else {
         return;
     };
     ui.label(value_text(project, &lane.target, pt.value));
-    ui.label("Shape to the next point");
+    ui.label("Shape of this segment");
     for (curve, name) in [
         (Curve::Hold, "Step"),
         (Curve::Linear, "Linear"),
@@ -456,12 +496,6 @@ fn point_menu(
                 .push(with_points(lane, |pts| pts[k].tension = tension));
         }
         out.end_gesture |= r.drag_stopped() || r.lost_focus();
-    }
-    if ui.button("Delete point").clicked() {
-        out.edits.push(with_points(lane, |pts| {
-            pts.remove(k);
-        }));
-        ui.close();
     }
 }
 
