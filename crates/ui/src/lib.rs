@@ -527,6 +527,13 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             {
                 self.toggle_play();
             }
+            if ui
+                .button("Panic")
+                .on_hover_text("Silence all sounding notes and voices")
+                .clicked()
+            {
+                self.host.panic();
+            }
 
             ui.label("Tempo");
             let mut tempo = self.project.tempo_bpm;

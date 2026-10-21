@@ -467,6 +467,12 @@ impl Host for AudioHost {
         }
     }
 
+    fn panic(&mut self) {
+        if let Some(a) = &mut self.active {
+            let _ = a.engine.panic();
+        }
+    }
+
     fn transport(&self) -> TransportStatus {
         let r = &self.reading;
         let spt = samples_per_tick(self.project.tempo_bpm, self.engine_rate());

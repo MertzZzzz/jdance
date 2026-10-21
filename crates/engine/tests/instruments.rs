@@ -194,6 +194,36 @@ fn loop_wrap_and_stop_turn_sounding_notes_off() {
 }
 
 #[test]
+fn panic_turns_notes_off_and_playback_continues() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let long = Note {
+        start: 0,
+        length: 8 * TICKS_PER_STEP,
+        key: 67,
+        velocity: 1.0,
+    };
+    let (p, _, pid) = project(&[10], vec![long]);
+    let (mut h, mut e) = create_engine(SR);
+    h.set_snapshot(compile(&p, pid, Some(synth(&log, 0))))
+        .unwrap();
+    h.play().unwrap();
+    let before = render(&mut e, 2 * STEP as usize, 500);
+    assert!(before[STEP as usize] > 0.0, "note sounds");
+    h.panic().unwrap();
+    let after = render(&mut e, 9 * STEP as usize, 500);
+    assert_eq!(after[100], 0.0, "silenced at the next block");
+    assert!(after[8 * STEP as usize + 100] > 0.0, "step 10 still plays");
+    let l = log.lock().unwrap();
+    assert_eq!((l[1].1, l[1].2), (67, false), "panic sends note-off");
+    assert_eq!(l[1].0, 2 * STEP, "at the start of the next block");
+    // The cut note gets no second note-off when its gate would end.
+    assert_eq!(
+        *l,
+        [(0, 67, true), (2 * STEP, 67, false), (10 * STEP, 60, true)]
+    );
+}
+
+#[test]
 fn instrument_latency_is_compensated_against_other_channels() {
     let log = Arc::new(Mutex::new(Vec::new()));
     let (mut p, _, pid) = project(&[0], Vec::new());

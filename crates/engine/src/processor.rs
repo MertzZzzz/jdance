@@ -602,17 +602,26 @@ impl EngineProcessor {
                         let step = AUTOMATION_STEP as u64;
                         let to_boundary = (step - at % step) as usize;
                         let len = (n - o).min(to_boundary);
-                        if at.is_multiple_of(step) || (o == 0 && starting) {
-                            let end = at + to_boundary as u64 - 1;
+                        let gains = |pos: u64| {
                             let value = |lane: Option<usize>, base: f32| {
-                                lane.and_then(|i| automation[i].plain_at(end))
+                                lane.and_then(|i| automation[i].plain_at(pos))
                                     .unwrap_or(base)
                             };
                             let vol = value(track.auto_volume, track.base_volume);
-                            let pan = value(track.auto_pan, track.base_pan);
-                            let (gl, gr) = balance_gains(pan);
-                            track.fader.l.set_target_over(gl * vol, to_boundary as u32);
-                            track.fader.r.set_target_over(gr * vol, to_boundary as u32);
+                            let (gl, gr) = balance_gains(value(track.auto_pan, track.base_pan));
+                            (gl * vol, gr * vol)
+                        };
+                        if o == 0 && starting {
+                            // Chase (AUT-033): the first sample already has
+                            // the envelope's value.
+                            let (gl, gr) = gains(at);
+                            track.fader.l.reset(gl);
+                            track.fader.r.reset(gr);
+                        }
+                        if at.is_multiple_of(step) || (o == 0 && starting) {
+                            let (gl, gr) = gains(at + to_boundary as u64 - 1);
+                            track.fader.l.set_target_over(gl, to_boundary as u32);
+                            track.fader.r.set_target_over(gr, to_boundary as u32);
                         }
                         track.fader.apply(&mut l[o..o + len], &mut r[o..o + len]);
                         o += len;
@@ -645,6 +654,12 @@ impl EngineProcessor {
                         if let Some(lane) = send_lane {
                             let at = timeline.pos_at(i);
                             let step = AUTOMATION_STEP as u64;
+                            if i == 0
+                                && starting
+                                && let Some(v) = automation[lane].plain_at(at)
+                            {
+                                send.gain.reset(v);
+                            }
                             if at.is_multiple_of(step) || (i == 0 && starting) {
                                 let to_boundary = step - at % step;
                                 if let Some(v) = automation[lane].plain_at(at + to_boundary - 1) {
@@ -734,9 +749,33 @@ fn queue_plugin_points(
             }
             o += PLUGIN_POINT_STEP;
         }
-        for (seg_offset, seg_pos, len) in timeline.segments(n) {
+        // The plugin interpolates linearly between points, so a jump (a
+        // loop wrap, or a point after a hold) gets the old value one
+        // sample earlier.
+        let mut step = |offset: usize, before: Option<f32>, after: f32| {
+            if offset > 0
+                && let Some(b) = before
+            {
+                queue(id, offset as u32 - 1, f64::from(b));
+            }
+            queue(id, offset as u32, f64::from(after));
+        };
+        for (k, (seg_offset, seg_pos, len)) in timeline.segments(n).enumerate() {
+            if k > 0
+                && seg_offset > 0
+                && let Some(v) = a.normalized_at(seg_pos)
+            {
+                // Loop wrap (AUT-033).
+                step(
+                    seg_offset,
+                    a.normalized_at(timeline.pos_at(seg_offset - 1)),
+                    v,
+                );
+            }
             for (pos, v) in a.breakpoints(seg_pos, seg_pos + len as u64) {
-                queue(id, (seg_offset as u64 + pos - seg_pos) as u32, f64::from(v));
+                let offset = seg_offset + (pos - seg_pos) as usize;
+                let before = (pos > seg_pos).then(|| a.normalized_at(pos - 1)).flatten();
+                step(offset, before, v);
             }
         }
     }

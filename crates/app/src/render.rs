@@ -546,4 +546,117 @@ mod tests {
         assert!(silent.warnings[0].contains("silence"));
         assert!(silent.audio.left.iter().all(|v| *v == 0.0));
     }
+
+    /// Parameter points (id, offset, value) from the JD Test Logger state,
+    /// split into process calls (each starts with the chase at offset 0).
+    fn logger_blocks(ctrl: &mut jdance_plugin_vst3::Vst3Controller) -> Vec<Vec<(i32, f64)>> {
+        use jdance_plugin_api::PluginController;
+        let s = ctrl.state().unwrap().component;
+        let n = u32::from_le_bytes(s[13..17].try_into().unwrap()) as usize;
+        let mut blocks: Vec<Vec<(i32, f64)>> = Vec::new();
+        for e in s[17..17 + n * 16].chunks_exact(16) {
+            assert_eq!(
+                u32::from_le_bytes(e[0..4].try_into().unwrap()),
+                0,
+                "param id"
+            );
+            let offset = i32::from_le_bytes(e[4..8].try_into().unwrap());
+            let value = f64::from_le_bytes(e[8..16].try_into().unwrap());
+            if offset == 0 {
+                blocks.push(Vec::new());
+            }
+            blocks.last_mut().unwrap().push((offset, value));
+        }
+        blocks
+    }
+
+    #[test]
+    fn vst3_automation_points_arrive_sample_accurately() {
+        // AUT-031 and AUT-033 against the real test plugin.
+        use jdance_domain::{AutoPoint, AutomationId, AutomationLane, AutomationTarget, Curve};
+        let (_dir, mut p) = setup(1);
+        add_clip(&mut p, 0, 2);
+        let (catalog, modules) = test_plugins();
+        let slot = plugin_slot(&catalog, "JD Test Logger");
+        master_insert(&mut p, Effect::plugin(slot.clone()));
+        let insert = p.mixer.master.inserts[0].id;
+        let pt = |tick, value, curve| AutoPoint {
+            tick,
+            value,
+            curve,
+            tension: 0.0,
+        };
+        // 25 samples per tick: points at samples 0, 750 and 1500.
+        p.automation.push(AutomationLane {
+            id: AutomationId(p.ids.next()),
+            target: AutomationTarget::PluginParam {
+                target: jdance_domain::PluginTarget::Insert(insert),
+                param: 0,
+            },
+            points: vec![
+                pt(0, 0.2, Curve::Hold),
+                pt(30, 0.9, Curve::Linear),
+                pt(60, 0.5, Curve::Linear),
+            ],
+        });
+        p.playlist.loop_range = Some((0, 3840));
+        p.playlist.loop_enabled = true;
+        let setup_info = ProcessSetupInfo {
+            sample_rate: f64::from(RATE),
+            max_block: 512,
+            offline: false,
+        };
+        let (proc_, mut ctrl) = create_instance(&catalog, &modules, &slot, &setup_info).unwrap();
+        let mut proc_ = Some(proc_);
+        let snap = jdance_engine::compile_full(
+            &p,
+            RATE,
+            jdance_engine::PlayMode::Song,
+            |_| None,
+            &mut |_, _| jdance_engine::PluginRt::fresh(Box::new(proc_.take().unwrap())),
+        );
+        let (mut h, mut e) = jdance_engine::create_engine(RATE);
+        h.set_snapshot(snap).unwrap();
+        h.play().unwrap();
+        let (mut l, mut r) = (vec![0.0; 512], vec![0.0; 512]);
+        e.render(&mut l, &mut r);
+        e.render(&mut l, &mut r);
+        h.seek(1_100).unwrap();
+        e.render(&mut l, &mut r);
+        // The loop wraps after 256 samples of this block.
+        h.seek(BAR as u64 - 256).unwrap();
+        e.render(&mut l, &mut r);
+
+        // Envelope values as the engine computes them (f32).
+        let lin = |pos: u64| {
+            let t = (pos - 750) as f64 / 750.0;
+            f64::from(0.9f32 + (0.5f32 - 0.9f32) * t as f32)
+        };
+        let v = |x: f32| f64::from(x);
+        let blocks = logger_blocks(&mut ctrl);
+        assert_eq!(blocks.len(), 4, "{blocks:?}");
+        let every_64 = |val: f64| (0..8).map(|k| (k * 64, val)).collect::<Vec<_>>();
+        assert_eq!(blocks[0], every_64(v(0.2)), "hold before the first jump");
+        let mut want = vec![
+            (0, v(0.2)),
+            (64, v(0.2)),
+            (128, v(0.2)),
+            (192, v(0.2)),
+            (237, v(0.2)),
+            (238, v(0.9)),
+        ];
+        want.extend((4..8).map(|k| (k * 64, lin(512 + k as u64 * 64))));
+        assert_eq!(blocks[1], want, "jump at sample 750 is exact");
+        assert_eq!(blocks[2][0], (0, lin(1_100)), "chase after seek");
+        // The point at sample 1500 (offset 400) ends the ramp exactly.
+        assert!(blocks[2].contains(&(399, lin(1_499))), "{:?}", blocks[2]);
+        assert!(blocks[2].contains(&(400, v(0.5))), "{:?}", blocks[2]);
+        assert_eq!(blocks[2].last(), Some(&(448, v(0.5))));
+        let mut want = every_64(v(0.5));
+        want.insert(4, (255, v(0.5)));
+        for x in &mut want[5..] {
+            x.1 = v(0.2);
+        }
+        assert_eq!(blocks[3], want, "loop wrap jumps back at its exact offset");
+    }
 }

@@ -173,7 +173,7 @@
 | UI: «+ Instrument», Edit (окно плагина), Params (generic editor), steps и piano roll для инструмента | PASS (ручная) | Xvfb |
 | Pitch bend и CC через `IMidiMapping` (PLG-033) | NOT RUN | в piano roll ещё нет pitch bend/CC |
 | Note-off velocity | NOT RUN | всегда 0 |
-| Кнопка panic в UI | NOT RUN | команда в движке есть |
+| Кнопка Panic в тулбаре: note-off всем инструментам, остановка голосов, воспроизведение продолжается | PASS | `panic_turns_notes_off_and_playback_continues` |
 
 ## Milestone A — автоматизация (часть 1: модель и движок)
 
@@ -186,11 +186,11 @@
 | Удаление объекта удаляет его дорожки, undo восстанавливает обе; дорожки без цели сохраняются (AUT-050) | PASS | тот же тест |
 | Громкость/pan/send: значение каждые 32 сэмпла, рампа внутри, hold ≤ 32 сэмпла (AUT-021) | PASS | `volume_follows_the_envelope_within_32_samples`, `hold_jumps_complete_within_32_samples`, `pan_and_send_level_are_automated` |
 | Параметры встроенных эффектов (в т.ч. компрессор с sidechain) и bypass | PASS | `builtin_parameter_and_bypass_are_automated` |
-| VST3: chase в начале блока (AUT-033), точки огибающей с точным offset, промежуточные каждые 64 (AUT-030) | PASS | `plugin_parameters_get_chase_breakpoints_and_intermediate_points`; журнал реального тестового плагина (AUT-031) — NOT RUN |
+| VST3: chase в начале блока (AUT-033), точки огибающей с точным offset, промежуточные каждые 64 (AUT-030) | PASS | `plugin_parameters_get_chase_breakpoints_and_intermediate_points`; журнал JD Test Logger в движке (AUT-031/033): точные offset, скачок Hold и переход loop парой точек, chase после seek — `vst3_automation_points_arrive_sample_accurately` |
 | Независимость от размера блока (AUT-070 property) | PASS | `automated_rendering_is_block_size_independent` (мутационная проверка) |
 | RT-001 при применении автоматизации | PASS | `applying_automation_does_not_allocate` |
 | Возврат к значениям проекта после остановки и вне Song-режима (AUT-040) | PASS (код) | рампа к проектным значениям; отдельного теста нет |
-| Golden render с автоматизацией (AUT-051, CI-003) | NOT RUN | |
+| Golden render с автоматизацией volume, pan, send level (AUT-051, CI-003) | PASS | `golden_volume_pan_and_send_automation`; на старте значения подхватываются сразу (первый сэмпл, AUT-033) |
 
 ## Milestone A — автоматизация (часть 2: UI)
 

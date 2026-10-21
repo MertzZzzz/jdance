@@ -157,6 +157,8 @@ pub trait Host {
     fn set_project(&mut self, project: &Project, project_dir: Option<&Path>);
     fn play(&mut self);
     fn stop(&mut self);
+    /// Silences every sounding note and voice; the transport keeps going.
+    fn panic(&mut self) {}
     fn set_mode(&mut self, mode: TransportMode);
     /// Moves the playhead (song mode).
     fn seek_ticks(&mut self, ticks: u64);

@@ -145,6 +145,9 @@ fn pan_and_send_level_are_automated() {
         vec![pt(0, 0.5, Curve::Hold)],
     );
     let out = render_offline(compile(&p, PlayMode::Song, None), 4_096, || 512);
+    // Chased at the start (AUT-033): no ramp from the project values.
+    assert!((out.left[0] - 2.0 * PAN).abs() < 1e-5, "{}", out.left[0]);
+    assert!((out.right[0] - PAN).abs() < 1e-5, "{}", out.right[0]);
     // Left: fader path (hard left, gain 1) + pre-fader send (centre).
     assert!(
         (out.left[4_000] - 2.0 * PAN).abs() < 1e-5,
@@ -319,4 +322,67 @@ fn applying_automation_does_not_allocate() {
         }
     });
     assert_eq!(violations(), 0);
+}
+
+#[test]
+fn golden_volume_pan_and_send_automation() {
+    // AUT-051, AUT-070: one bar at a low rate keeps the file small.
+    let sr = 22_050;
+    let mut p = project();
+    for k in (0..16).step_by(2) {
+        let s = &mut p.patterns[0].row_mut(ChannelId(500)).steps[k];
+        s.on = true;
+        s.velocity = 1.0;
+    }
+    p.mixer.tracks[0].sends.push(Send {
+        id: SendId(20),
+        dest: RET,
+        level: 0.0,
+        pre_fader: false,
+    });
+    p.mixer.tracks[1].pan = 1.0;
+    lane(
+        &mut p,
+        AutomationTarget::TrackVolume(TRACK),
+        vec![
+            AutoPoint {
+                tension: 0.6,
+                ..pt(0, 0.8, Curve::Curve)
+            },
+            pt(1920, 0.2, Curve::Linear),
+            pt(3840, 0.7, Curve::Linear),
+        ],
+    );
+    lane(
+        &mut p,
+        AutomationTarget::TrackPan(TRACK),
+        vec![pt(0, 0.0, Curve::Linear), pt(3840, 1.0, Curve::Linear)],
+    );
+    lane(
+        &mut p,
+        AutomationTarget::SendLevel(SendId(20)),
+        vec![
+            pt(0, 0.0, Curve::Hold),
+            pt(960, 0.5, Curve::Hold),
+            pt(2880, 0.25, Curve::Hold),
+        ],
+    );
+    let click = Arc::new(jdance_test_support::click(sr, 2_000));
+    let snap = compile_full(
+        &p,
+        sr,
+        PlayMode::Song,
+        |_| Some(Arc::clone(&click)),
+        &mut |_, _| PluginRt::missing(),
+    );
+    let frames = (f64::from(sr) * 2.0) as usize;
+    let out = render_offline(snap, frames, || 256);
+    // Tolerance as in `golden_four_on_floor` (libm in the pan law).
+    jdance_test_support::check_golden(
+        "automation_volume_pan_send_22k",
+        sr,
+        &out.left,
+        &out.right,
+        1e-6,
+    );
 }
