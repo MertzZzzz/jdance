@@ -6,6 +6,7 @@
 //! tracked by revision IDs so that undoing back to the saved state clears it.
 
 mod mixer;
+pub mod note_tools;
 pub mod notes;
 mod playlist;
 
@@ -438,6 +439,7 @@ impl Edit {
                     .pattern_mut(*pattern)
                     .ok_or(EditError::NoSuchPattern(*pattern))?;
                 let mut sorted = notes.clone();
+                jdance_domain::assign_note_ids(&mut sorted);
                 sort_notes(&mut sorted);
                 let old = std::mem::replace(&mut pat.row_mut(*channel).notes, sorted);
                 Ok(Edit::SetNotes {
@@ -1002,6 +1004,7 @@ mod tests {
 
     fn note(start: u32, key: u8) -> Note {
         Note {
+            id: 0,
             start,
             length: 240,
             key,
@@ -1020,7 +1023,10 @@ mod tests {
         h.execute(&mut p, set(vec![note(480, 64), note(0, 60)]))
             .unwrap();
         let row = p.patterns[0].row(ch).unwrap();
-        assert_eq!(row.notes, [note(0, 60), note(480, 64)], "sorted");
+        let keys: Vec<_> = row.notes.iter().map(|n| (n.start, n.key)).collect();
+        assert_eq!(keys, [(0, 60), (480, 64)], "sorted");
+        assert!(row.notes.iter().all(|n| n.id > 0) && row.notes[0].id != row.notes[1].id);
+        let kept = row.notes.clone();
         h.end_gesture();
         // A drag: many merged edits, one undo step.
         for x in 1..10 {
@@ -1042,6 +1048,9 @@ mod tests {
             ..note(0, 60)
         };
         assert!(h.execute(&mut p, set(vec![zero])).is_err());
+        // Edits keep IDs.
+        h.execute(&mut p, set(kept.clone())).unwrap();
+        assert_eq!(p.patterns[0].row(ch).unwrap().notes, kept);
     }
 
     #[test]

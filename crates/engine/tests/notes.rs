@@ -18,6 +18,7 @@ fn ramp() -> Arc<SampleBuffer> {
 
 fn note(step: u32, key: u8) -> Note {
     Note {
+        id: 0,
         start: step * TICKS_PER_STEP,
         length: TICKS_PER_STEP,
         key,
@@ -64,6 +65,7 @@ fn gate_is_cut_at_the_repetition_end() {
     let mut p = step_project(120.0, &[&[]]);
     let ch = p.channels[0].id;
     let long = Note {
+        id: 0,
         start: 15 * TICKS_PER_STEP,
         length: 8 * TICKS_PER_STEP,
         key: 64,

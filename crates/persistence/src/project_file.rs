@@ -133,6 +133,12 @@ fn parse_project(bytes: &[u8]) -> Result<Project, PersistError> {
     )?;
     let mut project: Project =
         serde_json::from_value(project).map_err(|e| PersistError::Corrupt(e.to_string()))?;
+    // Notes from before 0.2.0 have no IDs.
+    for pat in &mut project.patterns {
+        for row in &mut pat.rows {
+            jdance_domain::assign_note_ids(&mut row.notes);
+        }
+    }
     // Parameters added in a newer schema of an effect take defaults.
     for t in std::iter::once(&mut project.mixer.master).chain(project.mixer.tracks.iter_mut()) {
         for i in &mut t.inserts {

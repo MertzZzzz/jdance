@@ -274,6 +274,7 @@ mod tests {
 
     fn n(start: u32, length: u32, key: u8) -> Note {
         Note {
+            id: 0,
             start,
             length,
             key,

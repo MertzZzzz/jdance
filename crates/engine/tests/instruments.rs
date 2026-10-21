@@ -138,6 +138,7 @@ fn render(h: &mut jdance_engine::EngineProcessor, frames: usize, block: usize) -
 fn notes_and_steps_turn_on_and_off_on_time() {
     let log = Arc::new(Mutex::new(Vec::new()));
     let long = Note {
+        id: 0,
         start: 4 * TICKS_PER_STEP,
         length: 2 * TICKS_PER_STEP,
         key: 72,
@@ -166,6 +167,7 @@ fn loop_wrap_and_stop_turn_sounding_notes_off() {
     let log = Arc::new(Mutex::new(Vec::new()));
     // Ends after the pattern: cut at the repetition end (the wrap).
     let tail = Note {
+        id: 0,
         start: 15 * TICKS_PER_STEP,
         length: 4 * TICKS_PER_STEP,
         key: 64,
@@ -197,6 +199,7 @@ fn loop_wrap_and_stop_turn_sounding_notes_off() {
 fn panic_turns_notes_off_and_playback_continues() {
     let log = Arc::new(Mutex::new(Vec::new()));
     let long = Note {
+        id: 0,
         start: 0,
         length: 8 * TICKS_PER_STEP,
         key: 67,
@@ -227,12 +230,14 @@ fn panic_turns_notes_off_and_playback_continues() {
 fn transposition_and_mono_apply_to_instruments() {
     let log = Arc::new(Mutex::new(Vec::new()));
     let a = Note {
+        id: 0,
         start: 0,
         length: 4 * TICKS_PER_STEP,
         key: 60,
         velocity: 1.0,
     };
     let b = Note {
+        id: 0,
         start: TICKS_PER_STEP,
         key: 64,
         ..a
@@ -321,6 +326,7 @@ fn instrument_rendering_does_not_allocate() {
     let all: Vec<u32> = (0..16).collect();
     let notes = (0..64)
         .map(|i| Note {
+            id: 0,
             start: i * 60,
             length: 300,
             key: 40 + (i % 40) as u8,

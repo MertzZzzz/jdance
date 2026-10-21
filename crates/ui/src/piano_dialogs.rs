@@ -336,6 +336,7 @@ mod tests {
 
     fn n(start: u32, key: u8, velocity: f32) -> Note {
         Note {
+            id: 0,
             start,
             length: 240,
             key,

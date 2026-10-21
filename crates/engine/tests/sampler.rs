@@ -23,6 +23,7 @@ fn ramp() -> Arc<SampleBuffer> {
 
 fn note(step: u32, steps: u32, key: u8) -> Note {
     Note {
+        id: 0,
         start: step * TICKS_PER_STEP,
         length: steps * TICKS_PER_STEP,
         key,
@@ -135,6 +136,7 @@ fn loop_mode_repeats_until_note_off_and_envelope_shapes() {
 fn mono_and_polyphony_limit_voices() {
     // Two overlapping notes: the second starts at step 0 + 100 ticks.
     let late = Note {
+        id: 0,
         start: 100,
         ..note(0, 4, ROOT_KEY)
     };

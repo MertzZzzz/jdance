@@ -197,10 +197,12 @@ fn slice_note(n: Note, tick: u32) -> Option<(Note, Note)> {
     (tick > n.start && tick < n.end()).then(|| {
         (
             Note {
+                id: 0,
                 length: tick - n.start,
                 ..n
             },
             Note {
+                id: 0,
                 start: tick,
                 length: n.end() - tick,
                 ..n
@@ -771,6 +773,7 @@ impl PianoRoll {
                     (None, Tool::Draw | Tool::Paint) if !ctrl => {
                         if notes.len() < MAX_NOTES_PER_ROW {
                             let n = Note {
+                                id: 0,
                                 start: self.snap_tick(to_tick(p.x)),
                                 length: self.new_len.max(1),
                                 key: to_key(p.y),
@@ -847,6 +850,7 @@ impl PianoRoll {
                     }
                     DragKind::Create if notes.len() < MAX_NOTES_PER_ROW => {
                         let n = Note {
+                            id: 0,
                             start: self.snap_tick(to_tick(p.x)),
                             length: self.min_len(),
                             key: to_key(p.y),
@@ -928,6 +932,7 @@ impl PianoRoll {
                         while t <= hi && new.len() < MAX_NOTES_PER_ROW && p.x > grid.left() {
                             if !new.iter().any(|n| n.key == key && n.start == t) {
                                 new.push(Note {
+                                    id: 0,
                                     start: t,
                                     length: self.new_len.max(1),
                                     key,
@@ -1263,6 +1268,7 @@ mod tests {
     #[test]
     fn slicing_keeps_key_velocity_and_both_parts() {
         let n = Note {
+            id: 0,
             start: 240,
             length: 960,
             key: 60,

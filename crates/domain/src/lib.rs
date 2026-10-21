@@ -664,6 +664,10 @@ impl StepRow {
 /// A piano-roll note. Times are in ticks relative to the pattern start.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Note {
+    /// Stable within its row (spec 0.2.0 §18.2: edits keep it, new notes
+    /// get a new one); 0 = not assigned yet ([`assign_note_ids`]).
+    #[serde(default)]
+    pub id: u32,
     pub start: u32,
     /// `>= 1` tick.
     pub length: u32,
@@ -695,9 +699,23 @@ impl Note {
     }
 }
 
-/// Sorts notes into canonical order (`start`, then `key`).
+/// Sorts notes into canonical order (`start`, then `key`, then ID).
 pub fn sort_notes(notes: &mut [Note]) {
-    notes.sort_by_key(|n| (n.start, n.key));
+    notes.sort_by_key(|n| (n.start, n.key, n.id));
+}
+
+/// Gives notes without an ID (0) or with a repeated one a new ID above
+/// the row's largest; the first note with an ID keeps it.
+pub fn assign_note_ids(notes: &mut [Note]) {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut next = notes.iter().map(|n| n.id).max().unwrap_or(0);
+    for n in notes.iter_mut() {
+        if n.id == 0 || !seen.insert(n.id) {
+            next += 1;
+            n.id = next;
+            seen.insert(next);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
