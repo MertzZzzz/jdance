@@ -10,6 +10,7 @@ mod channel_settings;
 mod host;
 mod mixer;
 mod piano;
+mod piano_dialogs;
 mod playlist;
 mod plugins;
 mod rack;
@@ -1417,7 +1418,8 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
                         .loop_pos
                         .filter(|_| transport.playing && !self.song_mode)
                         .map(|p| p * pattern.length_ticks() as f32);
-                    piano_out = roll.show(ui, &self.project, pattern, playhead, self.snap);
+                    piano_out =
+                        roll.show(ui, &self.project, pattern, &mut self.host, playhead, self.snap);
                 }
                 _ if !self.show_playlist => {
                     ui.centered_and_justified(|ui| {
@@ -1436,8 +1438,16 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
                 }
             }
         });
-        if piano_out.close {
-            self.piano = None;
+        if piano_out.close
+            && let Some(mut roll) = self.piano.take()
+        {
+            roll.release(&mut self.host);
+        }
+        if let Some(id) = piano_out.select_pattern {
+            self.current_pattern = id;
+        }
+        if let Some(snap) = piano_out.snap {
+            self.snap = snap;
         }
         for (edit, merging) in piano_out.edits {
             self.apply(edit, merging, now);

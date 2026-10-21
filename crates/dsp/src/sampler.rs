@@ -276,7 +276,7 @@ impl SamplerVoice {
     }
 
     /// Note-off: the envelope's release, or a short fade without one.
-    fn note_off(&mut self) {
+    pub fn note_off(&mut self) {
         match self.playback.adsr {
             Some(a) => {
                 if self.stage != Stage::Release {

@@ -500,6 +500,15 @@ impl Host for AudioHost {
         }
     }
 
+    fn live_note(&mut self, channel: jdance_domain::ChannelId, key: u8, velocity: Option<f32>) {
+        if let Some(a) = &mut self.active {
+            let _ = match velocity {
+                Some(v) => a.engine.live_note(channel, key, v),
+                None => a.engine.live_note_off(channel, key),
+            };
+        }
+    }
+
     fn transport(&self) -> TransportStatus {
         let r = &self.reading;
         let spt = samples_per_tick(self.project.tempo_bpm, self.engine_rate());

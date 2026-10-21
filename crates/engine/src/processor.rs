@@ -40,6 +40,8 @@ fn release_len(sample_rate: u32) -> u32 {
 struct Voice {
     inner: SamplerVoice,
     channel: ChannelId,
+    /// Key of a held live note (released by its note-off).
+    live: Option<u8>,
 }
 
 impl Default for Voice {
@@ -47,6 +49,7 @@ impl Default for Voice {
         Self {
             inner: SamplerVoice::default(),
             channel: ChannelId(0),
+            live: None,
         }
     }
 }
@@ -322,6 +325,12 @@ impl EngineProcessor {
                         let _ = self.garbage.push(Garbage::Sample(old));
                     }
                 }
+                Command::LiveNote {
+                    channel,
+                    key,
+                    velocity,
+                } => self.live_note(channel, key, Some(velocity)),
+                Command::LiveNoteOff { channel, key } => self.live_note(channel, key, None),
                 Command::Panic => {
                     for v in self.voices.iter_mut() {
                         v.inner.stop();
@@ -368,6 +377,61 @@ impl EngineProcessor {
                         self.pending = Some(new);
                     } else {
                         self.swap_snapshot(new);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Note-on (`Some(velocity)`) or note-off of a live note at the next
+    /// block start.
+    fn live_note(&mut self, channel: ChannelId, key: u8, velocity: Option<f32>) {
+        let Some(snap) = self.snapshot.as_deref_mut() else {
+            return;
+        };
+        let Some(index) = snap.channels.iter().position(|c| c.id == channel) else {
+            return;
+        };
+        let ch = &mut snap.channels[index];
+        if let Some(inst) = &mut ch.instrument {
+            let key = transpose(key, ch.pitch);
+            match velocity {
+                Some(v) => {
+                    inst.make_room(0, ch.mono, ch.polyphony);
+                    inst.live_on(key, v);
+                }
+                None => inst.live_off(key),
+            }
+            return;
+        }
+        // One-shot samples play to their end; gated ones stop at note-off.
+        let gated = ch.sampler.gated;
+        match velocity {
+            Some(velocity) => {
+                let e = crate::StepEvent {
+                    pos: 0,
+                    channel: index,
+                    velocity,
+                    key,
+                    length: u64::MAX,
+                };
+                if let Some(i) = trigger(
+                    snap,
+                    &mut self.voices,
+                    &mut self.voice_serial,
+                    &self.feedback,
+                    &e,
+                ) {
+                    self.voices[i].live = Some(key);
+                }
+            }
+            None => {
+                for v in self.voices.iter_mut() {
+                    if v.live == Some(key) && v.channel == channel && v.inner.is_active() {
+                        v.live = None;
+                        if gated {
+                            v.inner.note_off();
+                        }
                     }
                 }
             }
@@ -931,13 +995,9 @@ fn trigger(
     serial: &mut u64,
     feedback: &EngineFeedback,
     e: &crate::StepEvent,
-) {
-    let Some(ch) = snap.channels.get(e.channel) else {
-        return;
-    };
-    if ch.sample.is_none() {
-        return;
-    }
+) -> Option<usize> {
+    let ch = snap.channels.get(e.channel)?;
+    ch.sample.as_ref()?;
     let fade = release_len(snap.sample_rate);
     // Voice limits of the channel: mono cuts every voice, a polyphony
     // limit the oldest ones (short fades, no clicks).
@@ -975,6 +1035,7 @@ fn trigger(
     *serial += 1;
     let v = &mut voices[index];
     v.channel = ch.id;
+    v.live = None;
     let s = &ch.sampler;
     let mut playback = s.playback;
     if s.gated {
@@ -989,4 +1050,5 @@ fn trigger(
         jdance_dsp::key_rate(transpose(e.key, ch.pitch), s.root_key),
         playback,
     );
+    Some(index)
 }

@@ -179,6 +179,9 @@ pub trait Host {
     fn stop(&mut self);
     /// Silences every sounding note and voice; the transport keeps going.
     fn panic(&mut self) {}
+    /// Plays (`Some(velocity)`) or releases a held note on `channel`
+    /// outside the sequencer: piano keys, MIDI input.
+    fn live_note(&mut self, _channel: jdance_domain::ChannelId, _key: u8, _velocity: Option<f32>) {}
     fn set_mode(&mut self, mode: TransportMode);
     /// Moves the playhead (song mode).
     fn seek_ticks(&mut self, ticks: u64);

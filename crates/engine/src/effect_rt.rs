@@ -429,6 +429,8 @@ mod tests {
 /// Notes per block and sounding notes per instrument channel.
 pub const MAX_INSTRUMENT_EVENTS: usize = 512;
 pub const MAX_SOUNDING_NOTES: usize = 256;
+/// Gate end marking live notes: never reached by the timeline.
+const LIVE: u64 = u64::MAX - 1;
 
 /// A plugin instrument playing a channel (PLG-033): note-ons at their
 /// sample offsets, note-offs when the gate ends, and note-off for every
@@ -519,6 +521,30 @@ impl InstrumentRt {
             kind: jdance_plugin_api::NoteKind::On { velocity },
         });
         self.sounding.push((pos + length.max(1), key, note_id));
+    }
+
+    /// A held note (keyboard, MIDI input): no gate, ends at
+    /// [`Self::live_off`] or with every other note.
+    pub fn live_on(&mut self, key: u8, velocity: f32) {
+        self.note_on(0, LIVE, key, velocity, 0);
+    }
+
+    pub fn live_off(&mut self, key: u8) {
+        let mut i = 0;
+        while i < self.sounding.len() {
+            let (end, k, note_id) = self.sounding[i];
+            if end == LIVE + 1 && k == key {
+                self.push(jdance_plugin_api::NoteEvent {
+                    offset: 0,
+                    note_id,
+                    key,
+                    kind: jdance_plugin_api::NoteKind::Off,
+                });
+                self.sounding.swap_remove(i);
+            } else {
+                i += 1;
+            }
+        }
     }
 
     /// Note-off for every sounding note at block `offset` (stop, seek,

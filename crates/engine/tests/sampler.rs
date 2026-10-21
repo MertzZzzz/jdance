@@ -5,7 +5,7 @@
 
 use jdance_domain::{Channel, Note, PlaybackMode, ROOT_KEY, SamplerSettings, TICKS_PER_STEP};
 use jdance_dsp::SampleBuffer;
-use jdance_engine::{PlayMode, compile_with, render_offline};
+use jdance_engine::{PlayMode, compile_with, create_engine, render_offline};
 use jdance_test_support::step_project;
 use std::sync::Arc;
 
@@ -162,4 +162,40 @@ fn default_settings_round_trip() {
         ..s
     };
     assert!(bad.validate().is_err());
+}
+
+#[test]
+fn live_notes_one_shot_and_gated() {
+    let live = |gated: bool| {
+        let mut p = step_project(120.0, &[&[]]);
+        p.channels[0].pan = 0.0;
+        p.channels[0].volume = 1.0;
+        if gated {
+            p.channels[0].sampler.mode = PlaybackMode::Loop;
+        }
+        let ch = p.channels[0].id;
+        let s = ramp();
+        let snap = compile_with(&p, SR, PlayMode::Pattern(p.patterns[0].id), |_| {
+            Some(Arc::clone(&s))
+        });
+        let (mut h, mut e) = create_engine(SR);
+        h.set_snapshot(snap).unwrap();
+        let (mut l, mut r) = (vec![0.0; 1_000], vec![0.0; 1_000]);
+        e.render(&mut l, &mut r);
+        h.live_note(ch, ROOT_KEY, 1.0).unwrap();
+        e.render(&mut l, &mut r);
+        let first = l[999] / PAN;
+        h.live_note_off(ch, ROOT_KEY).unwrap();
+        e.render(&mut l, &mut r);
+        (first, l[999] / PAN)
+    };
+    let (held, after) = live(false);
+    assert!((held - frame(999)).abs() < 1e-6, "plays while stopped");
+    assert!(
+        (after - frame(1_999)).abs() < 1e-6,
+        "one-shot plays on after note-off"
+    );
+    let (held, after) = live(true);
+    assert!(held > 0.0);
+    assert_eq!(after, 0.0, "a gated note stops at note-off");
 }

@@ -6,6 +6,7 @@
 //! tracked by revision IDs so that undoing back to the saved state clears it.
 
 mod mixer;
+pub mod notes;
 mod playlist;
 
 pub use mixer::{add_insert, add_send, add_track};

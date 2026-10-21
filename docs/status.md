@@ -207,7 +207,7 @@
 | Регуляторы показывают автоматизированное значение во время воспроизведения | NOT RUN | показывают проектное значение |
 | Запись автоматизации движением регулятора | NOT RUN | вне MVP |
 
-## Интерфейс по дизайну Graphite (U1–U4)
+## Интерфейс по дизайну Graphite (U1–U5)
 
 | Проверка | Статус | Чем подтверждено |
 |---|---|---|
@@ -220,6 +220,12 @@
 | Перетаскивание WAV и инструментов из Browser в Channel Rack (новый канал или замена сэмпла), один шаг undo | PASS | ручная проверка |
 | Перетаскивание в Playlist | NOT RUN | нужны аудиоклипы (U6) |
 | Форматы кроме WAV | NOT RUN | показываются как неподдерживаемые |
+| Piano Roll: инструменты Draw / Paint / Select / Delete, рамка (Ctrl или Select), выбор паттерна и канала, линейка, сводка выделения | PASS | ручная проверка под Xvfb |
+| Piano Roll: Quantize (сетка, strength, начала/концы), Humanize (время, velocity, seed), Transpose, Scale (подсветка, «подогнать к ладу»), Note properties — один шаг undo | PASS | `crates/commands/src/notes.rs` тесты, `properties_keep_intervals_and_mixed_values`, ручная проверка |
+| Piano Roll: Ctrl+A/C/X/V/D, Delete, стрелки (транспонирование, сдвиг по сетке) | PASS | ручная проверка (Ctrl+D, ↑) |
+| Velocity нескольких нот: режимы «Relative» и «Same value» | PASS | ручная проверка |
+| Прослушивание клавиш и рисуемых нот (живые ноты, также при остановленном транспорте) | PASS | `live_notes_play_while_stopped_until_note_off`, `live_notes_one_shot_and_gated`; звук под Xvfb не проверялся (нет устройства) |
+| Slice | NOT RUN | следующий этап (по дизайну «Later») |
 
 ## Milestone 1A / 1B
 

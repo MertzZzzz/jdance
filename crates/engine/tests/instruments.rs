@@ -352,3 +352,21 @@ fn instrument_rendering_does_not_allocate() {
     assert_eq!(violations(), 0);
     assert!(count.load(std::sync::atomic::Ordering::Relaxed) > 100);
 }
+
+#[test]
+fn live_notes_play_while_stopped_until_note_off() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let (mut p, ch, pid) = project(&[], Vec::new());
+    p.channel_mut(ch).unwrap().pitch = 2;
+    let (mut h, mut e) = create_engine(SR);
+    h.set_snapshot(compile(&p, pid, Some(synth(&log, 0))))
+        .unwrap();
+    render(&mut e, 512, 512);
+    h.live_note(ch, 60, 0.8).unwrap();
+    let held = render(&mut e, 5_000, 500);
+    assert!(held.iter().all(|v| *v > 0.0), "sounds while stopped");
+    h.live_note_off(ch, 60).unwrap();
+    let after = render(&mut e, 1_000, 500);
+    assert!(after.iter().all(|v| *v == 0.0));
+    assert_eq!(*log.lock().unwrap(), [(512, 62, true), (5_512, 62, false)]);
+}

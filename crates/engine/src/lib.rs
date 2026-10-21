@@ -65,6 +65,17 @@ pub(crate) enum Command {
     /// Plays a sample once on the preview bus (after the master); `None`
     /// stops. Not part of the project or the transport.
     Preview(Option<Arc<jdance_dsp::SampleBuffer>>),
+    /// A held note on a channel outside the sequencer (keyboard, MIDI
+    /// input); sounds while stopped too.
+    LiveNote {
+        channel: jdance_domain::ChannelId,
+        key: u8,
+        velocity: f32,
+    },
+    LiveNoteOff {
+        channel: jdance_domain::ChannelId,
+        key: u8,
+    },
 }
 
 /// Objects handed back to the non-realtime side for destruction.
@@ -166,6 +177,29 @@ impl EngineHandle {
                 .is_none_or(|s| s.sample_rate == self.sample_rate)
         );
         self.send(Command::Preview(sample))
+    }
+
+    /// Starts a held note on `channel` (channel pitch applies); one-shot
+    /// samples play to their end, gated ones until [`Self::live_note_off`].
+    pub fn live_note(
+        &mut self,
+        channel: jdance_domain::ChannelId,
+        key: u8,
+        velocity: f32,
+    ) -> Result<(), EngineError> {
+        self.send(Command::LiveNote {
+            channel,
+            key,
+            velocity: velocity.clamp(0.0, 1.0),
+        })
+    }
+
+    pub fn live_note_off(
+        &mut self,
+        channel: jdance_domain::ChannelId,
+        key: u8,
+    ) -> Result<(), EngineError> {
+        self.send(Command::LiveNoteOff { channel, key })
     }
 
     /// Replaces the playing snapshot. Its sample rate must match the engine.
