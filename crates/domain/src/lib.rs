@@ -13,6 +13,7 @@ mod export;
 mod ids;
 mod meter;
 mod mixer;
+pub mod name_presets;
 mod playlist;
 mod plugin;
 

@@ -17,6 +17,7 @@ mod keys;
 mod lfo_dialog;
 mod library;
 mod mixer;
+mod name_presets_ui;
 mod note_tools_ui;
 mod piano;
 mod piano_dialogs;
@@ -142,6 +143,17 @@ struct RenameDialog {
     default_color: [u8; 3],
     /// The colour wheel opened from the colour square (spec 0.2.5 §6).
     wheel: Option<color_picker::Picker>,
+    /// Pattern names: the preset list (spec 0.2.5 §9).
+    presets: Option<name_presets_ui::PresetList>,
+    /// The colour was chosen by hand: it wins over a preset's (§9 item 5).
+    color_manual: bool,
+    /// Colour of the preset under the pointer, shown on the square.
+    hover_color: Option<[u8; 3]>,
+    /// The pattern was just created at this index: the name and colour
+    /// join its creation in one undo step (§9 item 13).
+    created: Option<usize>,
+    /// First frame: the whole name is selected, so typing replaces it.
+    fresh: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,6 +175,10 @@ pub struct JdanceApp<H: Host, S: ProjectStore> {
     color: Option<ColorWindow>,
     /// The name and colour of what is being dragged (§7, §8).
     dragging: Option<drop_name::Dropped>,
+    /// Pattern name presets and recent names (§9), user settings.
+    presets: jdance_domain::name_presets::NamePresets,
+    /// Options › Pattern name presets is open.
+    show_presets: bool,
     show_mixer: bool,
     show_rack: bool,
     show_playlist: bool,
@@ -271,6 +287,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             .is_none()
             .then(|| SettingsWindow::new(&host));
         let layout = dock::Layout::from_text(&host.ui_layout());
+        let presets = host.pattern_presets();
         Self {
             host,
             store,
@@ -281,6 +298,8 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             rename: None,
             color: None,
             dragging: None,
+            presets,
+            show_presets: false,
             show_mixer: true,
             show_rack: true,
             show_playlist: true,
@@ -756,6 +775,13 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
         if k.link {
             self.route_selected_channels(now);
         }
+        // F4: a new pattern and its name window (spec 0.2.5 §9).
+        if self.rename.is_none()
+            && !ctx.egui_wants_keyboard_input()
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::F4))
+        {
+            self.new_pattern(now);
+        }
         if k.redo {
             self.redo(now);
         } else if k.undo {
@@ -1082,6 +1108,10 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 }
                 if ui.button("Library folders…").clicked() {
                     self.show_library = true;
+                    ui.close();
+                }
+                if ui.button("Pattern name presets…").clicked() {
+                    self.show_presets = true;
                     ui.close();
                 }
                 if ui.button("Recording…").clicked() {
@@ -1926,12 +1956,8 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 Ok(())
             }
             A::AddPattern => {
-                let n = self.project.patterns.len() + 1;
-                add_pattern(&mut self.history, &mut self.project, format!("Pattern {n}")).map(
-                    |id| {
-                        self.current_pattern = id;
-                    },
-                )
+                self.new_pattern(now);
+                Ok(())
             }
             A::DuplicatePattern(id) => match self.project.pattern(id).cloned() {
                 Some(src) => {
@@ -2342,15 +2368,12 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             .response
             .on_hover_text("Pattern edited in the channel rack; new clips use it");
         self.current_pattern = selected;
-        if ui.small_button("+").on_hover_text("New pattern").clicked() {
-            let name = format!("Pattern {}", self.project.patterns.len() + 1);
-            match add_pattern(&mut self.history, &mut self.project, name) {
-                Ok(id) => {
-                    self.current_pattern = id;
-                    self.sync_needed = true;
-                }
-                Err(e) => self.notify(Notice::error(e.to_string()), now),
-            }
+        if ui
+            .small_button("+")
+            .on_hover_text("New pattern (F4)")
+            .clicked()
+        {
+            self.new_pattern(now);
         }
         if ui.small_button("Rename").clicked() {
             self.start_rename(RenameTarget::Pattern(self.current_pattern));
@@ -2467,6 +2490,16 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 color,
                 default_color,
                 wheel: None,
+                presets: matches!(target, RenameTarget::Pattern(_)).then(|| {
+                    name_presets_ui::PresetList {
+                        open: true,
+                        selected: None,
+                    }
+                }),
+                color_manual: false,
+                hover_color: None,
+                created: None,
+                fresh: true,
             });
         }
     }
@@ -3008,18 +3041,59 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             ui.heading(title);
             ui.add_space(4.0);
             ui.label(egui::RichText::new("Name").color(theme::MUTED));
-            let r =
-                ui.add(egui::TextEdit::singleline(&mut dialog.text).desired_width(f32::INFINITY));
+            let mut picked = None;
+            if let Some(list) = &mut dialog.presets {
+                picked = name_presets_ui::keys(ui, &self.presets, &dialog.text, list).picked;
+            }
+            let mut field = egui::TextEdit::singleline(&mut dialog.text)
+                .desired_width(f32::INFINITY)
+                .show(ui);
+            if std::mem::take(&mut dialog.fresh) {
+                let all = egui::text::CCursorRange::two(
+                    egui::text::CCursor::new(0),
+                    egui::text::CCursor::new(dialog.text.chars().count()),
+                );
+                field.state.cursor.set_char_range(Some(all));
+                field.state.store(ui.ctx(), field.response.id);
+            }
+            let r = field.response;
             if dialog.wheel.is_none() {
                 r.request_focus();
             }
-            if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+            if r.changed()
+                && let Some(list) = &mut dialog.presets
+            {
+                list.open = true;
+                list.selected = None;
+            }
+            // Enter confirms (a highlighted preset took it above). The
+            // field asks for focus every frame, so its own focus loss on
+            // Enter cannot be relied on.
+            if dialog.wheel.is_none() && ui.input(|i| i.key_pressed(Key::Enter)) {
                 commit = true;
             }
+            dialog.hover_color = None;
+            if let Some(list) = &mut dialog.presets {
+                let out = name_presets_ui::show(ui, &self.presets, &dialog.text, list);
+                dialog.hover_color = out.hover;
+                picked = picked.or(out.picked);
+            }
+            if let Some((name, c)) = picked {
+                // A preset sets name and colour and confirms (§9 item 4).
+                dialog.text = name;
+                if let (Some(slot), Some(c)) = (&mut dialog.color, c) {
+                    *slot = Some(c);
+                    dialog.color_manual = true;
+                }
+                commit = true;
+            }
+            let color_before = dialog.color;
             if let Some(color) = &mut dialog.color {
                 ui.add_space(4.0);
                 ui.label(egui::RichText::new("Color").color(theme::MUTED));
-                let current = color.unwrap_or(dialog.default_color);
+                let current = dialog
+                    .hover_color
+                    .unwrap_or_else(|| color.unwrap_or(dialog.default_color));
                 ui.horizontal_wrapped(|ui| {
                     for c in jdance_domain::PALETTE {
                         let (rect, resp) =
@@ -3117,13 +3191,36 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 cancel |= ui.button("Cancel").clicked();
                 commit |= ui.button("Apply").clicked();
             });
-            // Esc with the wheel open closes the wheel only.
-            cancel |= ui.input(|i| i.key_pressed(Key::Escape)) && !wheel_open;
+            if dialog.color != color_before && !commit {
+                dialog.color_manual = true;
+            }
+            // Esc with the wheel open closes the wheel only; with the
+            // preset list open, the list first (§9 item 3).
+            if ui.input(|i| i.key_pressed(Key::Escape)) && !wheel_open {
+                match &mut dialog.presets {
+                    Some(list) if list.open => list.open = false,
+                    _ => cancel = true,
+                }
+            }
         });
         if commit {
             let name = dialog.text.trim().to_owned();
-            let (target, color) = (dialog.target, dialog.color.flatten());
+            let (target, mut color) = (dialog.target, dialog.color.flatten());
+            let (manual, created) = (dialog.color_manual, dialog.created);
             self.rename = None;
+            if let RenameTarget::Pattern(id) = target {
+                // A typed preset name brings its colour unless one was
+                // chosen by hand (§9 item 5); typed names are remembered.
+                if !manual && let Some(c) = self.presets.color_of(&name) {
+                    color = Some(c);
+                }
+                self.presets.note_recent(&name);
+                self.host.set_pattern_presets(self.presets.clone());
+                if let Some(index) = created {
+                    self.recreate_pattern(id, index, &name, color, now);
+                    return;
+                }
+            }
             let mut edits = Vec::new();
             if !name.is_empty() {
                 edits.push(match target {
@@ -3157,6 +3254,79 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             }
         } else if cancel {
             self.rename = None;
+        }
+    }
+
+    /// Folds a new pattern's name and colour into its creation: one undo
+    /// step (spec 0.2.5 §9 item 13).
+    fn recreate_pattern(
+        &mut self,
+        id: PatternId,
+        index: usize,
+        name: &str,
+        color: Option<[u8; 3]>,
+        now: f64,
+    ) {
+        let Some(mut pattern) = self.project.pattern(id).cloned() else {
+            return;
+        };
+        if self.history.undo(&mut self.project).is_err() {
+            return;
+        }
+        if !name.is_empty() {
+            pattern.name = jdance_domain::color::clip_name(name);
+        }
+        pattern.color = color.or(pattern.color);
+        self.apply(Edit::AddPattern { pattern, index }, false, now);
+        self.current_pattern = id;
+    }
+
+    /// Options › Pattern name presets: changes apply at once (§9 item 11).
+    fn presets_window(&mut self, ctx: &egui::Context) {
+        if !self.show_presets {
+            return;
+        }
+        let mut open = true;
+        let mut random = self.layout.random_pattern_colors;
+        let mut changed = false;
+        egui::Window::new("Pattern name presets")
+            .id(egui::Id::unique("presets_window"))
+            .open(&mut open)
+            .show(ctx, |ui| {
+                changed = name_presets_ui::editor(ui, &mut self.presets, &mut random);
+            });
+        if random != self.layout.random_pattern_colors {
+            self.layout.random_pattern_colors = random;
+            self.layout.changed = true;
+        }
+        if changed {
+            self.host.set_pattern_presets(self.presets.clone());
+        }
+        self.show_presets = open;
+    }
+
+    /// A new empty pattern and its name window (spec 0.2.5 §9): "Pattern
+    /// N" with the first free N, selected; Esc keeps the pattern as is.
+    fn new_pattern(&mut self, now: f64) {
+        let name = jdance_domain::name_presets::first_free_pattern_name(
+            self.project.patterns.iter().map(|p| p.name.as_str()),
+        );
+        match add_pattern(&mut self.history, &mut self.project, name) {
+            Ok(id) => {
+                self.current_pattern = id;
+                self.sync_needed = true;
+                self.start_rename(RenameTarget::Pattern(id));
+                let random = self.layout.random_pattern_colors;
+                if let Some(d) = &mut self.rename {
+                    d.created = self.project.patterns.iter().position(|p| p.id == id);
+                    if random {
+                        let seed = (now * 1000.0) as u64 ^ id.0;
+                        d.color = Some(Some(jdance_domain::color::random_safe(seed)));
+                        d.color_manual = true;
+                    }
+                }
+            }
+            Err(e) => self.notify(Notice::error(e.to_string()), now),
         }
     }
 
@@ -3778,6 +3948,7 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
         }
         self.rename_dialog(&ctx, now);
         self.color_window(&ctx, now);
+        self.presets_window(&ctx);
         self.delete_channels_dialog(&ctx, now);
         self.length_dialog(&ctx, now);
         self.export_dialog(&ctx);
@@ -4053,5 +4224,75 @@ mod drop_tests {
         let l = app.project.playlist.lane(lane).unwrap();
         assert_eq!((l.name.as_str(), l.color), ("clap", colour));
         assert!(app.project.playlist.clips.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod preset_tests {
+    use super::*;
+    use crate::test_ui::{Driver, NoStore, StubHost};
+    use egui::Event;
+
+    fn key(k: Key) -> Event {
+        Event::Key {
+            key: k,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    /// Creates a pattern, then sends `events` to its name window, one
+    /// list per frame.
+    fn create(events: Vec<Vec<Event>>) -> JdanceApp<StubHost, NoStore> {
+        let mut app = JdanceApp::new(StubHost::default(), NoStore, Project::new(), None);
+        app.new_pattern(0.0);
+        assert_eq!(app.rename.as_ref().unwrap().text, "Pattern 2");
+        let mut d = Driver::new();
+        let mut ui = |ui: &mut egui::Ui| app.rename_dialog(ui.ctx(), 0.0);
+        // The modal's sizing pass, then the field takes focus.
+        d.frame(vec![], &mut ui);
+        d.frame(vec![], &mut ui);
+        for e in events {
+            d.frame(e, &mut ui);
+        }
+        d.frame(vec![], &mut ui);
+        drop(ui);
+        app
+    }
+
+    #[test]
+    fn a_preset_names_and_colours_the_new_pattern_in_one_step() {
+        let n = Project::new().patterns.len();
+        let mut app = create(vec![
+            vec![Event::Text("ki".into())],
+            vec![key(Key::ArrowDown)],
+            vec![key(Key::Enter)],
+        ]);
+        assert!(app.rename.is_none(), "confirmed");
+        let p = app.project.patterns.last().unwrap();
+        assert_eq!(p.name, "Kick");
+        assert_eq!(p.color, app.presets.color_of("Kick"));
+        // One undo removes the pattern with its name and colour.
+        app.history.undo(&mut app.project).unwrap();
+        assert_eq!(app.project.patterns.len(), n);
+    }
+
+    #[test]
+    fn a_typed_preset_name_brings_its_colour_and_esc_keeps_the_pattern() {
+        let app = create(vec![
+            vec![Event::Text("kick".into())],
+            vec![key(Key::Enter)],
+        ]);
+        let p = app.project.patterns.last().unwrap();
+        assert_eq!(
+            (p.name.as_str(), p.color),
+            ("kick", app.presets.color_of("Kick"))
+        );
+        // Esc twice: the list, then the window; the pattern stays.
+        let app = create(vec![vec![key(Key::Escape)], vec![key(Key::Escape)]]);
+        assert!(app.rename.is_none());
+        assert_eq!(app.project.patterns.last().unwrap().name, "Pattern 2");
     }
 }

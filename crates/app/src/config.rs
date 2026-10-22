@@ -67,6 +67,10 @@ pub struct UserSettings {
     /// Favorite Browser folders.
     #[serde(default)]
     pub favorite_folders: Vec<PathBuf>,
+    /// Pattern name presets and recent names (spec 0.2.5 §9); absent =
+    /// the factory set, which an update never writes over the user's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pattern_presets: Option<jdance_domain::name_presets::NamePresets>,
     /// Undocked panels and their windows (`dock` text format of the UI).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub ui_layout: String,

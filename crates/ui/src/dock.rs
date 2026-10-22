@@ -90,6 +90,8 @@ pub(crate) struct Layout {
     pub colors: Vec<[u8; 3]>,
     pub color_snap_off: bool,
     pub color_safe_off: bool,
+    /// New patterns get a random safe colour (spec 0.2.5 §9 item 8).
+    pub random_pattern_colors: bool,
     /// Global keys pressed in the undocked windows (KEY-001); the main
     /// window handles them.
     pub keys: crate::keys::GlobalKeys,
@@ -153,6 +155,9 @@ impl Layout {
         if self.color_safe_off {
             text.push_str("color safe off\n");
         }
+        if self.random_pattern_colors {
+            text.push_str("pattern colors random\n");
+        }
         text
     }
 
@@ -163,6 +168,7 @@ impl Layout {
         let mut zoom_to_mouse = false;
         let mut colors = Vec::new();
         let (mut color_snap_off, mut color_safe_off) = (false, false);
+        let mut random_pattern_colors = false;
         for line in text.lines() {
             let f: Vec<&str> = line.split_whitespace().collect();
             if f[..] == ["follow", "off"] {
@@ -188,6 +194,10 @@ impl Layout {
                 }
                 ["color", "safe", "off"] => {
                     color_safe_off = true;
+                    continue;
+                }
+                ["pattern", "colors", "random"] => {
+                    random_pattern_colors = true;
                     continue;
                 }
                 _ => {}
@@ -219,6 +229,7 @@ impl Layout {
             colors,
             color_snap_off,
             color_safe_off,
+            random_pattern_colors,
             keys: Default::default(),
             changed: false,
         }

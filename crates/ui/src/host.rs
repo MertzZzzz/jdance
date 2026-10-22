@@ -638,5 +638,11 @@ pub trait Host {
         String::new()
     }
     fn set_ui_layout(&mut self, _layout: String) {}
+    /// Name presets for patterns (spec 0.2.5 §9), from the user settings;
+    /// the factory set until the user changes it.
+    fn pattern_presets(&self) -> jdance_domain::name_presets::NamePresets {
+        jdance_domain::name_presets::NamePresets::factory_patterns()
+    }
+    fn set_pattern_presets(&mut self, _presets: jdance_domain::name_presets::NamePresets) {}
     fn take_notices(&mut self) -> Vec<Notice>;
 }

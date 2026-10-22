@@ -1638,6 +1638,17 @@ impl Host for AudioHost {
         self.scripts.done.clear();
     }
 
+    fn pattern_presets(&self) -> jdance_domain::name_presets::NamePresets {
+        self.settings.pattern_presets.clone().unwrap_or_default()
+    }
+
+    fn set_pattern_presets(&mut self, presets: jdance_domain::name_presets::NamePresets) {
+        if self.settings.pattern_presets.as_ref() != Some(&presets) {
+            self.settings.pattern_presets = Some(presets);
+            self.save_settings();
+        }
+    }
+
     fn ui_layout(&self) -> String {
         self.settings.ui_layout.clone()
     }
