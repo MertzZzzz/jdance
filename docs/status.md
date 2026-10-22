@@ -446,4 +446,4 @@ headless-тесты egui и приложение под Xvfb (длинные и�
 | VST3 с моно- и многовыходными шинами | PASS | `plugin-vst3` тесты `a_multi_output_instrument_that_refuses_stereo_everywhere_opens`, `a_mono_effect_takes_the_mix_and_feeds_both_sides` (тестовые классы JD Test Drums, JD Test Mono); Addictive Drums не проверялся — плагина нет в среде |
 | Wet/Dry у каждого эффекта | PASS | `engine` тесты `wet_dry_mixes_the_effect_with_the_dry_signal`, `an_insert_at_zero_wet_renders_like_no_insert`; `commands` тест слияния; формат 16 с круговым тестом |
 | Stop останавливает любой звук, кроме мониторинга | PASS | `engine` тесты `stop_ends_the_preview`, `stop_does_not_interrupt_monitoring`, `stop_silences_an_instrument_tail_until_the_next_note`, `a_plugin_effect_is_heard_again_after_stop_and_play` |
-| Windows MSI 0.2.6 | — | сборка в workflow `Release` после слияния |
+| Windows MSI 0.2.6 | PASS | сборка, установка, проверка версии в workflow `Release`; https://github.com/MertzZzzz/jdance/releases/tag/v0.2.6 |
