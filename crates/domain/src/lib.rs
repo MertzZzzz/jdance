@@ -177,6 +177,41 @@ impl Project {
         Some((a as f64 / fpt, b as f64 / fpt))
     }
 
+    /// Whether any clip on `lane` other than `except` overlaps the tick
+    /// range `[from, to)`; `to = None` means "to the end of time".
+    pub fn lane_busy(
+        &self,
+        lane: LaneId,
+        from: u64,
+        to: Option<u64>,
+        except: Option<ClipId>,
+    ) -> bool {
+        let hits = |(a, b): (f64, f64)| b > from as f64 && to.is_none_or(|t| a < t as f64);
+        let pl = &self.playlist;
+        let other = |id: ClipId| Some(id) != except;
+        pl.clips
+            .iter()
+            .filter(|c| c.lane == lane && other(c.id))
+            .any(|c| {
+                let (a, b) = c.interval();
+                hits((a as f64, b as f64))
+            })
+            || pl
+                .automation_clips
+                .iter()
+                .filter(|c| c.lane == lane && other(c.id))
+                .any(|c| {
+                    let (a, b) = c.interval();
+                    hits((a as f64, b as f64))
+                })
+            || pl
+                .audio_clips
+                .iter()
+                .filter(|c| c.lane == lane && other(c.id))
+                .filter_map(|c| self.audio_clip_ticks(c))
+                .any(hits)
+    }
+
     /// Right edge of the arrangement in ticks: pattern and audio clips.
     pub fn arrangement_end_ticks(&self) -> u64 {
         let audio = self

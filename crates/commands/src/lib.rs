@@ -20,10 +20,10 @@ pub use playlist::{
 use jdance_domain::{
     AssetId, AudioAsset, AudioClip, AutoPoint, AutomationClip, AutomationId, AutomationLane,
     AutomationTarget, Channel, ChannelId, ClipId, Curve, Effect, InsertId, Lane, LaneId,
-    LimiterSettings, MAX_CHANNEL_PITCH, MAX_CHANNELS, MAX_NOTES_PER_ROW, MAX_POLYPHONY,
-    MAX_TEMPO_BPM, MAX_VOLUME, MIN_TEMPO_BPM, Mixer, MixerTrack, Note, Pattern, PatternClip,
-    PatternId, Playlist, Project, RoutingError, SampleRef, SamplerSettings, SendId, Sidechain,
-    Step, StepRow, TrackId, sort_notes, sort_points,
+    LimiterSettings, MAX_CHANNEL_PITCH, MAX_CHANNELS, MAX_NOTES_PER_ROW, MAX_PATTERN_STEPS,
+    MAX_POLYPHONY, MAX_TEMPO_BPM, MAX_VOLUME, MIN_TEMPO_BPM, Mixer, MixerTrack, Note, Pattern,
+    PatternClip, PatternId, Playlist, Project, RoutingError, SampleRef, SamplerSettings, SendId,
+    Sidechain, Step, StepRow, TrackId, sort_notes, sort_points,
 };
 use thiserror::Error;
 
@@ -73,6 +73,16 @@ pub enum Edit {
         pattern: PatternId,
         channel: ChannelId,
         notes: Vec<Note>,
+    },
+    /// Inverse of [`Edit::SetNotes`]: the notes of a row together with the
+    /// pattern length and the durations of the pattern's clips, which
+    /// SetNotes may have grown (spec 0.2.3 PAT-001/005).
+    RestoreNotes {
+        pattern: PatternId,
+        channel: ChannelId,
+        notes: Vec<Note>,
+        length_steps: u32,
+        clips: Vec<(ClipId, u64)>,
     },
     /// Inserts `channel` at `index` (clamped) and restores its step rows.
     AddChannel {
@@ -257,7 +267,7 @@ impl Edit {
             Edit::SetTimeSignature(_) => "Change time signature",
             Edit::SetRecordTo(_) => "Change recording track",
             Edit::SetStep { .. } => "Edit step",
-            Edit::SetNotes { .. } => "Edit notes",
+            Edit::SetNotes { .. } | Edit::RestoreNotes { .. } => "Edit notes",
             Edit::AddChannel { .. } => "Add channel",
             Edit::RemoveChannel(_) => "Remove channel",
             Edit::SetChannelVolume(..) => "Change channel volume",
@@ -453,16 +463,60 @@ impl Edit {
                     n.validate().map_err(EditError::Arrangement)?;
                 }
                 let pat = p
-                    .pattern_mut(*pattern)
+                    .pattern(*pattern)
                     .ok_or(EditError::NoSuchPattern(*pattern))?;
+                // The inverse always carries the length and the clips: a
+                // merged drag keeps only its first inverse (PAT-002).
+                let inverse_len = pat.length_steps;
+                let clips = pattern_clip_durations(p, *pattern);
                 let mut sorted = notes.clone();
                 jdance_domain::assign_note_ids(&mut sorted);
                 sort_notes(&mut sorted);
+                let end = sorted.iter().map(Note::end).max().unwrap_or(0);
+                let pat = p.pattern_mut(*pattern).expect("checked above");
                 let old = std::mem::replace(&mut pat.row_mut(*channel).notes, sorted);
-                Ok(Edit::SetNotes {
+                grow_pattern_to(p, *pattern, end);
+                Ok(Edit::RestoreNotes {
                     pattern: *pattern,
                     channel: *channel,
                     notes: old,
+                    length_steps: inverse_len,
+                    clips,
+                })
+            }
+            Edit::RestoreNotes {
+                pattern,
+                channel,
+                notes,
+                length_steps,
+                clips,
+            } => {
+                if p.channel(*channel).is_none() {
+                    return Err(EditError::NoSuchChannel(*channel));
+                }
+                if *length_steps == 0 || *length_steps > MAX_PATTERN_STEPS {
+                    return Err(EditError::OutOfRange(f64::from(*length_steps)));
+                }
+                let current = pattern_clip_durations(p, *pattern);
+                let pat = p
+                    .pattern_mut(*pattern)
+                    .ok_or(EditError::NoSuchPattern(*pattern))?;
+                let old_len = std::mem::replace(&mut pat.length_steps, *length_steps);
+                for row in &mut pat.rows {
+                    row.steps.resize(*length_steps as usize, Step::default());
+                }
+                let old = std::mem::replace(&mut pat.row_mut(*channel).notes, notes.clone());
+                for (id, d) in clips {
+                    if let Some(c) = p.playlist.clip_mut(*id) {
+                        c.duration = *d;
+                    }
+                }
+                Ok(Edit::RestoreNotes {
+                    pattern: *pattern,
+                    channel: *channel,
+                    notes: old,
+                    length_steps: old_len,
+                    clips: current,
                 })
             }
             Edit::AddChannel {
@@ -676,6 +730,63 @@ impl Edit {
             | Edit::RestoreArrangement { .. } => playlist::apply(self, p),
             other => mixer::apply(other, p),
         }
+    }
+}
+
+/// Durations of the Playlist clips of `pattern`.
+fn pattern_clip_durations(p: &Project, pattern: PatternId) -> Vec<(ClipId, u64)> {
+    p.playlist
+        .clips
+        .iter()
+        .filter(|c| c.pattern == pattern)
+        .map(|c| (c.id, c.duration))
+        .collect()
+}
+
+/// Grows `pattern` to the bar covering `end` ticks, within
+/// [`MAX_PATTERN_STEPS`] (PAT-001/004). Clips that showed the whole old
+/// pattern once grow with it when the lane is free on the right (PAT-005).
+/// Never shrinks.
+fn grow_pattern_to(p: &mut Project, pattern: PatternId, end: u32) {
+    let sig = p.time_signature;
+    let Some(pat) = p.pattern(pattern) else {
+        return;
+    };
+    let old = pat.length_steps;
+    let want = sig
+        .ceil_steps_to_bar(end.div_ceil(jdance_domain::TICKS_PER_STEP))
+        .min(MAX_PATTERN_STEPS);
+    if want <= old {
+        return;
+    }
+    let (old_ticks, new_ticks) = (
+        u64::from(old) * u64::from(jdance_domain::TICKS_PER_STEP),
+        u64::from(want) * u64::from(jdance_domain::TICKS_PER_STEP),
+    );
+    let grown: Vec<ClipId> = p
+        .playlist
+        .clips
+        .iter()
+        .filter(|c| c.pattern == pattern && c.offset == 0 && c.duration == old_ticks)
+        .filter(|c| {
+            !p.lane_busy(
+                c.lane,
+                c.start + old_ticks,
+                Some(c.start + new_ticks),
+                Some(c.id),
+            )
+        })
+        .map(|c| c.id)
+        .collect();
+    for id in grown {
+        if let Some(c) = p.playlist.clip_mut(id) {
+            c.duration = new_ticks;
+        }
+    }
+    let pat = p.pattern_mut(pattern).expect("checked above");
+    pat.length_steps = want;
+    for row in &mut pat.rows {
+        row.steps.resize(want as usize, Step::default());
     }
 }
 
@@ -1046,6 +1157,130 @@ mod tests {
             key,
             velocity: 0.8,
         }
+    }
+
+    fn place(p: &mut Project, h: &mut History, pat: PatternId, lane: usize, start: u64) -> ClipId {
+        let lane = p.playlist.lanes[lane].id;
+        crate::add_clip(h, p, lane, pat, start).unwrap()
+    }
+
+    #[test]
+    fn a_note_past_the_end_grows_the_pattern_to_the_bar() {
+        let (mut p, mut h, ch, pat) = setup();
+        let set = |notes| Edit::SetNotes {
+            pattern: pat,
+            channel: ch,
+            notes,
+        };
+        // 4/4: a note on step 17 needs two bars.
+        h.execute(&mut p, set(vec![note(17 * 240, 60)])).unwrap();
+        let pattern = p.pattern(pat).unwrap();
+        assert_eq!(pattern.length_steps, 32);
+        assert!(pattern.rows.iter().all(|r| r.steps.len() == 32));
+        // One undo step restores the note and the length.
+        h.undo(&mut p).unwrap();
+        assert_eq!(p.pattern(pat).unwrap().length_steps, 16);
+        assert!(p.pattern(pat).unwrap().row(ch).unwrap().notes.is_empty());
+        h.redo(&mut p).unwrap();
+        assert_eq!(p.pattern(pat).unwrap().length_steps, 32);
+        // Removing the note does not shrink the pattern (PAT-003).
+        h.execute(&mut p, set(Vec::new())).unwrap();
+        assert_eq!(p.pattern(pat).unwrap().length_steps, 32);
+
+        // 3/4: bars of 12 steps; a note ending on step 13 needs 24.
+        h.execute(
+            &mut p,
+            Edit::SetTimeSignature(jdance_domain::TimeSignature::new(3, 4)),
+        )
+        .unwrap();
+        let id = crate::add_pattern(&mut h, &mut p, "B").unwrap();
+        h.execute(
+            &mut p,
+            Edit::SetNotes {
+                pattern: id,
+                channel: ch,
+                notes: vec![note(12 * 240, 60)],
+            },
+        )
+        .unwrap();
+        assert_eq!(p.pattern(id).unwrap().length_steps, 24);
+    }
+
+    #[test]
+    fn a_drag_that_grows_late_still_undoes_the_length() {
+        let (mut p, mut h, ch, pat) = setup();
+        let set = |start| Edit::SetNotes {
+            pattern: pat,
+            channel: ch,
+            notes: vec![note(start, 60)],
+        };
+        h.execute_merging(&mut p, set(0)).unwrap();
+        h.execute_merging(&mut p, set(240)).unwrap();
+        h.execute_merging(&mut p, set(20 * 240)).unwrap();
+        h.end_gesture();
+        assert_eq!(p.pattern(pat).unwrap().length_steps, 32);
+        h.undo(&mut p).unwrap();
+        let pattern = p.pattern(pat).unwrap();
+        assert_eq!(pattern.length_steps, 16);
+        assert!(pattern.row(ch).unwrap().notes.is_empty());
+    }
+
+    #[test]
+    fn growth_stops_at_the_limit() {
+        let (mut p, mut h, ch, pat) = setup();
+        let mut long = note(MAX_PATTERN_STEPS * 240 - 240, 60);
+        long.length = 4 * 240;
+        h.execute(
+            &mut p,
+            Edit::SetNotes {
+                pattern: pat,
+                channel: ch,
+                notes: vec![long],
+            },
+        )
+        .unwrap();
+        assert_eq!(p.pattern(pat).unwrap().length_steps, MAX_PATTERN_STEPS);
+    }
+
+    #[test]
+    fn single_pass_clips_grow_with_the_pattern_when_there_is_room() {
+        let (mut p, mut h, ch, pat) = setup();
+        let bar = 3840;
+        let free = place(&mut p, &mut h, pat, 0, 0);
+        // Another pattern's clip right after this one blocks growth.
+        let blocked = place(&mut p, &mut h, pat, 1, 0);
+        let other = crate::add_pattern(&mut h, &mut p, "B").unwrap();
+        place(&mut p, &mut h, other, 1, bar);
+        // Two repetitions: unchanged, it repeats the new length.
+        let twice = place(&mut p, &mut h, pat, 2, 0);
+        h.execute(
+            &mut p,
+            Edit::SetClipShape {
+                id: twice,
+                start: 0,
+                offset: 0,
+                duration: 2 * bar,
+                looped: true,
+            },
+        )
+        .unwrap();
+        h.execute(
+            &mut p,
+            Edit::SetNotes {
+                pattern: pat,
+                channel: ch,
+                notes: vec![note(bar as u32 + 240, 60)],
+            },
+        )
+        .unwrap();
+        let dur = |p: &Project, id| p.playlist.clip(id).unwrap().duration;
+        assert_eq!(dur(&p, free), 2 * bar);
+        assert_eq!(dur(&p, blocked), bar);
+        assert_eq!(dur(&p, twice), 2 * bar);
+        p.validate_arrangement().unwrap();
+        h.undo(&mut p).unwrap();
+        assert_eq!(dur(&p, free), bar, "one undo step for clips too");
+        p.validate_arrangement().unwrap();
     }
 
     #[test]

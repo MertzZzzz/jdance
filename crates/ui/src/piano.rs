@@ -22,8 +22,8 @@ use egui::{
 use jdance_commands::Edit;
 use jdance_commands::notes::{self, Scale, ScaleMode};
 use jdance_domain::{
-    ChannelId, ChannelSource, MAX_NOTES_PER_ROW, Note, Pattern, PatternId, Project, TICKS_PER_STEP,
-    TimeSignature,
+    ChannelId, ChannelSource, MAX_NOTES_PER_ROW, MAX_PATTERN_STEPS, Note, Pattern, PatternId,
+    Project, TICKS_PER_STEP, TimeSignature,
 };
 
 const KEYS: u8 = 128;
@@ -387,6 +387,17 @@ impl PianoRoll {
                 })
                 .response
                 .on_hover_text("Pattern");
+            let bars = pattern.length_steps.div_ceil(self.sig.steps_per_bar());
+            if pattern.length_steps >= MAX_PATTERN_STEPS {
+                // PAT-004: the pattern stops growing here.
+                ui.label(RichText::new(format!("{bars} bars · limit")).color(theme::WARN))
+                    .on_hover_text(
+                        "Patterns are at most 256 steps; notes past the end are not added",
+                    );
+            } else {
+                ui.label(RichText::new(format!("{bars} bar(s)")).color(theme::MUTED))
+                    .on_hover_text("Grows when a note is placed past the end");
+            }
             let label = |c: &jdance_domain::Channel| {
                 let kind = match &c.source {
                     ChannelSource::Sampler { .. } => "Sampler",
@@ -586,7 +597,8 @@ impl PianoRoll {
             .max()
             .unwrap_or(0)
             .max(pattern_end)
-            + project.time_signature.bar_ticks();
+            .saturating_add(project.time_signature.bar_ticks())
+            .min(MAX_PATTERN_STEPS * TICKS_PER_STEP);
         let grid_w = content_end as f32 * px_tick;
         let grid_h = f32::from(KEYS) * key_h + RULER_H;
 
@@ -656,16 +668,17 @@ impl PianoRoll {
                     Stroke::new(w, c),
                 );
             }
-            // Beyond the pattern end: dimmed (notes there do not play).
+            // Beyond the pattern end: lightly shaded; a note placed there
+            // grows the pattern to the next bar (PAT-001).
             let end_x = x_of(pattern_end);
             painter.rect_filled(
                 Rect::from_min_max(pos2(end_x, grid.top()), grid.max),
                 CornerRadius::ZERO,
-                Color32::from_black_alpha(110),
+                Color32::from_black_alpha(45),
             );
             painter.line_segment(
                 [pos2(end_x, grid.top()), pos2(end_x, grid.bottom())],
-                Stroke::new(2.0, theme::WARN),
+                Stroke::new(1.5, theme::AMBER),
             );
 
             // Notes (visible ones only).
