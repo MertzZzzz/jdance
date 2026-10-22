@@ -1006,6 +1006,17 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                     self.layout.no_follow = !follow;
                     self.layout.changed = true;
                 }
+                let mut to_mouse = self.layout.zoom_to_mouse;
+                if ui
+                    .checkbox(&mut to_mouse, "Zoom to mouse")
+                    .on_hover_text(
+                        "Playlist zoom keeps the point under the mouse in place; off: the caret",
+                    )
+                    .changed()
+                {
+                    self.layout.zoom_to_mouse = to_mouse;
+                    self.layout.changed = true;
+                }
                 ui.separator();
                 ui.menu_button("Own windows", |ui| {
                     for p in dock::Panel::ALL {
@@ -3280,6 +3291,7 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
                         .filter(|_| self.song_mode && transport.playing);
                     self.playlist_view.caret = self.song_mode.then_some(self.caret);
                     self.playlist_view.follow = !self.layout.no_follow;
+                    self.playlist_view.zoom_to_mouse = self.layout.zoom_to_mouse;
                     let dir = self.path.as_deref().and_then(Path::parent);
                     ui.horizontal_top(|ui| {
                         if self.show_project_browser && browser_docked {

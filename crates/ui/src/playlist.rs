@@ -149,11 +149,42 @@ pub(crate) struct PlaylistView {
     pub live: Option<LiveTake>,
     /// Scroll just enough to show this tick (new copies, spec 0.2.5 §1).
     pub reveal: Option<u64>,
+    /// Zoom keeps the mouse rather than the caret in place (§2).
+    pub zoom_to_mouse: bool,
+    /// The clip area as of the last frame.
+    view: Option<View>,
+    /// Zoom before Shift+4 went to the widest view.
+    zoom_back: Option<f32>,
+
     /// Keep the playhead in view while playing (REC-017).
     pub follow: bool,
     /// The user scrolled or zoomed away; following waits until the
     /// playhead is visible again.
     follow_paused: bool,
+}
+
+/// Zoom range in pixels per whole note.
+const MIN_ZOOM: f32 = 30.0;
+const MAX_ZOOM: f32 = 480.0;
+/// Page Up / Page Down zoom factor.
+const ZOOM_STEP: f32 = 1.25;
+
+/// The visible clip area of the last frame.
+#[derive(Debug, Clone, Copy)]
+struct View {
+    /// Horizontal scroll offset in pixels.
+    offset: f32,
+    width: f32,
+    /// Screen x of the visible area's left edge.
+    left: f32,
+    rect: Rect,
+}
+
+/// Left edge, in ticks, after zooming from `z` to `z2` pixels per tick so
+/// tick `t` keeps its place on screen; never before 0 (spec 0.2.5 §2:
+/// L' = T − (T − L)·z/z').
+fn zoom_left(left: f32, z: f32, z2: f32, t: f32) -> f32 {
+    (t - (t - left) * z / z2).max(0.0)
 }
 
 /// The take being recorded (spec 0.2.3 REC-014). Not a project object.
@@ -186,6 +217,9 @@ impl Default for PlaylistView {
             ruler: crate::ruler::Ruler::default(),
             live: None,
             reveal: None,
+            zoom_to_mouse: false,
+            view: None,
+            zoom_back: None,
             follow: true,
             follow_paused: false,
         }
@@ -427,6 +461,102 @@ impl PlaylistView {
         }
     }
 
+    /// Zoom keys and the mouse wheel over the clips (spec 0.2.5 §2):
+    /// Ctrl+wheel, Page Up / Page Down, Shift+1…3 levels, Shift+4 the
+    /// widest view and back. Shift+5 fits the time selection; returns its
+    /// start then.
+    fn zoom_input(&mut self, ui: &egui::Ui, project: &Project) -> Option<u64> {
+        let ctx = ui.ctx();
+        let over = self
+            .view
+            .zip(ctx.pointer_latest_pos())
+            .is_some_and(|(v, p)| v.rect.contains(p));
+        if over {
+            let f = ctx.input(|i| i.zoom_delta());
+            if f != 1.0 {
+                self.zoom *= f;
+            }
+        }
+        if ctx.egui_wants_keyboard_input() {
+            self.zoom = self.zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+            return None;
+        }
+        let shift = |k| ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, k));
+        let plain = |k| ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, k));
+        let mut fit = None;
+        if plain(egui::Key::PageUp) {
+            self.zoom *= ZOOM_STEP;
+        }
+        if plain(egui::Key::PageDown) {
+            self.zoom /= ZOOM_STEP;
+        }
+        for (k, z) in [
+            (egui::Key::Num1, 60.0),
+            (egui::Key::Num2, 120.0),
+            (egui::Key::Num3, 240.0),
+        ] {
+            if shift(k) {
+                self.zoom = z;
+            }
+        }
+        if shift(egui::Key::Num4) {
+            match self.zoom_back.take() {
+                Some(z) if self.zoom <= MIN_ZOOM => self.zoom = z,
+                _ => {
+                    self.zoom_back = Some(self.zoom);
+                    self.zoom = MIN_ZOOM;
+                }
+            }
+        }
+        if shift(egui::Key::Num5)
+            && let Some((a, b)) = project.playlist.loop_range.filter(|(a, b)| b > a)
+            && let Some(v) = self.view
+        {
+            // The selection fills the view.
+            self.zoom = v.width / (b - a) as f32 * WHOLE_NOTE as f32;
+            fit = Some(a);
+        }
+        self.zoom = self.zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+        fit
+    }
+
+    /// The scroll offset that keeps the anchor in place after the zoom
+    /// changed from `before` (spec 0.2.5 §2): the caret (or playhead) when
+    /// it is in view, else the point under the mouse, else the centre;
+    /// with Zoom to mouse the mouse first. `fit` is a tick to put at the
+    /// left edge instead.
+    fn zoom_offset(
+        &self,
+        before: f32,
+        caret: Option<u64>,
+        fit: Option<u64>,
+        pointer: Option<Pos2>,
+    ) -> Option<f32> {
+        let v = self.view?;
+        let z = before / WHOLE_NOTE as f32;
+        let z2 = self.px_per_tick();
+        if let Some(a) = fit {
+            return Some(a as f32 * z2);
+        }
+        if (z2 - z).abs() < f32::EPSILON {
+            return None;
+        }
+        let left = v.offset / z;
+        let in_view = |t: f32| t >= left && t <= left + v.width / z;
+        let mouse = pointer
+            .filter(|p| v.rect.contains(*p))
+            .map(|p| left + (p.x - v.left) / z);
+        let caret = caret.map(|c| c as f32).filter(|t| in_view(*t));
+        let centre = left + v.width / 2.0 / z;
+        let anchor = if self.zoom_to_mouse {
+            mouse.or(caret)
+        } else {
+            caret.or(mouse)
+        }
+        .unwrap_or(centre);
+        Some(zoom_left(left, z, z2, anchor) * z2)
+    }
+
     /// Selects only `ids` (e.g. clips just created).
     pub(crate) fn select_only(&mut self, ids: &[ClipId]) {
         self.selection = ids.iter().copied().collect();
@@ -450,20 +580,34 @@ impl PlaylistView {
         }
         let mut out = PlaylistOutput::default();
         self.retain_existing(project);
+        let zoom_before = self.zoom;
         self.header(ui, project);
+        let fit = self.zoom_input(ui, project);
+        let pointer = ui.ctx().pointer_latest_pos();
+        let offset = self.zoom_offset(zoom_before, playhead.or(self.caret), fit, pointer);
 
+        let mut view = None;
         egui::ScrollArea::vertical()
             .id_salt("playlist-v")
             .show(ui, |ui| {
                 ui.horizontal_top(|ui| {
                     self.lane_headers(ui, project, &mut out);
-                    egui::ScrollArea::horizontal()
-                        .id_salt("playlist-h")
-                        .show(ui, |ui| {
-                            self.canvas(ui, project, playhead, host, project_dir, &mut out);
-                        });
+                    let mut h = egui::ScrollArea::horizontal().id_salt("playlist-h");
+                    if let Some(o) = offset {
+                        h = h.horizontal_scroll_offset(o);
+                    }
+                    let o = h.show(ui, |ui| {
+                        self.canvas(ui, project, playhead, host, project_dir, &mut out);
+                    });
+                    view = Some(View {
+                        offset: o.state.clamped_offset().x,
+                        width: o.inner_rect.width(),
+                        left: o.inner_rect.left(),
+                        rect: o.inner_rect,
+                    });
                 });
             });
+        self.view = view;
         self.shortcuts(ui, project, &mut out);
         out
     }
@@ -489,17 +633,15 @@ impl PlaylistView {
                 }
             }
             ui.separator();
-            if ui
-                .add(
-                    egui::Slider::new(&mut self.zoom, 30.0..=480.0)
-                        .logarithmic(true)
-                        .show_value(false)
-                        .text("Zoom"),
-                )
-                .changed()
-            {
-                self.follow_paused = true;
-            }
+            ui.add(
+                egui::Slider::new(&mut self.zoom, MIN_ZOOM..=MAX_ZOOM)
+                    .logarithmic(true)
+                    .show_value(false)
+                    .text("Zoom"),
+            )
+            .on_hover_text(
+                "Also Ctrl+wheel, Page Up / Page Down, Shift+1…4; Shift+5 fits the selection",
+            );
             if !self.selection.is_empty() {
                 ui.label(
                     RichText::new(format!("{} selected", self.selection.len())).color(theme::MUTED),
@@ -2277,5 +2419,110 @@ mod ruler_tests {
                 enabled: false
             }]
         );
+    }
+}
+
+#[cfg(test)]
+mod zoom_tests {
+    use super::*;
+    use crate::test_ui::{Driver, StubHost};
+    use egui::{Event, Key, Modifiers};
+
+    #[test]
+    fn the_left_edge_keeps_the_anchor_in_place_and_stays_after_zero() {
+        // Anchor 400 px into the view at 1 px/tick, zoom ×2.
+        let left = zoom_left(1000.0, 1.0, 2.0, 1400.0);
+        assert_eq!((1400.0 - left) * 2.0, 400.0);
+        assert_eq!(zoom_left(0.0, 2.0, 1.0, 100.0), 0.0, "never before 0");
+    }
+
+    fn key(k: Key, modifiers: Modifiers) -> Event {
+        Event::Key {
+            key: k,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    /// Screen x of `tick` relative to the clip area, after each of `events`.
+    fn run(view: &mut PlaylistView, events: Vec<Vec<Event>>, tick: u64) -> Vec<f32> {
+        let mut p = Project::new();
+        p.playlist = jdance_domain::Playlist::with_lanes(2, || 0);
+        let mut d = Driver::new();
+        let mut host = StubHost::default();
+        let x = std::cell::Cell::new(0.0);
+        let mut ui = |ui: &mut egui::Ui| {
+            view.show(ui, &p, None, TICKS_PER_STEP, PatternId(0), &mut host, None);
+            let v = view.view.unwrap();
+            x.set(tick as f32 * view.px_per_tick() - v.offset);
+        };
+        d.frame(vec![], &mut ui);
+        d.frame(vec![], &mut ui);
+        let mut xs = Vec::new();
+        for e in events {
+            d.frame(e, &mut ui);
+            d.frame(vec![], &mut ui);
+            xs.push(x.get());
+        }
+        xs
+    }
+
+    #[test]
+    fn page_keys_and_levels_keep_the_caret_where_it_is() {
+        // 120 px per whole note: tick 12 800 is 400 px from the left.
+        let caret = 12_800;
+        let mut view = PlaylistView {
+            caret: Some(caret),
+            ..PlaylistView::default()
+        };
+        let up = || vec![key(Key::PageUp, Modifiers::NONE)];
+        let xs = run(&mut view, vec![up(), up(), up(), up(), up()], caret);
+        for x in &xs {
+            assert!((x - 400.0).abs() <= 1.0, "{xs:?}");
+        }
+        let mut view = PlaylistView {
+            caret: Some(caret),
+            ..PlaylistView::default()
+        };
+        let xs = run(
+            &mut view,
+            vec![
+                vec![key(Key::Num3, Modifiers::SHIFT)],
+                vec![key(Key::Num2, Modifiers::SHIFT)],
+                vec![key(Key::PageUp, Modifiers::NONE)],
+            ],
+            caret,
+        );
+        for x in &xs {
+            assert!((x - 400.0).abs() <= 1.0, "{xs:?}");
+        }
+        assert_eq!(view.zoom, 120.0 * ZOOM_STEP);
+    }
+
+    #[test]
+    fn a_caret_out_of_view_zooms_at_the_centre_and_shift_4_goes_back() {
+        // Caret far right of the view: the centre (no mouse) stays.
+        let mut view = PlaylistView {
+            caret: Some(400_000),
+            ..PlaylistView::default()
+        };
+        let start = view.zoom;
+        run(&mut view, vec![vec![key(Key::Num4, Modifiers::SHIFT)]], 0);
+        assert_eq!(view.zoom, MIN_ZOOM);
+        run(&mut view, vec![vec![key(Key::Num4, Modifiers::SHIFT)]], 0);
+        assert_eq!(view.zoom, start, "Shift+4 again: back");
+        // At the song start the view does not go before 0.
+        let mut view = PlaylistView {
+            caret: Some(0),
+            ..PlaylistView::default()
+        };
+        let xs = run(
+            &mut view,
+            vec![vec![key(Key::PageDown, Modifiers::NONE)]],
+            0,
+        );
+        assert_eq!(xs, [0.0]);
     }
 }

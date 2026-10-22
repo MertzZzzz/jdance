@@ -82,6 +82,9 @@ pub(crate) struct Layout {
     undocked: BTreeMap<Panel, Placement>,
     /// View › Follow playhead turned off (spec 0.2.3 REC-017).
     pub no_follow: bool,
+    /// Playlist zoom keeps the mouse, not the caret, in place (spec 0.2.5
+    /// §2, the reference behaviour).
+    pub zoom_to_mouse: bool,
     /// Global keys pressed in the undocked windows (KEY-001); the main
     /// window handles them.
     pub keys: crate::keys::GlobalKeys,
@@ -128,6 +131,9 @@ impl Layout {
         if self.no_follow {
             text.push_str("follow off\n");
         }
+        if self.zoom_to_mouse {
+            text.push_str("zoom mouse\n");
+        }
         text
     }
 
@@ -135,10 +141,15 @@ impl Layout {
     pub fn from_text(text: &str) -> Self {
         let mut undocked = BTreeMap::new();
         let mut no_follow = false;
+        let mut zoom_to_mouse = false;
         for line in text.lines() {
             let f: Vec<&str> = line.split_whitespace().collect();
             if f[..] == ["follow", "off"] {
                 no_follow = true;
+                continue;
+            }
+            if f[..] == ["zoom", "mouse"] {
+                zoom_to_mouse = true;
                 continue;
             }
             let [key, x, y, w, h] = f[..] else { continue };
@@ -164,6 +175,7 @@ impl Layout {
         Self {
             undocked,
             no_follow,
+            zoom_to_mouse,
             keys: Default::default(),
             changed: false,
         }
@@ -326,6 +338,8 @@ mod tests {
         // Follow playhead (REC-017) rides along.
         l.no_follow = true;
         assert!(Layout::from_text(&l.to_text()).no_follow);
+        l.zoom_to_mouse = true;
+        assert!(Layout::from_text(&l.to_text()).zoom_to_mouse);
         assert!(!Layout::from_text("").no_follow);
     }
 
