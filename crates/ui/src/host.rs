@@ -290,7 +290,12 @@ pub struct ImportedAudio {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SampleStatus {
     Loading,
-    Ready { frames: usize, source_rate: u32 },
+    Ready {
+        frames: usize,
+        source_rate: u32,
+        /// The file's encoding for display: "16", "MP3 192 kbit/s stereo".
+        format: String,
+    },
     Failed(String),
 }
 

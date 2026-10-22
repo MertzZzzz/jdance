@@ -252,10 +252,10 @@ impl SamplePicker {
                             });
                     }
                     Tab::Files => {
-                        ui.label("Any WAV file on this computer.");
+                        ui.label("Any WAV or MP3 file on this computer.");
                         if ui.button("Browse…").clicked()
                             && let Some(p) = rfd::FileDialog::new()
-                                .add_filter("WAV audio", &["wav", "wave"])
+                                .add_filter("Audio", &["wav", "wave", "mp3"])
                                 .pick_file()
                         {
                             self.selected = Some(Picked::File(p));
@@ -305,7 +305,9 @@ impl SamplePicker {
 }
 
 fn is_wav(p: &Path) -> bool {
-    p.extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("wav") || e.eq_ignore_ascii_case("wave"))
+    p.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+        ["wav", "wave", "mp3"]
+            .iter()
+            .any(|x| e.eq_ignore_ascii_case(x))
+    })
 }

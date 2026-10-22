@@ -7,7 +7,10 @@ mod project_file;
 mod safe_write;
 
 pub use assets::{ASSETS_DIR, AudioFileInfo, collect_assets, copy_into_assets, inspect_audio};
-pub use audio_file::{DecodedAudio, WavExportFormat, read_wav, write_wav};
+pub use audio_file::{
+    DecodedAudio, Mp3Mode, SourceFormat, WavExportFormat, decode_mp3, read_audio, read_wav,
+    write_wav,
+};
 pub use project_file::{
     CURRENT_FORMAT_VERSION, FORMAT_TAG, PROJECT_EXTENSION, load_project, resolve_sample_path,
     save_project,

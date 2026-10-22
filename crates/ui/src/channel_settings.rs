@@ -355,12 +355,16 @@ impl ChannelSettingsWindow {
             Some(SampleStatus::Ready {
                 frames,
                 source_rate,
+                format,
             }) => {
                 let secs = *frames as f64 / f64::from(*source_rate);
                 ui.label(
-                    RichText::new(format!("{secs:.2} s · {source_rate} Hz · {frames} frames"))
-                        .font(theme::mono(11.0))
-                        .color(theme::MUTED),
+                    RichText::new(format!(
+                        "{secs:.2} s · {source_rate} Hz · {frames} frames · {}",
+                        crate::browser::format_label(format)
+                    ))
+                    .font(theme::mono(11.0))
+                    .color(theme::MUTED),
                 );
                 Some((*frames, *source_rate))
             }
@@ -369,7 +373,7 @@ impl ChannelSettingsWindow {
         match (&status, ch.sample()) {
             (_, None) => {
                 ui.label(
-                    RichText::new("Load a WAV file or drop one on the channel.")
+                    RichText::new("Load a WAV or MP3 file or drop one on the channel.")
                         .color(theme::MUTED),
                 );
             }

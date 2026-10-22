@@ -414,7 +414,7 @@ impl BrowserView {
             )
         } else {
             format!(
-                "{}\nThis format is not supported yet (WAV only)",
+                "{}\nThis format is not supported yet (WAV and MP3 only)",
                 e.path.display()
             )
         });
@@ -459,19 +459,21 @@ impl BrowserView {
         };
         match (&status, supported) {
             (_, false) => {
-                ui.colored_label(theme::WARN, "Unsupported format: WAV files only for now");
+                ui.colored_label(theme::WARN, "Unsupported format: WAV and MP3 files only");
             }
             (
                 Some(SampleStatus::Ready {
                     frames,
                     source_rate,
+                    format,
                 }),
                 _,
             ) => {
                 ui.label(
                     RichText::new(format!(
-                        "{:.2} s · {source_rate} Hz · {frames} frames",
-                        *frames as f64 / f64::from(*source_rate)
+                        "{:.2} s · {source_rate} Hz · {frames} frames · {}",
+                        *frames as f64 / f64::from(*source_rate),
+                        format_label(format)
                     ))
                     .font(theme::mono(11.0))
                     .color(theme::MUTED),
@@ -533,10 +535,20 @@ impl BrowserView {
     }
 }
 
-fn is_wav(path: &Path) -> bool {
+/// Files the app reads (spec 0.2.5 §5); the content decides the format.
+pub(crate) fn is_wav(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
-        .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "wav" | "wave"))
+        .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "wav" | "wave" | "mp3"))
+}
+
+/// "16-bit" for a WAV, the MP3 description as is.
+pub(crate) fn format_label(format: &str) -> String {
+    if format.chars().all(|c| c.is_ascii_digit()) && !format.is_empty() {
+        format!("{format}-bit")
+    } else {
+        format.to_owned()
+    }
 }
 
 fn display(p: &Path) -> String {

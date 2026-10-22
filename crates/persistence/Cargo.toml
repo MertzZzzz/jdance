@@ -10,6 +10,7 @@ publish.workspace = true
 [dependencies]
 jdance-domain.workspace = true
 hound.workspace = true
+nanomp3.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

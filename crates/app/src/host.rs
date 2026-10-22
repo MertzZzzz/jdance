@@ -645,6 +645,9 @@ impl Host for AudioHost {
         if self.samples.poll() {
             self.needs_compile = true;
         }
+        for w in self.samples.take_warnings() {
+            self.notices.push(Notice::warning(w));
+        }
         self.sync_metronome();
         self.browser.poll();
         if let Some((path, range)) = self.pending_preview.clone() {

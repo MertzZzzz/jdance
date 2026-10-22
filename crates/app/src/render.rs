@@ -12,22 +12,41 @@ use jdance_dsp::SampleBuffer;
 use jdance_engine::{
     OfflineRender, PlayMode, PluginRt, compile_full, render_offline_with, tick_to_sample,
 };
-use jdance_persistence::{read_wav, resolve_sample_path, write_wav};
+use jdance_persistence::{SourceFormat, read_audio, resolve_sample_path, write_wav};
 use jdance_plugin_api::ProcessSetupInfo;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// Decodes a WAV file and converts it to stereo at `sample_rate`.
+/// Decodes a WAV or MP3 file and converts it to stereo at `sample_rate`.
 pub fn load_sample(path: &Path, sample_rate: u32) -> Result<(SampleBuffer, SampleBuffer), String> {
-    let decoded = read_wav(path).map_err(|e| e.to_string())?;
+    load_sample_info(path, sample_rate).map(|l| (l.original, l.converted))
+}
+
+/// A decoded sample with what the file was and what went wrong on the way.
+#[derive(Debug)]
+pub struct LoadedSample {
+    pub original: SampleBuffer,
+    pub converted: SampleBuffer,
+    pub format: SourceFormat,
+    pub warnings: Vec<String>,
+}
+
+/// [`load_sample`] with the source format and import warnings.
+pub fn load_sample_info(path: &Path, sample_rate: u32) -> Result<LoadedSample, String> {
+    let decoded = read_audio(path).map_err(|e| e.to_string())?;
     let original = SampleBuffer::from_interleaved(
         decoded.sample_rate,
         usize::from(decoded.channels),
         &decoded.samples,
     );
     let converted = original.resampled(sample_rate);
-    Ok((original, converted))
+    Ok(LoadedSample {
+        original,
+        converted,
+        format: decoded.format,
+        warnings: decoded.warnings,
+    })
 }
 
 #[derive(Debug)]
@@ -606,7 +625,7 @@ mod tests {
         .unwrap();
         let peak = o.audio.left.iter().fold(0.0f32, |m, v| m.max(v.abs()));
         assert!(peak > 1.0, "test needs an over, got {peak}");
-        let back = read_wav(&out).unwrap();
+        let back = jdance_persistence::read_wav(&out).unwrap();
         let back_peak = back.samples.iter().fold(0.0f32, |m, v| m.max(v.abs()));
         assert_eq!(back_peak, peak);
     }

@@ -11,6 +11,7 @@
 | egui | 0.37.0 | MIT OR Apache-2.0 | ui | immediate-mode UI | — |
 | rfd | 0.17.2 | MIT | ui | системные файловые диалоги | Linux: XDG desktop portal (D-Bus) |
 | hound | 3.5.1 | Apache-2.0 | persistence, test-support | чтение/запись WAV | — |
+| nanomp3 (+ nanomp3-core, wide) | 0.2.0 | MIT OR Apache-2.0 (текст лицензий проверен 2026-10-22) | persistence | декодирование MP3 при импорте (спецификация 0.2.5 §5): порт minimp3 на Rust без `unsafe`, пропуск ID3/APE, обрезка задержек по тегу LAME | — |
 | rtrb | 0.4.0 | MIT OR Apache-2.0 | engine | wait-free SPSC очереди UI ↔ audio | — |
 | serde | 1.0.229 | MIT OR Apache-2.0 | domain и др. | сериализация | — |
 | serde_json | 1.0.154 | MIT OR Apache-2.0 | persistence, app, xtask | формат проекта и настроек | — |

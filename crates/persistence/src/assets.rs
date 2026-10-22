@@ -24,11 +24,28 @@ pub struct AudioFileInfo {
 /// Reads `path` once: content hash, size and the WAV header.
 pub fn inspect_audio(path: &Path) -> Result<AudioFileInfo, PersistError> {
     let bytes = std::fs::read(path).map_err(io_err(path))?;
-    let reader = hound::WavReader::new(std::io::Cursor::new(&bytes))
-        .map_err(|e| PersistError::UnsupportedAudio(format!("{}: {e}", path.display())))?;
-    let spec = reader.spec();
-    let frames = u64::from(reader.duration());
-    if frames == 0 || spec.channels == 0 || spec.sample_rate == 0 {
+    let unsupported = |e: &dyn std::fmt::Display| {
+        PersistError::UnsupportedAudio(format!("{}: {e}", path.display()))
+    };
+    let (sample_rate, channels, frames) = match hound::WavReader::new(std::io::Cursor::new(&bytes))
+    {
+        Ok(reader) => {
+            let spec = reader.spec();
+            (
+                spec.sample_rate,
+                spec.channels,
+                u64::from(reader.duration()),
+            )
+        }
+        // MP3: the length is what decodes, not the header's estimate
+        // (spec 0.2.5 §5).
+        Err(_) if nanomp3::detect(&bytes) => {
+            let a = crate::decode_mp3(&bytes).map_err(|e| unsupported(&e))?;
+            (a.sample_rate, a.channels, a.frames() as u64)
+        }
+        Err(e) => return Err(unsupported(&e)),
+    };
+    if frames == 0 || channels == 0 || sample_rate == 0 {
         return Err(PersistError::UnsupportedAudio(format!(
             "{}: the file holds no audio",
             path.display()
@@ -37,8 +54,8 @@ pub fn inspect_audio(path: &Path) -> Result<AudioFileInfo, PersistError> {
     Ok(AudioFileInfo {
         hash: content_hash(&bytes),
         size: bytes.len() as u64,
-        sample_rate: spec.sample_rate,
-        channels: spec.channels,
+        sample_rate,
+        channels,
         frames,
     })
 }

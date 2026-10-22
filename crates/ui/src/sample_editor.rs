@@ -137,6 +137,7 @@ impl SampleEditor {
                     Some(SampleStatus::Ready {
                         frames,
                         source_rate,
+                        ..
                     }) => (frames as u64, source_rate),
                     _ => (0, 0),
                 };

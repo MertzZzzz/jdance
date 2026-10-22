@@ -2,7 +2,7 @@
 //! Sample cache with background loading (BLD-022: no blocking file I/O or
 //! resampling on the UI thread).
 
-use crate::render::load_sample;
+use crate::render::load_sample_info;
 use jdance_dsp::SampleBuffer;
 use jdance_ui::SampleStatus;
 use std::collections::HashMap;
@@ -19,6 +19,8 @@ enum Entry {
         peaks: Arc<Vec<f32>>,
         /// Converted to the current engine rate; `None` while converting.
         converted: Option<Arc<SampleBuffer>>,
+        /// "16", "MP3 192 kbit/s joint stereo" (spec 0.2.5 §5).
+        format: String,
     },
     Failed(String),
 }
@@ -27,7 +29,7 @@ enum Entry {
 enum Loaded {
     Decoded(
         PathBuf,
-        Result<(SampleBuffer, SampleBuffer, Vec<f32>), String>,
+        Result<(crate::render::LoadedSample, Vec<f32>), String>,
         u32,
     ),
     Converted(PathBuf, SampleBuffer),
@@ -39,6 +41,8 @@ pub struct SampleCache {
     rate: u32,
     tx: Sender<Loaded>,
     rx: Receiver<Loaded>,
+    /// Import warnings not yet shown.
+    warnings: Vec<String>,
 }
 
 impl SampleCache {
@@ -49,6 +53,7 @@ impl SampleCache {
             rate,
             tx,
             rx,
+            warnings: Vec::new(),
         }
     }
 
@@ -60,9 +65,9 @@ impl SampleCache {
         self.entries.insert(path.to_path_buf(), Entry::Loading);
         let (tx, path, rate) = (self.tx.clone(), path.to_path_buf(), self.rate);
         std::thread::spawn(move || {
-            let result = load_sample(&path, rate).map(|(o, c)| {
-                let peaks = peaks(&o, PEAK_BUCKETS);
-                (o, c, peaks)
+            let result = load_sample_info(&path, rate).map(|l| {
+                let peaks = peaks(&l.original, PEAK_BUCKETS);
+                (l, peaks)
             });
             let _ = tx.send(Loaded::Decoded(path, result, rate));
         });
@@ -98,7 +103,15 @@ impl SampleCache {
             match msg {
                 Loaded::Decoded(path, result, rate) => {
                     let entry = match result {
-                        Ok((original, converted, peaks)) => {
+                        Ok((loaded, peaks)) => {
+                            let name = path.file_name().map_or_else(
+                                || path.display().to_string(),
+                                |n| n.to_string_lossy().into_owned(),
+                            );
+                            self.warnings
+                                .extend(loaded.warnings.iter().map(|w| format!("{name}: {w}")));
+                            let format = loaded.format.to_string();
+                            let (original, converted) = (loaded.original, loaded.converted);
                             let original = Arc::new(original);
                             let peaks = Arc::new(peaks);
                             let converted = (rate == self.rate).then(|| Arc::new(converted));
@@ -117,6 +130,7 @@ impl SampleCache {
                                 original,
                                 peaks,
                                 converted,
+                                format,
                             }
                         }
                         Err(e) => Entry::Failed(e),
@@ -134,6 +148,11 @@ impl SampleCache {
             }
         }
         changed
+    }
+
+    /// Import warnings since the last call.
+    pub fn take_warnings(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.warnings)
     }
 
     /// Waveform peaks of a loaded sample.
@@ -157,11 +176,13 @@ impl SampleCache {
             Entry::Ready {
                 original,
                 converted,
+                format,
                 ..
             } => match converted {
                 Some(_) => SampleStatus::Ready {
                     frames: original.len(),
                     source_rate: original.sample_rate,
+                    format: format.clone(),
                 },
                 None => SampleStatus::Loading,
             },

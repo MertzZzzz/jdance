@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! WAV import (BLD-040) and export.
+//! Audio import: WAV (BLD-040) and MP3 (spec 0.2.5 §5); WAV export.
 //!
 //! `hound` handles PCM 8/16/24/32-bit, IEEE float 32-bit and
 //! `WAVE_FORMAT_EXTENSIBLE`. It does not read 64-bit float, so a small RIFF
-//! reader below covers that one subtype.
+//! reader below covers that one subtype. MP3 is decoded whole to `f32` by
+//! `nanomp3` (MIT OR Apache-2.0, a port of minimp3), with the encoder and
+//! decoder delays trimmed. [`read_audio`] tells the formats apart by
+//! content, not by the file name.
 
 use crate::{PersistError, io_err};
 use std::io::{Read, Seek, SeekFrom};
@@ -19,6 +22,148 @@ pub struct DecodedAudio {
     pub sample_rate: u32,
     pub channels: u16,
     pub samples: Vec<f32>,
+    /// What the file was, for display (spec 0.2.5 §5).
+    pub format: SourceFormat,
+    /// Problems that did not stop the import (damaged MP3 frames, …).
+    pub warnings: Vec<String>,
+}
+
+/// The encoding of an imported file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SourceFormat {
+    /// WAV with this many bits per sample.
+    Wav { bits: u16 },
+    /// MP3: average bitrate and channel mode.
+    Mp3 { kbps: u32, mode: Mp3Mode },
+    #[default]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mp3Mode {
+    Mono,
+    Stereo,
+    JointStereo,
+    DualChannel,
+}
+
+impl std::fmt::Display for SourceFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Wav { bits } => write!(f, "{bits}"),
+            Self::Mp3 { kbps, mode } => {
+                let mode = match mode {
+                    Mp3Mode::Mono => "mono",
+                    Mp3Mode::Stereo => "stereo",
+                    Mp3Mode::JointStereo => "joint stereo",
+                    Mp3Mode::DualChannel => "dual channel",
+                };
+                write!(f, "MP3 {kbps} kbit/s {mode}")
+            }
+            Self::Unknown => Ok(()),
+        }
+    }
+}
+
+/// Encoder (576) plus decoder (529) delay, trimmed from MP3 files without a
+/// LAME/Lavc tag that records the real values.
+const MP3_DEFAULT_DELAY: usize = 1105;
+
+/// Reads WAV or MP3, whichever the content is.
+pub fn read_audio(path: &Path) -> Result<DecodedAudio, PersistError> {
+    let mut head = [0u8; 12];
+    let n = {
+        let mut f = std::fs::File::open(path).map_err(io_err(path))?;
+        let mut n = 0;
+        while n < head.len() {
+            match f.read(&mut head[n..]).map_err(io_err(path))? {
+                0 => break,
+                k => n += k,
+            }
+        }
+        n
+    };
+    if n >= 12 && (&head[0..4] == b"RIFF" || &head[0..4] == b"RIFX") && &head[8..12] == b"WAVE" {
+        return read_wav(path);
+    }
+    let data = std::fs::read(path).map_err(io_err(path))?;
+    if nanomp3::detect(&data) {
+        return decode_mp3(&data);
+    }
+    Err(PersistError::UnsupportedAudio(
+        "not an audio file (WAV or MP3)".into(),
+    ))
+}
+
+/// Decodes a whole MP3 file (spec 0.2.5 §5): Layer III of MPEG-1/2/2.5,
+/// any bitrate mode; tags skipped; delays trimmed by the LAME tag or by
+/// the default delay; the length counted from the decoded audio.
+pub fn decode_mp3(data: &[u8]) -> Result<DecodedAudio, PersistError> {
+    let decoded = nanomp3::decode_all::<f32>(data);
+    let channels = match decoded.channels {
+        Some(nanomp3::Channels::Mono) => 1u16,
+        Some(nanomp3::Channels::Stereo) => 2,
+        None if decoded.samples.is_empty() => {
+            return Err(PersistError::UnsupportedAudio("MP3 without audio".into()));
+        }
+        None => {
+            return Err(PersistError::UnsupportedAudio(
+                "MP3 switching between mono and stereo".into(),
+            ));
+        }
+    };
+    if decoded.layer != 3 {
+        return Err(PersistError::UnsupportedAudio(format!(
+            "MPEG layer {} (only Layer III)",
+            decoded.layer
+        )));
+    }
+    check_spec(channels, decoded.sample_rate)?;
+    let body = nanomp3::strip_tags(data);
+    let mut frames = nanomp3::frames(body);
+    let first = frames.next();
+    let tag = first.as_ref().and_then(|f| nanomp3::VbrTag::parse(f.data));
+    let mode = first
+        .as_ref()
+        .map_or(Mp3Mode::Stereo, |f| match f.data.get(3).map(|b| b >> 6) {
+            Some(3) => Mp3Mode::Mono,
+            Some(2) => Mp3Mode::DualChannel,
+            Some(1) => Mp3Mode::JointStereo,
+            _ => Mp3Mode::Stereo,
+        });
+    let mut samples = decoded.samples;
+    let mut warnings = Vec::new();
+    match tag {
+        Some(t) if t.encoder_delay_padding.is_some() => {}
+        _ => {
+            // No recorded delay: drop the usual encoder plus decoder delay.
+            let cut = (MP3_DEFAULT_DELAY * usize::from(channels)).min(samples.len());
+            samples.drain(..cut);
+        }
+    }
+    // A tag that counts more frames than the file holds: cut short.
+    let audio_frames = frames.count() as u64 + u64::from(tag.is_none() && first.is_some());
+    if let Some(expected) = tag.and_then(|t| t.frames)
+        && u64::from(expected) > audio_frames
+    {
+        warnings.push(format!(
+            "the MP3 file ends early: {} of {expected} frames",
+            audio_frames
+        ));
+    }
+    if decoded.format_changed {
+        warnings.push("the MP3 stream changes format; the rest was skipped".into());
+    }
+    Ok(DecodedAudio {
+        sample_rate: decoded.sample_rate,
+        channels,
+        samples,
+        format: SourceFormat::Mp3 {
+            kbps: decoded.avg_bitrate_kbps,
+            mode,
+        },
+        warnings,
+    })
 }
 
 impl DecodedAudio {
@@ -79,6 +224,10 @@ fn read_hound<R: Read>(reader: hound::WavReader<R>) -> Result<DecodedAudio, Pers
         sample_rate: spec.sample_rate,
         channels: spec.channels,
         samples,
+        format: SourceFormat::Wav {
+            bits: spec.bits_per_sample,
+        },
+        warnings: Vec::new(),
     })
 }
 
@@ -135,6 +284,8 @@ fn read_float64(path: &Path) -> Result<DecodedAudio, PersistError> {
                     sample_rate,
                     channels,
                     samples,
+                    format: SourceFormat::Wav { bits: 64 },
+                    warnings: Vec::new(),
                 });
             }
             _ => {

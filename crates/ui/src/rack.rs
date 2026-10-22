@@ -323,7 +323,7 @@ impl RackView {
                 ui.add_space(6.0);
                 ui.label(
                 RichText::new(
-                    "Drop WAV files here to add channels, or onto a channel to replace its sample",
+                    "Drop WAV or MP3 files here to add channels, or onto a channel to replace its sample",
                 )
                 .size(11.0)
                 .color(theme::MUTED),
@@ -571,13 +571,14 @@ impl RackView {
                 "{} ({})\nDouble-click: open its editor",
                 slot.name, slot.vendor
             ),
-            (None, None, _) => "No sample — drop a WAV file here or double-click".to_owned(),
+            (None, None, _) => "No sample — drop a WAV or MP3 file here or double-click".to_owned(),
             (
                 None,
                 Some(s),
                 Some(Some(SampleStatus::Ready {
                     frames,
                     source_rate,
+                    ..
                 })),
             ) => {
                 format!(
