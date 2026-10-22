@@ -17,6 +17,7 @@
 mod automation;
 mod effect_rt;
 mod feedback;
+mod metronome;
 mod offline;
 mod param_diff;
 mod processor;
@@ -24,6 +25,7 @@ mod snapshot;
 
 pub use effect_rt::{EffectRt, InsertRt, InstrumentRt, PluginRt, RESET_BUDGET};
 pub use feedback::{EngineFeedback, FeedbackReading, MeterSlot, Meters};
+pub use metronome::DEFAULT_METRONOME_GAIN;
 pub use offline::{OfflineRender, render_offline, render_offline_with};
 pub use param_diff::{ParamChange, param_only_changes};
 pub use processor::EngineProcessor;
@@ -58,6 +60,13 @@ pub(crate) enum Command {
     Seek(u64),
     /// Keep playing past the arrangement end (recording).
     HoldEnd(bool),
+    Metronome {
+        on: bool,
+        gain: f32,
+    },
+    /// Clicks this many beats while stopped, then plays (MET-021); 0
+    /// plays at once.
+    CountIn(u32),
     SetSnapshot(Box<PlaybackSnapshot>),
     /// Changes one effect parameter without recompiling (smoothed).
     SetParam {
@@ -158,6 +167,20 @@ impl EngineHandle {
     /// (recording, spec 0.2.3 CUR-006).
     pub fn hold_end(&mut self, hold: bool) -> Result<(), EngineError> {
         self.send(Command::HoldEnd(hold))
+    }
+
+    /// Metronome on/off and level (linear), MET-002/003.
+    pub fn set_metronome(&mut self, on: bool, gain: f32) -> Result<(), EngineError> {
+        self.send(Command::Metronome {
+            on,
+            gain: gain.clamp(0.0, 1.0),
+        })
+    }
+
+    /// From a stop: clicks `beats` beats, then starts playing on the next
+    /// beat (MET-021, MET-023). Stop cancels it.
+    pub fn count_in(&mut self, beats: u32) -> Result<(), EngineError> {
+        self.send(Command::CountIn(beats))
     }
 
     /// Changes an effect parameter in place, smoothed by the effect.

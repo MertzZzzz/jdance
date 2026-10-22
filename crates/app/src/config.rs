@@ -76,6 +76,36 @@ pub struct UserSettings {
     /// ASIO-025: close the ASIO driver while the window is inactive.
     #[serde(default)]
     pub release_asio_on_blur: bool,
+    /// Metronome and count-in (spec 0.2.3 MET-002/020).
+    #[serde(default)]
+    pub metronome: MetronomeConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct MetronomeConfig {
+    #[serde(default)]
+    pub on: bool,
+    #[serde(default = "default_click_db")]
+    pub volume_db: f32,
+    #[serde(default)]
+    pub only_recording: bool,
+    #[serde(default)]
+    pub count_in: bool,
+}
+
+fn default_click_db() -> f32 {
+    -6.0
+}
+
+impl Default for MetronomeConfig {
+    fn default() -> Self {
+        Self {
+            on: false,
+            volume_db: default_click_db(),
+            only_recording: false,
+            count_in: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

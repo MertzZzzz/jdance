@@ -37,6 +37,9 @@ pub struct Shared {
     /// Peaks since the last read, as `f32` bits.
     peak: [AtomicU32; 2],
     pub recording: AtomicBool,
+    /// A take waits for the transport to start (after the count-in); the
+    /// output callback then sets `recording` (spec 0.2.3 REC-013).
+    pub armed: AtomicBool,
     pub overflow: AtomicBool,
     pub monitor: AtomicBool,
     /// Frames captured in the current take.
@@ -362,7 +365,7 @@ impl Session {
                         }
                         continue;
                     }
-                    if !shared.recording.load(Relaxed) {
+                    if !shared.recording.load(Relaxed) && !shared.armed.load(Relaxed) {
                         // One more pass for a block pushed while stopping.
                         if last_round {
                             break;
@@ -422,6 +425,27 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_armed_take_waits_for_the_transport_and_can_be_cancelled() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = Arc::new(Shared::default());
+        let (mut cap, ring, _mon) = capture(Arc::clone(&shared), 48_000);
+        let part = dir.path().join(format!("Armed{PART_SUFFIX}"));
+        shared.armed.store(true, Relaxed);
+        let session = Session::start(part, 2, 48_000, ring, Arc::clone(&shared))
+            .map_err(|e| e.1)
+            .unwrap();
+        // During the count-in nothing is captured and the writer waits.
+        cap.capture(&[0.5; 480], &[0.5; 480]);
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(!session.is_finished());
+        assert_eq!(shared.captured.load(Relaxed), 0);
+        // Stop during the count-in: an empty take.
+        shared.armed.store(false, Relaxed);
+        let (_, take) = session.join();
+        assert_eq!(take.unwrap().frames, 0);
+    }
 
     #[test]
     fn take_is_written_finished_and_readable() {

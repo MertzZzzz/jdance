@@ -69,13 +69,24 @@ impl MeterState {
 }
 
 /// Adapts the engine processor to the audio-api callback; the input
-/// monitor is added after the engine.
-struct EngineCallback(EngineProcessor, MonitorMix);
+/// monitor is added after the engine. An armed take starts recording in
+/// the callback where the transport starts rolling, so it begins at the
+/// caret within one buffer (spec 0.2.3 REC-013, MET-023).
+struct EngineCallback {
+    engine: EngineProcessor,
+    monitor: MonitorMix,
+    recorder: Arc<Shared>,
+    feedback: Arc<jdance_engine::EngineFeedback>,
+}
 
 impl RenderCallback for EngineCallback {
     fn render(&mut self, left: &mut [f32], right: &mut [f32]) {
-        self.0.render(left, right);
-        self.1.add(left, right);
+        self.engine.render(left, right);
+        self.monitor.add(left, right);
+        if self.recorder.armed.load(Relaxed) && self.feedback.is_playing() {
+            self.recorder.recording.store(true, Relaxed);
+            self.recorder.armed.store(false, Relaxed);
+        }
     }
 }
 
@@ -163,6 +174,8 @@ pub struct AudioHost {
     scripts: ScriptHost,
     /// ASIO-025: the device closed while the window is inactive.
     suspended: Option<(DeviceKey, DeviceSettings)>,
+    /// Metronome state last sent: (engine generation, on, gain).
+    metronome_sent: Option<(u64, bool, f32)>,
 }
 
 /// Script tools: the loaded scripts and the run in flight.
@@ -219,6 +232,24 @@ impl std::fmt::Debug for AudioHost {
 }
 
 impl AudioHost {
+    /// Sends the effective metronome state to the engine when it changed:
+    /// with "only while recording" it clicks during a take (MET-003).
+    fn sync_metronome(&mut self) {
+        let m = self.settings.metronome;
+        let recording = self.recorder.session.is_some();
+        let on = m.on && (!m.only_recording || recording);
+        let gain = 10f32.powf(m.volume_db.clamp(-40.0, 0.0) / 20.0);
+        let generation = self.engine_generation;
+        if self.metronome_sent == Some((generation, on, gain)) {
+            return;
+        }
+        if let Some(a) = &mut self.active
+            && a.engine.set_metronome(on, gain).is_ok()
+        {
+            self.metronome_sent = Some((generation, on, gain));
+        }
+    }
+
     pub fn new(backends: Vec<Box<dyn AudioBackend>>) -> Self {
         let settings_path = config::settings_path();
         let mut notices = Vec::new();
@@ -272,6 +303,7 @@ impl AudioHost {
             recorder: Recorder::default(),
             scripts: ScriptHost::default(),
             suspended: None,
+            metronome_sent: None,
         }
     }
 
@@ -577,6 +609,7 @@ impl Host for AudioHost {
         if self.samples.poll() {
             self.needs_compile = true;
         }
+        self.sync_metronome();
         self.browser.poll();
         if let Some((path, range)) = self.pending_preview.clone() {
             match self.samples.status(&path) {
@@ -778,6 +811,7 @@ impl Host for AudioHost {
             overloads: r.overloads,
             voices: r.active_voices,
             dropped_commands: r.dropped_commands,
+            count_in: r.count_in,
         }
     }
 
@@ -935,14 +969,19 @@ impl Host for AudioHost {
             .expect("unbounded");
         rec.shared.overflow.store(false, Relaxed);
         rec.shared.captured.store(0, Relaxed);
+        // Armed before the writer starts, so it waits for the transport.
+        rec.shared.armed.store(true, Relaxed);
         match Session::start(part, channels, rate, ring, Arc::clone(&rec.shared)) {
             Ok(session) => {
                 rec.session = Some(session);
                 rec.project_dir = project_dir.map(Path::to_path_buf);
-                rec.shared.recording.store(true, Relaxed);
+                if let Some(a) = &mut self.active {
+                    let _ = a.engine.hold_end(true);
+                }
                 Ok(())
             }
             Err((ring, e)) => {
+                rec.shared.armed.store(false, Relaxed);
                 rec.ring = Some(ring);
                 Err(e)
             }
@@ -950,7 +989,44 @@ impl Host for AudioHost {
     }
 
     fn stop_recording(&mut self) {
+        self.recorder.shared.armed.store(false, Relaxed);
         self.recorder.shared.recording.store(false, Relaxed);
+        if let Some(a) = &mut self.active {
+            let _ = a.engine.hold_end(false);
+        }
+    }
+
+    fn count_in(&mut self, beats: u32) {
+        match &mut self.active {
+            Some(a) => {
+                if a.engine.count_in(beats).is_err() {
+                    self.notices
+                        .push(Notice::warning("Engine is busy; try again."));
+                }
+            }
+            None => self.play(),
+        }
+    }
+
+    fn metronome(&self) -> jdance_ui::MetronomeSettings {
+        let m = self.settings.metronome;
+        jdance_ui::MetronomeSettings {
+            on: m.on,
+            volume_db: m.volume_db,
+            only_recording: m.only_recording,
+            count_in: m.count_in,
+        }
+    }
+
+    fn set_metronome(&mut self, s: jdance_ui::MetronomeSettings) {
+        self.settings.metronome = crate::config::MetronomeConfig {
+            on: s.on,
+            volume_db: s.volume_db.clamp(-40.0, 0.0),
+            only_recording: s.only_recording,
+            count_in: s.count_in,
+        };
+        self.save_settings();
+        self.sync_metronome();
     }
 
     fn take_recording(&mut self) -> Option<Result<FinishedTake, String>> {
@@ -1057,11 +1133,13 @@ impl Host for AudioHost {
             buffer: settings.buffer,
             first_output_channel: settings.first_output_channel,
         };
-        let stream = backend.open_output(
-            &key.device,
-            &request,
-            Box::new(EngineCallback(processor, mix)),
-        )?;
+        let callback = EngineCallback {
+            engine: processor,
+            monitor: mix,
+            recorder: Arc::clone(&self.recorder.shared),
+            feedback: engine.feedback_arc(),
+        };
+        let stream = backend.open_output(&key.device, &request, Box::new(callback))?;
         self.engine_generation += 1;
         self.active = Some(Active {
             key: key.clone(),

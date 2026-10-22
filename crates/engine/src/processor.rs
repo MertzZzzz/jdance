@@ -12,6 +12,7 @@
 
 use crate::EffectRt;
 use crate::automation::{AUTOMATION_STEP, AutomationRt, BlockTimeline, PLUGIN_POINT_STEP};
+use crate::metronome::Metronome;
 use crate::snapshot::TrackRt;
 use crate::{
     Command, EngineFeedback, Garbage, MAX_BLOCK, MAX_COMMANDS_PER_RENDER, MAX_VOICES,
@@ -138,6 +139,9 @@ pub struct EngineProcessor {
     out_fade: Smoothed,
     stopping: bool,
     play_after_stop: bool,
+    /// Count-in beats to start once a running Stop finishes (Record while
+    /// playing restarts from the caret, spec 0.2.3 REC-011).
+    count_after_stop: u32,
     playing: bool,
     /// Position inside the loop, in samples.
     pos: u64,
@@ -156,6 +160,8 @@ pub struct EngineProcessor {
     param_events: Vec<ParamEvent>,
     /// Browser preview: the sample and its voice.
     preview: Option<(Arc<jdance_dsp::SampleBuffer>, SamplerVoice)>,
+    /// Metronome and count-in (spec 0.2.3 MET-*).
+    metronome: Metronome,
 }
 
 impl EngineProcessor {
@@ -183,6 +189,7 @@ impl EngineProcessor {
             out_fade: Smoothed::new(1.0, release_len(sample_rate)),
             stopping: false,
             play_after_stop: false,
+            count_after_stop: 0,
             playing: false,
             pos: 0,
             home: 0,
@@ -192,6 +199,7 @@ impl EngineProcessor {
             automating: false,
             param_events: Vec::with_capacity(MAX_PARAM_EVENTS),
             preview: None,
+            metronome: Metronome::new(sample_rate),
         }
     }
 
@@ -209,7 +217,18 @@ impl EngineProcessor {
         let mut done = 0;
         while done < frames {
             self.block_boundary();
-            let n = (frames - done).min(MAX_BLOCK);
+            let mut n = (frames - done).min(MAX_BLOCK);
+            if self.metronome.counting() && !self.playing {
+                // The transport starts exactly where the count-in ends
+                // (MET-023).
+                match self.beat_samples() {
+                    Some(beat) => {
+                        let left = self.metronome.count_remaining(beat).max(1);
+                        n = n.min(left as usize);
+                    }
+                    None => self.metronome.cancel_count_in(),
+                }
+            }
             self.render_block(n);
             let (ol, or) = self.scratch.get(2, n);
             left[done..done + n].copy_from_slice(ol);
@@ -225,6 +244,7 @@ impl EngineProcessor {
         let loop_len = self.snapshot.as_ref().map_or(0, |s| s.loop_len);
         self.feedback
             .publish_transport(self.playing, self.pos, loop_len);
+        self.feedback.publish_count_in(self.metronome.count_left());
         let active = self.voices.iter().filter(|v| v.inner.is_active()).count();
         self.feedback.publish_voices(active as u32);
         if frames > 0 {
@@ -250,6 +270,12 @@ impl EngineProcessor {
         if self.stopping && !self.out_fade.is_ramping() {
             self.finish_stop();
         }
+    }
+
+    /// Samples per beat of the project signature at the current tempo.
+    fn beat_samples(&self) -> Option<f64> {
+        let s = self.snapshot.as_deref()?;
+        Some(s.samples_per_tick * f64::from(s.time_signature.beat_ticks()))
     }
 
     fn release_voices(&mut self) {
@@ -281,6 +307,10 @@ impl EngineProcessor {
         self.play_after_stop = false;
         self.pos = self.home;
         self.play_from = self.home;
+        let beats = std::mem::take(&mut self.count_after_stop);
+        if beats > 0 {
+            self.metronome.start_count_in(beats);
+        }
         if let Some(s) = &mut self.snapshot {
             for t in &mut s.tracks {
                 for i in &mut t.inserts {
@@ -324,7 +354,30 @@ impl EngineProcessor {
                     }
                 }
                 Command::HoldEnd(hold) => self.hold_end = hold,
+                Command::Metronome { on, gain } => {
+                    self.metronome.on = on;
+                    self.metronome.gain = gain;
+                }
+                Command::CountIn(beats) if self.stopping => {
+                    if beats == 0 {
+                        self.play_after_stop = true;
+                    } else {
+                        self.count_after_stop = beats;
+                    }
+                }
+                Command::CountIn(beats) => {
+                    if !self.playing && self.snapshot.is_some() {
+                        if beats == 0 {
+                            self.play_from = self.pos;
+                            self.playing = true;
+                        } else {
+                            self.metronome.start_count_in(beats);
+                        }
+                    }
+                }
                 Command::Stop => {
+                    self.metronome.cancel_count_in();
+                    self.count_after_stop = 0;
                     self.stopping = true;
                     self.play_after_stop = false;
                     self.out_fade.set_target(0.0);
@@ -537,6 +590,7 @@ impl EngineProcessor {
             stopping,
             automating,
             param_events,
+            metronome,
             ..
         } = self;
         {
@@ -821,7 +875,8 @@ impl EngineProcessor {
 
         // 4. Master output stage: Stop fade, safety limiter, output meter.
         let (ol, or) = scratch.get_mut(2, n);
-        if out_fade.is_ramping() || out_fade.current() != 1.0 {
+        let fading = out_fade.is_ramping() || out_fade.current() != 1.0;
+        if fading {
             out_fade.fill(&mut env[..n]);
             for i in 0..n {
                 ol[i] *= env[i];
@@ -833,6 +888,20 @@ impl EngineProcessor {
             meters.publish_limiter(limiter.take_min_gain());
         }
         meters.output.publish(u64::MAX, peak(ol), peak(or));
+        // 5. Metronome after the master (MET-012), faded by Stop.
+        let beat = snap.samples_per_tick * f64::from(snap.time_signature.beat_ticks());
+        let per_bar = u32::from(snap.time_signature.numerator);
+        let mut count_done = false;
+        if *playing && !*stopping {
+            metronome.schedule_playing(&timeline, n, beat, per_bar);
+        } else if !*playing && !*stopping {
+            count_done = metronome.schedule_count_in(n, beat, per_bar);
+        }
+        metronome.render(ol, or, fading.then_some(&env[..n]));
+        if count_done {
+            *play_from = *pos;
+            *playing = true;
+        }
         if reached_end {
             *playing = false;
             *pos = *home;

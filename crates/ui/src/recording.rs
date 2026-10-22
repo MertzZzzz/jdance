@@ -128,6 +128,21 @@ impl RecordingPanel {
                              them up with playback; measure it once with a loopback cable",
                         );
                         ui.end_row();
+                        ui.label("Count-in");
+                        let mut m = host.metronome();
+                        if ui
+                            .checkbox(
+                                &mut m.count_in,
+                                format!(
+                                    "{} bars of clicks before recording (Ctrl+P)",
+                                    crate::COUNT_IN_BARS
+                                ),
+                            )
+                            .changed()
+                        {
+                            host.set_metronome(m);
+                        }
+                        ui.end_row();
                         ui.label("Monitoring");
                         let mut monitor = s.monitor;
                         if ui

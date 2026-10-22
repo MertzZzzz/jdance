@@ -31,10 +31,10 @@ mod toolbar;
 mod widgets;
 
 pub use host::{
-    DirEntry, FinishedTake, Host, ImportedAudio, IndexStatus, InputDevice, LatencyInfo,
-    LibraryRoot, Listing, MeterReadings, Notice, NoticeLevel, PluginParamView, PluginPath,
-    RecordingSettings, RecordingState, Recovery, SampleStatus, StreamStatus, TransportMode,
-    TransportStatus,
+    COUNT_IN_BARS, DirEntry, FinishedTake, Host, ImportedAudio, IndexStatus, InputDevice,
+    LatencyInfo, LibraryRoot, Listing, MeterReadings, MetronomeSettings, Notice, NoticeLevel,
+    PluginParamView, PluginPath, RecordingSettings, RecordingState, Recovery, SampleStatus,
+    StreamStatus, TransportMode, TransportStatus,
 };
 
 use egui::{Key, KeyboardShortcut, Modifiers};
@@ -624,6 +624,19 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 i.consume_shortcut(&cmd(Key::L)),
             )
         });
+        // Metronome and count-in (MET-002, MET-020).
+        let (metro, count) = ctx.input_mut(|i| {
+            (
+                i.consume_shortcut(&cmd(Key::M)),
+                i.consume_shortcut(&cmd(Key::P)),
+            )
+        });
+        if metro || count {
+            let mut m = self.host.metronome();
+            m.on ^= metro;
+            m.count_in ^= count;
+            self.host.set_metronome(m);
+        }
         if link {
             self.route_selected_channels(now);
         }
@@ -684,7 +697,12 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
     }
 
     fn toggle_play(&mut self) {
-        if self.host.transport().playing {
+        let t = self.host.transport();
+        if t.playing || t.count_in > 0 {
+            // Space also ends a recording or its count-in (REC-018).
+            if self.record_target.is_some() {
+                self.host.stop_recording();
+            }
             self.host.stop();
         } else {
             if self.song_mode {
@@ -809,6 +827,14 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                     self.show_recording = true;
                     ui.close();
                 }
+                ui.menu_button("Metronome", |ui| {
+                    let mut m = self.host.metronome();
+                    let before = m;
+                    metronome_settings_ui(ui, &mut m);
+                    if m != before {
+                        self.host.set_metronome(m);
+                    }
+                });
                 // The same choices as the transport field (SIG-010).
                 ui.menu_button("Time signature", |ui| {
                     let current = self.project.time_signature;
@@ -855,25 +881,32 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 if self.record_target.is_some() {
                     self.host.stop_recording();
                 }
-                if playing {
+                if playing || transport.count_in > 0 {
                     self.host.stop();
                 } else {
                     self.set_caret(0);
                 }
             }
             let rec_state = self.host.recording_state();
+            let counting = transport.count_in > 0;
             let recording = matches!(rec_state, RecordingState::Recording { .. });
-            if theme::icon_button(ui, theme::Icon::Record, recording, "Record")
-                .on_hover_text("Record the input onto the armed lane from the playhead")
+            // The button blinks during the count-in (MET-022).
+            let blink = counting && (now * 4.0) as i64 % 2 == 0;
+            if theme::icon_button(ui, theme::Icon::Record, recording || blink, "Record")
+                .on_hover_text("Record the input from the caret")
                 .clicked()
             {
-                if recording {
+                if recording || counting || self.record_target.is_some() {
                     self.host.stop_recording();
                     self.host.stop();
                 } else {
                     self.begin_recording(now);
                 }
             }
+            if counting {
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(125));
+            }
+            self.metronome_buttons(ui);
 
             if ui
                 .button("Panic")
@@ -889,9 +922,11 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             ui.selectable_value(&mut self.song_mode, true, "Song")
                 .on_hover_text("Play the playlist arrangement");
             ui.separator();
-            // Position.
+            // Position; during a count-in the beats left (MET-022).
             let ticks = transport.position_ticks.unwrap_or(0);
-            let text = if self.time_display {
+            let text = if counting {
+                format!("— {} —", transport.count_in)
+            } else if self.time_display {
                 toolbar::time_text(ticks, self.project.tempo_bpm)
             } else {
                 toolbar::bars_text(ticks, self.project.time_signature)
@@ -2194,13 +2229,6 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             self.notify(Notice::warning(why), now);
             return;
         }
-        if self.host.transport().playing {
-            self.notify(
-                Notice::info("Stop playback and place the playhead, then press Record"),
-                now,
-            );
-            return;
-        }
         if self.project.playlist.loop_enabled && self.project.playlist.loop_range.is_some() {
             self.loop_prompt = true;
             return;
@@ -2212,7 +2240,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
         let Some(lane) = self.playlist_view.armed else {
             return;
         };
-        let start = self.host.transport().position_ticks.unwrap_or(0);
+        let start = self.caret;
         let n = self
             .project
             .assets
@@ -2236,9 +2264,38 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 self.song_mode = true;
                 self.host.set_mode(TransportMode::Song);
                 self.mode_sent = Some(TransportMode::Song);
-                self.host.play();
+                // Recording always starts at the caret: a running playback
+                // stops and returns there first (REC-010/011).
+                if self.host.transport().playing {
+                    self.host.stop();
+                }
+                self.host.seek_ticks(start);
+                let beats = if self.host.metronome().count_in {
+                    COUNT_IN_BARS * u32::from(self.project.time_signature.numerator)
+                } else {
+                    0
+                };
+                self.host.count_in(beats);
             }
             Err(e) => self.notify(Notice::error(format!("Cannot record: {e}")), now),
+        }
+    }
+
+    /// Metronome and count-in toggles of the transport panel (MET-002,
+    /// MET-020); right-click opens the metronome settings.
+    fn metronome_buttons(&mut self, ui: &mut egui::Ui) {
+        let mut m = self.host.metronome();
+        let before = m;
+        let r = ui
+            .toggle_value(&mut m.on, "♩")
+            .on_hover_text("Metronome (Ctrl+M) · right-click: level");
+        r.context_menu(|ui| metronome_settings_ui(ui, &mut m));
+        ui.toggle_value(&mut m.count_in, "1·2·3·4")
+            .on_hover_text(format!(
+                "Count {COUNT_IN_BARS} bars before recording (Ctrl+P)"
+            ));
+        if m != before {
+            self.host.set_metronome(m);
         }
     }
 
@@ -3208,4 +3265,19 @@ fn new_lane_edit(p: &mut Project, name: String) -> (LaneId, Edit) {
         index: n,
     };
     (id, edit)
+}
+
+/// Metronome settings shared by the transport button's menu and Options.
+pub(crate) fn metronome_settings_ui(ui: &mut egui::Ui, m: &mut MetronomeSettings) {
+    ui.checkbox(&mut m.on, "Metronome (Ctrl+M)");
+    ui.add(
+        egui::Slider::new(&mut m.volume_db, -40.0..=0.0)
+            .suffix(" dB")
+            .text("Level"),
+    );
+    ui.checkbox(&mut m.only_recording, "Only while recording");
+    ui.checkbox(
+        &mut m.count_in,
+        format!("Count {COUNT_IN_BARS} bars before recording (Ctrl+P)"),
+    );
 }

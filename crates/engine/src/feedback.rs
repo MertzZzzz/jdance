@@ -79,6 +79,8 @@ pub struct EngineFeedback {
     pub meters: Meters,
     playing: AtomicBool,
     position: AtomicU64,
+    /// Count-in beats still to come (MET-022).
+    count_in: AtomicU32,
     loop_len: AtomicU64,
     active_voices: AtomicU32,
     voice_steals: AtomicU64,
@@ -98,6 +100,8 @@ pub struct FeedbackReading {
     /// Playhead position inside the pattern loop, in samples.
     pub position: u64,
     pub loop_len: u64,
+    /// Count-in beats still to come; 0 = none.
+    pub count_in: u32,
     pub active_voices: u32,
     pub voice_steals: u64,
     pub renders: u64,
@@ -111,6 +115,16 @@ pub struct FeedbackReading {
 }
 
 impl EngineFeedback {
+    /// The transport is rolling (not stopped, not counting in). Unlike
+    /// [`Self::read`] this has no side effects.
+    pub fn is_playing(&self) -> bool {
+        self.playing.load(Relaxed)
+    }
+
+    pub(crate) fn publish_count_in(&self, beats: u32) {
+        self.count_in.store(beats, Relaxed);
+    }
+
     pub(crate) fn publish_transport(&self, playing: bool, position: u64, loop_len: u64) {
         self.playing.store(playing, Relaxed);
         self.position.store(position, Relaxed);
@@ -156,6 +170,7 @@ impl EngineFeedback {
             playing: self.playing.load(Relaxed),
             position: self.position.load(Relaxed),
             loop_len: self.loop_len.load(Relaxed),
+            count_in: self.count_in.load(Relaxed),
             active_voices: self.active_voices.load(Relaxed),
             voice_steals: self.voice_steals.load(Relaxed),
             renders: self.renders.load(Relaxed),

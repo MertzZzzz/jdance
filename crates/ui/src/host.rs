@@ -61,6 +61,35 @@ pub struct TransportStatus {
     pub overloads: u64,
     pub voices: u32,
     pub dropped_commands: u64,
+    /// Count-in beats still to come (MET-022); 0 = none.
+    pub count_in: u32,
+}
+
+/// Metronome and count-in settings (spec 0.2.3 MET-002/003/020); user
+/// settings, not the project.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MetronomeSettings {
+    pub on: bool,
+    /// Level, −40…0 dB.
+    pub volume_db: f32,
+    /// Click only while recording.
+    pub only_recording: bool,
+    /// Count four bars before a recording.
+    pub count_in: bool,
+}
+
+/// Bars of the recording count-in (MET-020: fixed).
+pub const COUNT_IN_BARS: u32 = 4;
+
+impl Default for MetronomeSettings {
+    fn default() -> Self {
+        Self {
+            on: false,
+            volume_db: -6.0,
+            only_recording: false,
+            count_in: false,
+        }
+    }
 }
 
 /// Meter levels for display (linear peak, already with UI fall-off).
@@ -314,6 +343,16 @@ pub trait Host {
     /// outside the sequencer: piano keys, MIDI input.
     fn live_note(&mut self, _channel: jdance_domain::ChannelId, _key: u8, _velocity: Option<f32>) {}
     fn set_mode(&mut self, mode: TransportMode);
+    /// Clicks `beats` beats while stopped, then plays (MET-021); Stop
+    /// cancels the count-in.
+    fn count_in(&mut self, beats: u32) {
+        let _ = beats;
+        self.play();
+    }
+    fn metronome(&self) -> MetronomeSettings {
+        MetronomeSettings::default()
+    }
+    fn set_metronome(&mut self, _settings: MetronomeSettings) {}
     /// Moves the playhead (song mode).
     fn seek_ticks(&mut self, ticks: u64);
     fn transport(&self) -> TransportStatus;
