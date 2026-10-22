@@ -11,6 +11,7 @@ mod channel_settings;
 mod dock;
 mod host;
 mod icons;
+mod keys;
 mod lfo_dialog;
 mod library;
 mod mixer;
@@ -37,7 +38,7 @@ pub use host::{
     StreamStatus, TransportMode, TransportStatus,
 };
 
-use egui::{Key, KeyboardShortcut, Modifiers};
+use egui::Key;
 use jdance_commands::{
     Edit, History, add_insert, add_lane, add_pattern, add_sample_channel, add_send, add_track,
     audio_channels, duplicate_clips, make_unique,
@@ -624,55 +625,42 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context, now: f64) {
-        let cmd = |key| KeyboardShortcut::new(Modifiers::COMMAND, key);
-        let cmd_shift = |key| KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, key);
-        // egui matches shortcuts "logically" (extra Shift is ignored), so the
-        // Shift variants must be consumed before the plain ones.
-        let (redo, undo, save_as, save, open, new, link) = ctx.input_mut(|i| {
-            (
-                i.consume_shortcut(&cmd_shift(Key::Z)) || i.consume_shortcut(&cmd(Key::Y)),
-                i.consume_shortcut(&cmd(Key::Z)),
-                i.consume_shortcut(&cmd_shift(Key::S)),
-                i.consume_shortcut(&cmd(Key::S)),
-                i.consume_shortcut(&cmd(Key::O)),
-                i.consume_shortcut(&cmd(Key::N)),
-                i.consume_shortcut(&cmd(Key::L)),
-            )
-        });
-        // Metronome and count-in (MET-002, MET-020).
-        let (metro, count) = ctx.input_mut(|i| {
-            (
-                i.consume_shortcut(&cmd(Key::M)),
-                i.consume_shortcut(&cmd(Key::P)),
-            )
-        });
-        if metro || count {
-            let mut m = self.host.metronome();
-            m.on ^= metro;
-            m.count_in ^= count;
-            self.host.set_metronome(m);
+        // This window's keys plus those the undocked windows took last
+        // frame (KEY-001).
+        let mut k = keys::take(ctx);
+        k.merge(std::mem::take(&mut self.layout.keys));
+        // Space in a plugin's own editor window (KEY-004); an even count
+        // cancels out.
+        if self.host.take_editor_space() % 2 == 1 {
+            k.space = !k.space;
         }
-        if link {
+        if k.link {
             self.route_selected_channels(now);
         }
-        if redo {
+        if k.redo {
             self.redo(now);
-        } else if undo {
+        } else if k.undo {
             self.undo(now);
         }
-        if save_as {
+        if k.save_as {
             self.save(true, now);
-        } else if save {
+        } else if k.save {
             self.save(false, now);
         }
-        if open {
+        if k.open {
             self.guarded(Pending::Open, ctx, now);
         }
-        if new {
+        if k.new {
             self.guarded(Pending::New, ctx, now);
         }
-        let space = !ctx.egui_wants_keyboard_input() && ctx.input(|i| i.key_pressed(Key::Space));
-        if space {
+        // Metronome and count-in (MET-002, MET-020).
+        if k.metronome || k.count_in {
+            let mut m = self.host.metronome();
+            m.on ^= k.metronome;
+            m.count_in ^= k.count_in;
+            self.host.set_metronome(m);
+        }
+        if k.space {
             self.toggle_play();
         }
     }

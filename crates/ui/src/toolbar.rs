@@ -186,7 +186,8 @@ impl TapTempo {
                         [180.0, 100.0],
                         egui::Button::new(egui::RichText::new("Tap").size(20.0)),
                     );
-                    // The button takes keyboard focus so Space and Enter tap.
+                    // The button takes keyboard focus so Enter taps (Space
+                    // is the transport everywhere, KEY-002).
                     if tap.clicked() {
                         self.tap(now);
                     }

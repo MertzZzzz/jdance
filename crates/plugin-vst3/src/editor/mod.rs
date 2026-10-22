@@ -24,6 +24,7 @@ use std::any::Any;
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use vst3::Steinberg::*;
 use vst3::{Class, ComPtr, ComRef, ComWrapper};
 
@@ -33,6 +34,22 @@ const PLATFORM: FIDString = kPlatformTypeX11EmbedWindowID;
 const PLATFORM: FIDString = kPlatformTypeHWND;
 #[cfg(target_os = "macos")]
 const PLATFORM: FIDString = kPlatformTypeNSView;
+
+/// Space presses taken from plugin editor windows (spec 0.2.3 KEY-004).
+static SPACE_PRESSES: AtomicU32 = AtomicU32::new(0);
+
+/// Space pressed in a plugin editor window since the last call: the
+/// window frame takes it before the plugin, so it can start and stop the
+/// transport while the editor has the focus (KEY-004). Key repeats are
+/// not counted (KEY-005); Space typed into a text field of the plugin
+/// stays with the plugin where the platform can tell (Windows).
+pub fn take_space_presses() -> u32 {
+    SPACE_PRESSES.swap(0, Ordering::Relaxed)
+}
+
+pub(crate) fn note_space_press() {
+    SPACE_PRESSES.fetch_add(1, Ordering::Relaxed);
+}
 
 fn rect_size(r: &ViewRect) -> (u32, u32) {
     (

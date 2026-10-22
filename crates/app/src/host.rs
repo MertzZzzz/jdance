@@ -1057,6 +1057,10 @@ impl Host for AudioHost {
         }
     }
 
+    fn take_editor_space(&mut self) -> u32 {
+        jdance_plugin_vst3::take_space_presses()
+    }
+
     fn metronome(&self) -> jdance_ui::MetronomeSettings {
         let m = self.settings.metronome;
         jdance_ui::MetronomeSettings {

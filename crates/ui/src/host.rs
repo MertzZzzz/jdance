@@ -349,6 +349,11 @@ pub trait Host {
         let _ = beats;
         self.play();
     }
+    /// Space presses in plugin editor windows since the last call
+    /// (KEY-004).
+    fn take_editor_space(&mut self) -> u32 {
+        0
+    }
     fn metronome(&self) -> MetronomeSettings {
         MetronomeSettings::default()
     }

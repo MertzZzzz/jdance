@@ -38,6 +38,10 @@ fn main() {
     let (_p, c) = instantiate(&module, &class("JD Test Latency"), &SETUP, None).unwrap();
     assert!(c.open_editor("no gui").unwrap().is_none());
 
+    // A connection of our own for the whole test: it also keeps the X
+    // server from resetting between the two editors.
+    #[cfg(target_os = "linux")]
+    let x = x11rb::connect(None).unwrap();
     let (p, c) = instantiate(&module, &class("JD Test Gain"), &SETUP, None).unwrap();
     for round in 0..2 {
         let mut e = c
@@ -61,10 +65,67 @@ fn main() {
         }
         assert_eq!(e.view_size(), expected, "plugin size, round {round}");
         assert_eq!(e.size(), expected, "window size, round {round}");
+        #[cfg(target_os = "linux")]
+        if round == 0 {
+            space_reaches_the_host(&mut e, &x);
+        }
         // Closing the editor keeps the instance (PLG-063); round 2 reopens.
         drop(e);
     }
     drop(c);
     drop(p);
     println!("plugin editor test: ok");
+}
+
+/// Space typed into the editor (focus in the plugin's own view) starts the
+/// transport instead (spec 0.2.3 KEY-004); a held key counts once
+/// (KEY-005). XTEST input, like a real keyboard, is subject to the
+/// window's key grab.
+#[cfg(target_os = "linux")]
+fn space_reaches_the_host(
+    e: &mut jdance_plugin_vst3::Vst3Editor,
+    (conn, screen): &(x11rb::rust_connection::RustConnection, usize),
+) {
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::{ConnectionExt, InputFocus, KEY_PRESS_EVENT, KEY_RELEASE_EVENT};
+    use x11rb::protocol::xtest::ConnectionExt as _;
+    use x11rb::wrapper::ConnectionExt as _;
+    let root = conn.setup().roots[*screen].root;
+    let setup = conn.setup();
+    let (min, max) = (setup.min_keycode, setup.max_keycode);
+    let map = conn
+        .get_keyboard_mapping(min, max - min + 1)
+        .unwrap()
+        .reply()
+        .unwrap();
+    let per = usize::from(map.keysyms_per_keycode);
+    let space = min
+        + map
+            .keysyms
+            .chunks(per)
+            .position(|s| s.contains(&0x20))
+            .expect("a Space key") as u8;
+    // No window manager under Xvfb: the window sits at the origin, and
+    // the focus follows the pointer.
+    let pointer_root = u32::from(InputFocus::POINTER_ROOT);
+    conn.set_input_focus(InputFocus::POINTER_ROOT, pointer_root, x11rb::CURRENT_TIME)
+        .unwrap();
+    conn.xtest_fake_input(6, 0, x11rb::CURRENT_TIME, root, 40, 40, 0)
+        .unwrap(); // MotionNotify
+    let key = |kind: u8| {
+        conn.xtest_fake_input(kind, space, x11rb::CURRENT_TIME, root, 0, 0, 0)
+            .unwrap();
+    };
+    let _ = jdance_plugin_vst3::take_space_presses();
+    key(KEY_PRESS_EVENT);
+    key(KEY_RELEASE_EVENT);
+    conn.sync().unwrap();
+    let start = Instant::now();
+    let mut presses = 0;
+    while presses == 0 && start.elapsed() < Duration::from_secs(5) {
+        assert!(e.poll());
+        presses += jdance_plugin_vst3::take_space_presses();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(presses, 1, "Space in the editor reaches the host");
 }

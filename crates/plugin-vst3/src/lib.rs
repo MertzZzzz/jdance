@@ -17,7 +17,7 @@ mod module;
 mod scan;
 mod uid;
 
-pub use editor::Vst3Editor;
+pub use editor::{Vst3Editor, take_space_presses};
 pub use instance::{Vst3Controller, Vst3Processor, instantiate};
 pub use module::{Vst3Module, binary_path, bundle_binary};
 pub use scan::{

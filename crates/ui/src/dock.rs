@@ -82,6 +82,9 @@ pub(crate) struct Layout {
     undocked: BTreeMap<Panel, Placement>,
     /// View › Follow playhead turned off (spec 0.2.3 REC-017).
     pub no_follow: bool,
+    /// Global keys pressed in the undocked windows (KEY-001); the main
+    /// window handles them.
+    pub keys: crate::keys::GlobalKeys,
     /// Set when the layout should be saved.
     pub changed: bool,
 }
@@ -161,6 +164,7 @@ impl Layout {
         Self {
             undocked,
             no_follow,
+            keys: Default::default(),
             changed: false,
         }
     }
@@ -190,8 +194,14 @@ impl Layout {
         let id = ViewportId::from_hash_of(("jdance_panel", p.key(), instance));
         let mut event = WindowEvent::None;
         let mut seen = None;
+        let mut keys = crate::keys::GlobalKeys::default();
         ctx.show_viewport_immediate(id, builder, |ui, class| {
             let embedded = class == ViewportClass::EmbeddedWindow;
+            // The window's own keys; an embedded window shares the main
+            // window's input, which reads them itself.
+            if !embedded {
+                keys = crate::keys::take(ui.ctx());
+            }
             egui::CentralPanel::default().show(ui, |ui| {
                 ui.horizontal(|ui| {
                     if ui
@@ -224,6 +234,7 @@ impl Layout {
             }
             seen = Some((vp.1, vp.2));
         });
+        self.keys.merge(keys);
         if let Some((outer, inner)) = seen
             && let Some(pl) = self.undocked.get_mut(&p)
         {

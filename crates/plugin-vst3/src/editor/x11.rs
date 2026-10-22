@@ -7,7 +7,8 @@ use std::ffi::c_void;
 use x11rb::connection::Connection;
 use x11rb::protocol::Event;
 use x11rb::protocol::xproto::{
-    AtomEnum, ConfigureWindowAux, ConnectionExt, CreateWindowAux, EventMask, PropMode, WindowClass,
+    AtomEnum, ConfigureWindowAux, ConnectionExt, CreateWindowAux, EventMask, GrabMode, ModMask,
+    PropMode, WindowClass,
 };
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
@@ -18,6 +19,27 @@ pub struct NativeWindow {
     wm_delete: u32,
     size: Cell<(u32, u32)>,
     closed: Cell<bool>,
+    /// Keycode of Space, grabbed on this window (spec 0.2.3 KEY-004).
+    space: Option<u8>,
+    /// Time of the last Space release: auto-repeat sends a press with the
+    /// same time (KEY-005).
+    space_released: Cell<u32>,
+}
+
+/// The keycode that produces the Space keysym, if any.
+fn space_keycode(conn: &RustConnection) -> Option<u8> {
+    let setup = conn.setup();
+    let (min, max) = (setup.min_keycode, setup.max_keycode);
+    let map = conn
+        .get_keyboard_mapping(min, max - min + 1)
+        .ok()?
+        .reply()
+        .ok()?;
+    let per = usize::from(map.keysyms_per_keycode.max(1));
+    map.keysyms
+        .chunks(per)
+        .position(|syms| syms.contains(&0x20))
+        .map(|i| min + i as u8)
 }
 
 fn err(e: impl std::fmt::Display) -> PluginError {
@@ -73,6 +95,19 @@ impl NativeWindow {
             &[wm_delete],
         )
         .map_err(err)?;
+        // Space anywhere in the window, the plugin's embedded view
+        // included, comes to us first: a passive grab on the frame.
+        let space = space_keycode(&conn);
+        if let Some(code) = space {
+            let _ = conn.grab_key(
+                false,
+                window,
+                ModMask::ANY,
+                code,
+                GrabMode::ASYNC,
+                GrabMode::ASYNC,
+            );
+        }
         conn.map_window(window).map_err(err)?;
         // Make sure the window exists before the plugin embeds into it.
         conn.sync().map_err(err)?;
@@ -82,6 +117,8 @@ impl NativeWindow {
             wm_delete,
             size: Cell::new((w, h)),
             closed: Cell::new(false),
+            space,
+            space_released: Cell::new(u32::MAX),
         })
     }
 
@@ -111,6 +148,14 @@ impl NativeWindow {
                 }
                 Event::ConfigureNotify(e) if e.window == self.window => {
                     self.size.set((u32::from(e.width), u32::from(e.height)));
+                }
+                Event::KeyPress(e) if Some(e.detail) == self.space => {
+                    if e.time != self.space_released.get() {
+                        super::note_space_press();
+                    }
+                }
+                Event::KeyRelease(e) if Some(e.detail) == self.space => {
+                    self.space_released.set(e.time);
                 }
                 _ => {}
             }
