@@ -53,8 +53,11 @@ pub(crate) enum Command {
     Stop,
     /// Silences all voices immediately.
     Panic,
-    /// Jumps to a sample position; sounding voices get a short release.
+    /// Jumps to a sample position, which also becomes the position Stop
+    /// returns to; sounding voices get a short release.
     Seek(u64),
+    /// Keep playing past the arrangement end (recording).
+    HoldEnd(bool),
     SetSnapshot(Box<PlaybackSnapshot>),
     /// Changes one effect parameter without recompiling (smoothed).
     SetParam {
@@ -144,10 +147,17 @@ impl EngineHandle {
         self.send(Command::Panic)
     }
 
-    /// Jumps to `position` (samples). Notes that started before the new
-    /// position are not restored (MVP limitation).
+    /// Jumps to `position` (samples); Stop returns here (the Playlist
+    /// caret). Notes that started before the new position are not restored
+    /// (MVP limitation).
     pub fn seek(&mut self, position: u64) -> Result<(), EngineError> {
         self.send(Command::Seek(position))
+    }
+
+    /// While set, the transport does not stop at the arrangement end
+    /// (recording, spec 0.2.3 CUR-006).
+    pub fn hold_end(&mut self, hold: bool) -> Result<(), EngineError> {
+        self.send(Command::HoldEnd(hold))
     }
 
     /// Changes an effect parameter in place, smoothed by the effect.

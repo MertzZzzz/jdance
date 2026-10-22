@@ -141,6 +141,14 @@ pub struct EngineProcessor {
     playing: bool,
     /// Position inside the loop, in samples.
     pos: u64,
+    /// Where Stop and the arrangement end return to: the last seek
+    /// target, i.e. the Playlist caret (spec 0.2.3 CUR-004).
+    home: u64,
+    /// Where the current playback started; playback that starts at or
+    /// after the arrangement end does not stop there (CUR-006).
+    play_from: u64,
+    /// Ignore the arrangement end (recording, CUR-006).
+    hold_end: bool,
     voice_serial: u64,
     /// Automation was applied in the previous block.
     automating: bool,
@@ -177,6 +185,9 @@ impl EngineProcessor {
             play_after_stop: false,
             playing: false,
             pos: 0,
+            home: 0,
+            play_from: 0,
+            hold_end: false,
             voice_serial: 0,
             automating: false,
             param_events: Vec::with_capacity(MAX_PARAM_EVENTS),
@@ -268,7 +279,8 @@ impl EngineProcessor {
         }
         self.playing = self.play_after_stop;
         self.play_after_stop = false;
-        self.pos = 0;
+        self.pos = self.home;
+        self.play_from = self.home;
         if let Some(s) = &mut self.snapshot {
             for t in &mut s.tracks {
                 for i in &mut t.inserts {
@@ -305,9 +317,13 @@ impl EngineProcessor {
                     if self.stopping {
                         self.play_after_stop = true;
                     } else {
+                        if !self.playing {
+                            self.play_from = self.pos;
+                        }
                         self.playing = true;
                     }
                 }
+                Command::HoldEnd(hold) => self.hold_end = hold,
                 Command::Stop => {
                     self.stopping = true;
                     self.play_after_stop = false;
@@ -341,13 +357,16 @@ impl EngineProcessor {
                     // Notes that started before the new position are not
                     // restored (MVP limitation); sounding voices fade.
                     self.release_voices();
+                    // Any position, past the arrangement end too (CUR-002).
                     self.pos = match self.snapshot.as_deref() {
                         Some(s) => match s.loop_range {
                             Some((0, len)) if s.end == len => p % len.max(1),
-                            _ => p.min(s.end),
+                            _ => p,
                         },
-                        None => 0,
+                        None => p,
                     };
+                    self.home = self.pos;
+                    self.play_from = self.pos;
                 }
                 Command::SetParam {
                     insert,
@@ -510,6 +529,9 @@ impl EngineProcessor {
             out_fade,
             playing,
             pos,
+            home,
+            play_from,
+            hold_end,
             voice_serial,
             feedback,
             stopping,
@@ -625,6 +647,8 @@ impl EngineProcessor {
             // Arrangement end (no loop around it): after the tail, stop. An
             // empty arrangement has no end and keeps the transport running.
             reached_end = snap.end > 0
+                && !*hold_end
+                && *play_from < snap.end
                 && snap.loop_range.is_none_or(|(_, b)| p > b)
                 && p >= snap.end + snap.end_tail;
         }
@@ -811,7 +835,8 @@ impl EngineProcessor {
         meters.output.publish(u64::MAX, peak(ol), peak(or));
         if reached_end {
             *playing = false;
-            *pos = 0;
+            *pos = *home;
+            *play_from = *home;
         }
     }
 }

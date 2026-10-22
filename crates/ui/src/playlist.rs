@@ -122,7 +122,7 @@ struct Drag {
 /// View state kept by the app between frames.
 #[derive(Debug)]
 pub(crate) struct PlaylistView {
-    /// Pixels per bar.
+    /// Pixels per whole note.
     zoom: f32,
     selection: BTreeSet<ClipId>,
     drag: Option<Drag>,
@@ -140,6 +140,8 @@ pub(crate) struct PlaylistView {
     rmb: crate::widgets::RightSweep,
     /// Lane that receives the next recording (spec 0.2.0 §7).
     pub armed: Option<LaneId>,
+    /// The Song caret, drawn in song mode (spec 0.2.3 CUR-005).
+    pub caret: Option<u64>,
 }
 
 impl Default for PlaylistView {
@@ -156,6 +158,7 @@ impl Default for PlaylistView {
             erased: BTreeSet::new(),
             rmb: crate::widgets::RightSweep::default(),
             armed: None,
+            caret: None,
         }
     }
 }
@@ -1161,6 +1164,25 @@ impl PlaylistView {
                 CornerRadius::ZERO,
                 theme::AMBER.gamma_multiply(0.35),
             );
+        }
+        if let Some(c) = self.caret {
+            // Caret: a triangle on the ruler and a dashed line (CUR-005).
+            let x = x_of(c);
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    pos2(x - 6.0, origin.y + RULER_H - 9.0),
+                    pos2(x + 6.0, origin.y + RULER_H - 9.0),
+                    pos2(x, origin.y + RULER_H),
+                ],
+                theme::AMBER,
+                Stroke::NONE,
+            ));
+            painter.add(egui::Shape::dashed_line(
+                &[pos2(x, origin.y + RULER_H), pos2(x, rect.bottom())],
+                Stroke::new(1.0, theme::AMBER.gamma_multiply(0.7)),
+                4.0,
+                4.0,
+            ));
         }
         if let Some(pos) = playhead {
             let x = x_of(pos);

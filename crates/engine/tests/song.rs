@@ -263,3 +263,71 @@ fn empty_arrangement_keeps_transport_running() {
     }
     assert!(h.feedback().read().playing);
 }
+
+/// Renders `blocks` blocks of 1000 frames.
+fn run(p: &mut EngineProcessor, blocks: usize) {
+    let mut l = vec![0.0; 1000];
+    let mut r = vec![0.0; 1000];
+    for _ in 0..blocks {
+        p.render(&mut l, &mut r);
+    }
+}
+
+#[test]
+fn stop_returns_to_the_caret_and_the_caret_may_be_past_the_end() {
+    let mut s = Song::new();
+    s.clip(0, 0, 1);
+    let (mut h, mut p) = create_engine(SR);
+    h.set_snapshot(s.snapshot()).unwrap();
+    // The caret past the arrangement end is kept (CUR-002).
+    h.seek(5 * BAR).unwrap();
+    run(&mut p, 1);
+    assert_eq!(h.feedback().read().position, 5 * BAR);
+    h.seek(BAR / 2).unwrap();
+    h.play().unwrap();
+    run(&mut p, 10);
+    assert!(h.feedback().read().position > BAR / 2);
+    h.stop().unwrap();
+    run(&mut p, 10);
+    let f = h.feedback().read();
+    assert!(!f.playing);
+    assert_eq!(f.position, BAR / 2, "Stop returns to the caret (CUR-004)");
+}
+
+#[test]
+fn playback_from_past_the_end_keeps_running() {
+    let mut s = Song::new();
+    s.clip(0, 0, 1);
+    let (mut h, mut p) = create_engine(SR);
+    h.set_snapshot(s.snapshot()).unwrap();
+    h.seek(2 * BAR).unwrap();
+    h.play().unwrap();
+    run(&mut p, 3 * BAR as usize / 1000);
+    let f = h.feedback().read();
+    assert!(f.playing, "started after the end: no auto stop (CUR-006)");
+    assert_eq!(f.position, 5 * BAR);
+}
+
+#[test]
+fn the_end_returns_to_the_caret_unless_held() {
+    let mut s = Song::new();
+    s.clip(0, 0, 1);
+    let (mut h, mut p) = create_engine(SR);
+    h.set_snapshot(s.snapshot()).unwrap();
+    h.seek(BAR / 4).unwrap();
+    h.play().unwrap();
+    run(&mut p, 2 * BAR as usize / 1000);
+    let f = h.feedback().read();
+    assert!(!f.playing);
+    assert_eq!(f.position, BAR / 4);
+
+    // Recording holds the transport past the end.
+    h.hold_end(true).unwrap();
+    h.play().unwrap();
+    run(&mut p, 2 * BAR as usize / 1000);
+    assert!(h.feedback().read().playing);
+    h.hold_end(false).unwrap();
+    h.stop().unwrap();
+    run(&mut p, 10);
+    assert_eq!(h.feedback().read().position, BAR / 4);
+}

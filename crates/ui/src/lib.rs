@@ -117,6 +117,11 @@ pub struct JdanceApp<H: Host, S: ProjectStore> {
     /// Pattern edited in the rack and used for new clips.
     current_pattern: PatternId,
     song_mode: bool,
+    /// Song caret in ticks: where Play and Record start and Stop returns
+    /// (spec 0.2.3 CUR-001).
+    caret: u64,
+    /// Drag on the position display, in pixels not yet turned into beats.
+    caret_drag: f32,
     mode_sent: Option<TransportMode>,
     playlist_view: playlist::PlaylistView,
     sample_editor: Option<sample_editor::SampleEditor>,
@@ -213,6 +218,8 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             themed: false,
             current_pattern,
             song_mode,
+            caret: 0,
+            caret_drag: 0.0,
             mode_sent: None,
             playlist_view: playlist::PlaylistView::default(),
             sample_editor: None,
@@ -680,7 +687,20 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
         if self.host.transport().playing {
             self.host.stop();
         } else {
+            if self.song_mode {
+                // The engine keeps the caret in samples; a tempo change
+                // since the last seek moves it, so start from the ticks.
+                self.host.seek_ticks(self.caret);
+            }
             self.host.play();
+        }
+    }
+
+    /// Moves the caret (and the playhead in song mode) to `ticks`.
+    fn set_caret(&mut self, ticks: u64) {
+        self.caret = ticks;
+        if self.song_mode {
+            self.host.seek_ticks(ticks);
         }
     }
 
@@ -829,7 +849,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 self.toggle_play();
             }
             if theme::icon_button(ui, theme::Icon::Stop, false, "Stop")
-                .on_hover_text("Stop; when already stopped, return to the song start")
+                .on_hover_text("Stop and return to the caret; when already stopped, the caret goes to the song start")
                 .clicked()
             {
                 if self.record_target.is_some() {
@@ -838,7 +858,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 if playing {
                     self.host.stop();
                 } else {
-                    self.host.seek_ticks(0);
+                    self.set_caret(0);
                 }
             }
             let rec_state = self.host.recording_state();
@@ -876,16 +896,30 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             } else {
                 toolbar::bars_text(ticks, self.project.time_signature)
             };
-            if ui
+            let display = ui
                 .add(
                     egui::Button::new(egui::RichText::new(text).font(theme::mono(18.0)))
                         .fill(theme::FIELD)
-                        .min_size(egui::vec2(130.0, 30.0)),
+                        .min_size(egui::vec2(130.0, 30.0))
+                        .sense(egui::Sense::click_and_drag()),
                 )
-                .on_hover_text("Click to switch between bars and time")
-                .clicked()
-            {
+                .on_hover_text("Click to switch between bars and time; drag to move the caret by beats");
+            if display.clicked() {
                 self.time_display = !self.time_display;
+            }
+            if display.dragged() {
+                // 8 px per beat (UI-VIS-051 item 3, CUR-003).
+                const PX_PER_BEAT: f32 = 8.0;
+                self.caret_drag += display.drag_delta().x;
+                let beats = (self.caret_drag / PX_PER_BEAT).trunc();
+                if beats != 0.0 {
+                    self.caret_drag -= beats * PX_PER_BEAT;
+                    let beat = i64::from(self.project.time_signature.beat_ticks());
+                    let at = (self.caret as i64 / beat + beats as i64).max(0) * beat;
+                    self.set_caret(at as u64);
+                }
+            } else {
+                self.caret_drag = 0.0;
             }
             // Tempo.
             let mut tempo = self.project.tempo_bpm;
@@ -1080,7 +1114,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 Ok(())
             }
             A::Seek(ticks) => {
-                self.host.seek_ticks(ticks);
+                self.set_caret(ticks);
                 Ok(())
             }
             A::Place {
@@ -2870,7 +2904,11 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
                     });
                 }
                 _ => {
-                    let playhead = transport.position_ticks.filter(|_| self.song_mode);
+                    // Stopped, only the caret is drawn (CUR-005).
+                    let playhead = transport
+                        .position_ticks
+                        .filter(|_| self.song_mode && transport.playing);
+                    self.playlist_view.caret = self.song_mode.then_some(self.caret);
                     let dir = self.path.as_deref().and_then(Path::parent);
                     ui.horizontal_top(|ui| {
                         if self.show_project_browser && browser_docked {
@@ -3116,8 +3154,16 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
             TransportMode::Pattern(self.current_pattern)
         };
         if self.mode_sent != Some(mode) {
+            let to_song = mode == TransportMode::Song && self.mode_sent.is_some();
             self.mode_sent = Some(mode);
             self.host.set_mode(mode);
+            // Song resumes at the caret; a pattern starts at its top
+            // (CUR-007).
+            if to_song {
+                self.host.seek_ticks(self.caret);
+            } else if self.mode_sent != Some(TransportMode::Song) {
+                self.host.seek_ticks(0);
+            }
         }
         self.confirm_dialog(&ctx, now);
         self.show_notices(&ctx, now);
