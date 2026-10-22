@@ -240,6 +240,31 @@ fn instance_moves_between_snapshots_and_is_dropped_off_the_audio_thread() {
 }
 
 #[test]
+fn a_plugin_effect_is_heard_again_after_stop_and_play() {
+    let probe = Arc::new(Probe::default());
+    let (p, s) = project(true);
+    let (mut h, mut proc_) = create_engine(SR);
+    h.set_snapshot(compile(&p, &s, || {
+        PluginRt::fresh(FakeDelay::boxed(&probe))
+    }))
+    .unwrap();
+    let pan = 0.5f32.sqrt();
+    let mut play = |h: &mut jdance_engine::EngineHandle| {
+        h.play().unwrap();
+        let (mut l, mut r) = (vec![0.0; 400], vec![0.0; 400]);
+        proc_.render(&mut l, &mut r);
+        h.stop().unwrap();
+        let (mut sl, mut sr) = (vec![0.0; 4_800], vec![0.0; 4_800]);
+        proc_.render(&mut sl, &mut sr);
+        l[LATENCY]
+    };
+    let first = play(&mut h);
+    assert!((first - 1.5 * pan).abs() < 1e-6, "{first}");
+    // After Stop the plugin's tail is silenced; playback brings it back.
+    assert_eq!(play(&mut h), first);
+}
+
+#[test]
 fn plugin_sees_transport_at_block_start() {
     let probe = Arc::new(Probe::default());
     let (p, s) = project(true);

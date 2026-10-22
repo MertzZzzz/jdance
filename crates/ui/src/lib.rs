@@ -1514,7 +1514,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 Ok(())
             }
             A::ToSampler(ch) => {
-                self.to_sampler(ch);
+                self.send_to_sampler(ch);
                 Ok(())
             }
             A::AddLane => add_lane(&mut self.history, &mut self.project).map(|_| ()),
@@ -2583,7 +2583,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
 
     /// The file of audio channel `ch` into a new sampler channel,
     /// selected in the Channel Rack.
-    fn to_sampler(&mut self, ch: ChannelId) {
+    fn send_to_sampler(&mut self, ch: ChannelId) {
         match jdance_commands::sampler::sampler_from_audio(&mut self.history, &mut self.project, ch)
         {
             Ok(id) => {
@@ -4004,7 +4004,7 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
             self.delete_channels = Some(std::mem::take(&mut out.delete));
         }
         if let Some(ch) = out.to_sampler.take() {
-            self.to_sampler(ch);
+            self.send_to_sampler(ch);
         }
         if let Some(ch) = out.select_clips.take() {
             let ids: Vec<ClipId> = self.project.channel_clips(ch).map(|c| c.id).collect();
@@ -4609,7 +4609,6 @@ mod plugin_picker_tests {
         let at = d.find("Serum").expect("listed");
         d.click(at, &mut ui);
         d.frame(vec![], &mut ui);
-        drop(ui);
         assert_eq!(app.project.channels.len(), n + 1);
         assert_eq!(app.project.channels.last().unwrap().name, "Serum");
         assert!(app.plugin_picker.is_none(), "loaded: the window closes");
@@ -4627,7 +4626,6 @@ mod plugin_picker_tests {
         assert!(d.find("Serum").is_none(), "effects only");
         let at = d.find("Plate Reverb").expect("listed");
         d.click(at, &mut ui);
-        drop(ui);
         assert_ne!(app.mixer_view.selected, track);
         assert_eq!(app.project.mixer.track(track).unwrap().inserts.len(), 1);
     }

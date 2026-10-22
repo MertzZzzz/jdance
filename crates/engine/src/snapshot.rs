@@ -262,6 +262,9 @@ pub struct TrackRt {
     /// Live hardware input summed in before the inserts: first device
     /// channel and stereo; only while monitored (spec 0.2.3 INP-004).
     pub live_input: Option<(usize, bool)>,
+    /// A monitored input reaches this track (directly, or from a track
+    /// feeding it): Stop leaves it alone.
+    pub carries_live: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -711,6 +714,7 @@ pub fn compile_full(
                     jdance_domain::TrackInput::Mono(c) => (usize::from(c), false),
                     jdance_domain::TrackInput::Stereo(c) => (usize::from(c), true),
                 }),
+            carries_live: false,
         });
     }
 
@@ -737,6 +741,24 @@ pub fn compile_full(
         if !t.is_master() {
             let d = track_of(t.main_out);
             tracks[ti].main_out = Some((d, pdc.line(in_lat[d] - out_lat[ti])));
+        }
+    }
+
+    // Monitored inputs flow down to the master; destinations come later.
+    for ti in 0..tracks.len() {
+        let t = &tracks[ti];
+        if !(t.carries_live || t.live_input.is_some()) {
+            continue;
+        }
+        let dests: Vec<usize> = t
+            .main_out
+            .iter()
+            .map(|(d, _)| *d)
+            .chain(t.sends.iter().map(|s| s.dest))
+            .collect();
+        tracks[ti].carries_live = true;
+        for d in dests {
+            tracks[d].carries_live = true;
         }
     }
 

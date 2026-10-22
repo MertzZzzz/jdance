@@ -232,6 +232,9 @@ pub struct InsertRt {
     pub mix: Smoothed,
     /// The user's wet/dry of the slot (0..1), on top of `mix`.
     pub wet: Smoothed,
+    /// Plugin effects after Stop: their tail is not heard (VST3 has no
+    /// realtime reset) until the transport plays or a signal arrives.
+    pub hush: Smoothed,
     /// Dry path delayed by the effect latency.
     pub dry_delay: DelayLine,
     /// The effect's state is clean (fresh or fully reset).
@@ -256,6 +259,7 @@ impl InsertRt {
             sidechain: None,
             mix: Smoothed::new(if bypass { 0.0 } else { 1.0 }, xfade_len(sample_rate)),
             wet: Smoothed::new(1.0, xfade_len(sample_rate)),
+            hush: Smoothed::new(1.0, HUSH_RAMP),
             dry_delay: DelayLine::new(latency),
             clean: true,
             force_reset: false,
@@ -272,6 +276,7 @@ impl InsertRt {
         self.dry_delay.take_state(&mut old.dry_delay);
         self.mix.continue_from(&old.mix);
         self.wet.continue_from(&old.wet);
+        self.hush = old.hush;
         self.clean = old.clean;
         self.force_reset = old.force_reset;
         if let (Some(sc), Some(osc)) = (&mut self.sidechain, &mut old.sidechain) {
@@ -321,6 +326,11 @@ impl InsertRt {
         if let EffectRt::Plugin(p) = &mut self.effect {
             p.transport = *transport;
         }
+        if self.hush.target() == 0.0
+            && (transport.playing || dl.iter().chain(dr.iter()).any(|v| v.abs() > SIGNAL))
+        {
+            self.hush.set_target(1.0);
+        }
         let ctx = ProcessContext {
             sidechain,
             tempo_bpm: transport.tempo_bpm,
@@ -331,17 +341,16 @@ impl InsertRt {
             process_with_events(self.effect.processor(), l, r, events, &ctx);
         }
         self.clean = false;
-        if !self.mix.is_ramping()
-            && self.mix.current() == 1.0
-            && !self.wet.is_ramping()
-            && self.wet.current() == 1.0
-        {
+        let full = |s: &Smoothed| !s.is_ramping() && s.current() == 1.0;
+        if full(&self.mix) && full(&self.wet) && full(&self.hush) {
             return;
         }
         for i in 0..n {
             let m = self.mix.next_value() * self.wet.next_value();
-            l[i] = dl[i] + (l[i] - dl[i]) * m;
-            r[i] = dr[i] + (r[i] - dr[i]) * m;
+            // The hush fades the effect's share only: no dry leaks in.
+            let h = self.hush.next_value();
+            l[i] = dl[i] * (1.0 - m) + l[i] * m * h;
+            r[i] = dr[i] * (1.0 - m) + r[i] * m * h;
         }
     }
 }
@@ -464,6 +473,12 @@ mod tests {
     }
 }
 
+/// Above this a block holds a signal (about -100 dBFS).
+const SIGNAL: f32 = 1e-5;
+
+/// Ramp of the after-Stop silence of plugin instruments, in samples.
+const HUSH_RAMP: u32 = 64;
+
 /// Notes per block and sounding notes per instrument channel.
 pub const MAX_INSTRUMENT_EVENTS: usize = 512;
 pub const MAX_SOUNDING_NOTES: usize = 256;
@@ -482,6 +497,9 @@ pub struct InstrumentRt {
     /// (timeline end position, key, note id) of sounding notes.
     sounding: Vec<(u64, u8, i32)>,
     next_id: i32,
+    /// After Stop the plugin's release tail is not heard (VST3 has no
+    /// realtime reset); the next note brings the output back.
+    pub hush: Smoothed,
 }
 
 impl InstrumentRt {
@@ -492,6 +510,7 @@ impl InstrumentRt {
             events: Vec::with_capacity(MAX_INSTRUMENT_EVENTS),
             sounding: Vec::with_capacity(MAX_SOUNDING_NOTES),
             next_id: 0,
+            hush: Smoothed::new(1.0, HUSH_RAMP),
         }
     }
 
@@ -552,6 +571,7 @@ impl InstrumentRt {
         }
         self.next_id = self.next_id.wrapping_add(1);
         let note_id = self.next_id;
+        self.hush.set_target(1.0);
         self.push(jdance_plugin_api::NoteEvent {
             offset: offset as u32,
             note_id,
@@ -617,10 +637,18 @@ impl InstrumentRt {
             }
         }
         self.events.clear();
+        if self.hush.is_ramping() || self.hush.current() != 1.0 {
+            for (a, b) in l.iter_mut().zip(r.iter_mut()) {
+                let g = self.hush.next_value();
+                *a *= g;
+                *b *= g;
+            }
+        }
     }
 
     pub fn take_state(&mut self, old: &mut InstrumentRt) {
         self.plugin.take_state(&mut old.plugin);
+        self.hush = old.hush;
         if self.plugin.processor.is_some() && old.plugin.processor.is_none() {
             // Same instance: keep its sounding notes.
             std::mem::swap(&mut self.sounding, &mut old.sounding);

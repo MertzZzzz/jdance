@@ -21,12 +21,14 @@ type EventLog = Arc<Mutex<Vec<(u64, u8, bool)>>>;
 const STEP: u64 = 6_000;
 
 /// Logs (absolute sample, key, on) and outputs a DC level while any note
-/// sounds, delayed by `latency`.
+/// sounds and for `release` samples after the last note-off (a tail).
 struct FakeSynth {
     log: EventLog,
     clock: u64,
     held: Vec<u8>,
     latency: u32,
+    release: usize,
+    ringing: usize,
 }
 
 impl PluginProcessor for FakeSynth {
@@ -58,9 +60,19 @@ impl PluginProcessor for FakeSynth {
                     self.held.push(e.key);
                 } else {
                     self.held.retain(|x| *x != e.key);
+                    if self.held.is_empty() {
+                        self.ringing = self.release;
+                    }
                 }
             }
-            let v = if self.held.is_empty() { 0.0 } else { 1.0 };
+            let v = if !self.held.is_empty() {
+                1.0
+            } else if self.ringing > 0 {
+                self.ringing -= 1;
+                1.0
+            } else {
+                0.0
+            };
             left[i] = v;
             right[i] = v;
         }
@@ -110,6 +122,8 @@ fn synth(log: &EventLog, latency: u32) -> PluginRt {
         clock: 0,
         held: Vec::with_capacity(64),
         latency,
+        release: 0,
+        ringing: 0,
     }))
 }
 
@@ -375,4 +389,37 @@ fn live_notes_play_while_stopped_until_note_off() {
     let after = render(&mut e, 1_000, 500);
     assert!(after.iter().all(|v| *v == 0.0));
     assert_eq!(*log.lock().unwrap(), [(512, 62, true), (5_512, 62, false)]);
+}
+
+#[test]
+fn stop_silences_an_instrument_tail_until_the_next_note() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let (p, id, pid) = project(&[], Vec::new());
+    let plugin = PluginRt::fresh(Box::new(FakeSynth {
+        log: Arc::clone(&log),
+        clock: 0,
+        held: Vec::with_capacity(64),
+        latency: 0,
+        // A one-second release: VST3 has no reset, the tail keeps going.
+        release: 48_000,
+        ringing: 0,
+    }));
+    let (mut h, mut e) = create_engine(SR);
+    h.set_snapshot(compile(&p, pid, Some(plugin))).unwrap();
+    h.live_note(id, 60, 1.0).unwrap();
+    let held = render(&mut e, 2_048, 256);
+    let level = held[2_047];
+    assert!(level > 0.1, "sounds: {level}");
+    h.live_note_off(id, 60).unwrap();
+    assert!(
+        render(&mut e, 2_048, 256).iter().all(|v| *v == level),
+        "the tail rings"
+    );
+    h.stop().unwrap();
+    let out = render(&mut e, 4_096, 256);
+    assert!(out[1_024..].iter().all(|v| *v == 0.0), "Stop ends the tail");
+    // The next note is heard again.
+    h.live_note(id, 62, 1.0).unwrap();
+    let out = render(&mut e, 2_048, 256);
+    assert!(out[512..].iter().all(|v| *v == level));
 }

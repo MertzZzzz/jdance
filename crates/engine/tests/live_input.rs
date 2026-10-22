@@ -62,3 +62,25 @@ fn offline_renders_never_hear_the_input() {
     let out = render_offline(compile_with(&p, SR, PlayMode::Song, |_| None), N, || 1);
     assert!(out.left.iter().all(|v| *v == 0.0), "INP-006");
 }
+
+#[test]
+fn stop_does_not_interrupt_monitoring() {
+    let p = project(Some(TrackInput::Mono(0)), true, false);
+    let (mut h, mut proc_) = create_engine(SR);
+    h.set_snapshot(compile_with(&p, SR, PlayMode::Song, |_| None))
+        .unwrap();
+    let input: Vec<f32> = (0..N).flat_map(|_| [0.1, 0.2, 0.3]).collect();
+    let (mut l, mut r) = (vec![0.0; N], vec![0.0; N]);
+    h.play().unwrap();
+    for _ in 0..3 {
+        proc_.render_with_input(&mut l, &mut r, &input, 3);
+    }
+    h.stop().unwrap();
+    for _ in 0..2 {
+        proc_.render_with_input(&mut l, &mut r, &input, 3);
+        assert!(
+            l.iter().all(|v| (v - 0.1).abs() < 1e-3),
+            "the monitored input goes on through Stop"
+        );
+    }
+}

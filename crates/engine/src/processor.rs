@@ -142,6 +142,8 @@ pub struct EngineProcessor {
     env: Box<[f32]>,
     /// Output fade used by Stop.
     out_fade: Smoothed,
+    /// `out_fade` for the current block.
+    stop_env: Box<[f32]>,
     stopping: bool,
     play_after_stop: bool,
     /// Count-in beats to start once a running Stop finishes (Record while
@@ -192,6 +194,7 @@ impl EngineProcessor {
             dry: Buses::new(1),
             env: vec![0.0; MAX_BLOCK].into_boxed_slice(),
             out_fade: Smoothed::new(1.0, release_len(sample_rate)),
+            stop_env: vec![0.0; MAX_BLOCK].into_boxed_slice(),
             stopping: false,
             play_after_stop: false,
             count_after_stop: 0,
@@ -334,13 +337,25 @@ impl EngineProcessor {
         if beats > 0 {
             self.metronome.start_count_in(beats);
         }
+        // Effect tails end; tracks carrying a monitored input go on as
+        // they are. Plugin effects and instruments cannot be reset from
+        // here: their output stays silent until signal or playback returns.
         if let Some(s) = &mut self.snapshot {
-            for t in &mut s.tracks {
+            let live = s.tracks.iter().any(|t| t.carries_live);
+            for t in s.tracks.iter_mut().filter(|t| !t.carries_live) {
                 for i in &mut t.inserts {
                     i.force_reset = true;
+                    if matches!(i.effect, crate::effect_rt::EffectRt::Plugin(_)) {
+                        i.hush.reset(0.0);
+                    }
                 }
             }
-            if let Some(l) = &mut s.limiter {
+            for ch in &mut s.channels {
+                if let Some(inst) = &mut ch.instrument {
+                    inst.hush.reset(0.0);
+                }
+            }
+            if !live && let Some(l) = &mut s.limiter {
                 l.reset();
             }
         }
@@ -405,6 +420,10 @@ impl EngineProcessor {
                     self.play_after_stop = false;
                     self.out_fade.set_target(0.0);
                     self.instruments_off();
+                    // Stop ends the Browser preview too.
+                    if let Some((_, v)) = &mut self.preview {
+                        v.release(release_len(self.sample_rate));
+                    }
                 }
                 Command::Preview(sample) => {
                     let new = sample.map(|s| {
@@ -620,6 +639,7 @@ impl EngineProcessor {
             dry,
             env,
             out_fade,
+            stop_env,
             playing,
             pos,
             home,
@@ -784,12 +804,28 @@ impl EngineProcessor {
             }
         }
 
+        // The Stop fade. Without a monitored input it applies to the
+        // master output; with one, to every track that does not carry it
+        // and to channels feeding a track that does, so monitoring goes
+        // on through Stop.
+        let fading = out_fade.is_ramping() || out_fade.current() != 1.0;
+        if fading {
+            out_fade.fill(&mut stop_env[..n]);
+        }
+        let live_route = fading && snap.tracks.iter().any(|t| t.carries_live);
+
         // 2. Channel gain and compensation, summed into bus inputs.
         for (ci, ch) in snap.channels.iter_mut().enumerate() {
             {
                 let (l, r) = channels.get_mut(ci, n);
                 ch.gain.apply(l, r);
                 ch.delay.process(l, r);
+                if live_route && snap.tracks.get(ch.track).is_some_and(|t| t.carries_live) {
+                    for i in 0..n {
+                        l[i] *= stop_env[i];
+                        r[i] *= stop_env[i];
+                    }
+                }
             }
             add_into(inputs.get_mut(ch.track, n), channels.get(ci, n));
         }
@@ -823,6 +859,13 @@ impl EngineProcessor {
                 for i in 0..n {
                     l[i] *= env[i];
                     r[i] *= env[i];
+                }
+            }
+            if live_route && !track.carries_live {
+                let (l, r) = inputs.get_mut(ti, n);
+                for i in 0..n {
+                    l[i] *= stop_env[i];
+                    r[i] *= stop_env[i];
                 }
             }
             copy_into(pre_taps.get_mut(ti, n), inputs.get(ti, n));
@@ -936,12 +979,10 @@ impl EngineProcessor {
 
         // 4. Master output stage: Stop fade, safety limiter, output meter.
         let (ol, or) = scratch.get_mut(2, n);
-        let fading = out_fade.is_ramping() || out_fade.current() != 1.0;
-        if fading {
-            out_fade.fill(&mut env[..n]);
+        if fading && !live_route {
             for i in 0..n {
-                ol[i] *= env[i];
-                or[i] *= env[i];
+                ol[i] *= stop_env[i];
+                or[i] *= stop_env[i];
             }
         }
         if let Some(limiter) = &mut snap.limiter {
@@ -958,7 +999,7 @@ impl EngineProcessor {
         } else if !*playing && !*stopping {
             count_done = metronome.schedule_count_in(n, beat, per_bar);
         }
-        metronome.render(ol, or, fading.then_some(&env[..n]));
+        metronome.render(ol, or, fading.then_some(&stop_env[..n]));
         if count_done {
             *play_from = *pos;
             *playing = true;

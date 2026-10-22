@@ -839,6 +839,8 @@ impl Host for AudioHost {
     }
 
     fn stop(&mut self) {
+        // A preview still loading does not start after Stop.
+        self.pending_preview = None;
         if let Some(a) = &mut self.active {
             let _ = a.engine.stop();
         }

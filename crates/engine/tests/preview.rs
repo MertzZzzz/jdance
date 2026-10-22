@@ -33,3 +33,22 @@ fn preview_plays_without_transport_and_is_released_off_thread() {
     h.collect_garbage();
     assert_eq!(Arc::strong_count(&s), 1);
 }
+
+#[test]
+fn stop_ends_the_preview() {
+    let (mut h, mut e) = create_engine(48_000);
+    let s = Arc::new(SampleBuffer::from_interleaved(48_000, 1, &[1.0; 48_000]));
+    h.preview(Some(s)).unwrap();
+    let (mut l, mut r) = (vec![0.0; 256], vec![0.0; 256]);
+    e.render(&mut l, &mut r);
+    assert_eq!(l[255], 0.5, "playing");
+    h.stop().unwrap();
+    e.render(&mut l, &mut r);
+    let steps = l
+        .windows(2)
+        .map(|w| (w[1] - w[0]).abs())
+        .fold(0.0, f32::max);
+    assert!(steps < 0.01, "fades out without a click: {steps}");
+    e.render(&mut l, &mut r);
+    assert!(l.iter().all(|v| *v == 0.0), "silent after Stop");
+}

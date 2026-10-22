@@ -18,7 +18,7 @@ fn scan_plugin_prints_descriptors_or_fails_cleanly() {
         String::from_utf8_lossy(&out.stderr)
     );
     let d: Vec<jdance_plugin_api::PluginDescriptor> = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(d.len(), 5);
+    assert_eq!(d.len(), 7);
     assert!(d.iter().all(|d| d.path == bundle.display().to_string()));
 
     let bad = Command::new(env!("CARGO_BIN_EXE_jdance"))
