@@ -10,6 +10,7 @@ use jdance_domain::{
     AudioAsset, AudioClip, AutomationClip, ClipId, LANE_COLORS, Lane, LaneId, MAX_PATTERN_STEPS,
     Pattern, PatternClip, PatternId, Playlist, Project, Step, TICKS_PER_STEP,
 };
+use std::collections::BTreeSet;
 
 fn arrangement_err(m: String) -> EditError {
     EditError::Arrangement(m)
@@ -173,11 +174,12 @@ pub(crate) fn apply(edit: &Edit, p: &mut Project) -> Result<Edit, EditError> {
             if p.playlist.clip(clip.id).is_some() {
                 return Err(arrangement_err(format!("clip {} exists", clip.id.0)));
             }
+            // One clip checked, not the whole arrangement: a batch of
+            // many clips stays linear (spec 0.2.5, Ctrl+D on 1000 clips).
+            p.playlist
+                .validate_new_clip(clip, &p.patterns)
+                .map_err(arrangement_err)?;
             p.playlist.clips.push(*clip);
-            if let Err(e) = p.validate_arrangement() {
-                p.playlist.clips.pop();
-                return Err(arrangement_err(e));
-            }
             Ok(Edit::RemoveClip(clip.id))
         }
         Edit::RemoveClip(id) => {
@@ -452,9 +454,11 @@ pub fn add_clip(
     Ok(id)
 }
 
-/// Duplicates clips (pattern and audio) right after the end of the
-/// selection, preserving their relative layout; new clip IDs, same
-/// patterns and files. One undo step.
+/// Duplicates clips (pattern, audio, automation) as one block placed
+/// right at the end of the lanes they are on (spec 0.2.5 §1): the block
+/// moves by the latest clip end on those lanes, any clip counted, minus
+/// its own start; lanes and the relative layout are kept, nothing is
+/// snapped. New clip IDs, same patterns and files. One undo step.
 pub fn duplicate_clips(
     history: &mut History,
     p: &mut Project,
@@ -472,26 +476,32 @@ pub fn duplicate_clips(
         .iter()
         .filter_map(|id| p.playlist.automation_clip(*id).copied())
         .collect();
-    // Selection span in ticks over all kinds.
-    let spans: Vec<(f64, f64)> = clips
+    let Some(first) = clips
         .iter()
-        .map(|c| (c.start as f64, c.interval().1 as f64))
-        .chain(audio.iter().filter_map(|c| p.audio_clip_ticks(c)))
+        .map(|c| c.start as f64)
         .chain(
-            automation
+            audio
                 .iter()
-                .map(|c| (c.start as f64, c.interval().1 as f64)),
+                .filter_map(|c| p.audio_clip_ticks(c).map(|s| s.0)),
         )
-        .collect();
-    let (Some(first), Some(end)) = (
-        spans.iter().map(|s| s.0).reduce(f64::min),
-        spans.iter().map(|s| s.1).reduce(f64::max),
-    ) else {
+        .chain(automation.iter().map(|c| c.start as f64))
+        .reduce(f64::min)
+    else {
         return Ok(Vec::new());
     };
-    let offset = (end - first).ceil().max(1.0) as u64;
+    let lanes: BTreeSet<LaneId> = clips
+        .iter()
+        .map(|c| c.lane)
+        .chain(audio.iter().map(|c| c.lane))
+        .chain(automation.iter().map(|c| c.lane))
+        .collect();
+    let end = lane_end(p, &lanes);
+    // Pattern and automation clips start on whole ticks, audio clips on
+    // whole frames: round up so a copy never overlaps the clip it follows.
+    let shift = (end - first).max(0.0);
+    let offset = (shift - 1e-9).ceil().max(0.0) as u64;
     let fpt = jdance_domain::frames_per_tick(p.tempo_bpm, p.timebase_rate);
-    let frames = (offset as f64 * fpt).round() as u64;
+    let frames = (shift * fpt - 1e-6).ceil().max(0.0) as u64;
     let mut edits = Vec::new();
     let mut new_ids = Vec::new();
     for c in clips {
@@ -523,6 +533,28 @@ pub fn duplicate_clips(
     }
     history.execute(p, Edit::Batch(edits))?;
     Ok(new_ids)
+}
+
+/// The latest clip end on `lanes`, in ticks; any kind of clip counts.
+fn lane_end(p: &Project, lanes: &BTreeSet<LaneId>) -> f64 {
+    let pl = &p.playlist;
+    pl.clips
+        .iter()
+        .filter(|c| lanes.contains(&c.lane))
+        .map(|c| c.interval().1 as f64)
+        .chain(
+            pl.audio_clips
+                .iter()
+                .filter(|c| lanes.contains(&c.lane))
+                .filter_map(|c| p.audio_clip_ticks(c).map(|s| s.1)),
+        )
+        .chain(
+            pl.automation_clips
+                .iter()
+                .filter(|c| lanes.contains(&c.lane))
+                .map(|c| c.interval().1 as f64),
+        )
+        .fold(0.0, f64::max)
 }
 
 /// Copies the clip's pattern (new pattern ID) and points only this clip
@@ -766,6 +798,58 @@ mod tests {
         h.undo(&mut p).unwrap();
         assert_eq!(p.playlist.clip(a).unwrap().start, 0);
         assert_eq!(p.playlist.clip(b).unwrap().start, 3_840);
+    }
+
+    /// Spec 0.2.5 §1: copies go to the end of their lanes, as a block.
+    #[test]
+    fn duplicate_goes_to_the_end_of_the_lane() {
+        let (mut p, mut h, pat, lane) = setup();
+        let bar = 3_840;
+        let a = add_clip(&mut h, &mut p, lane, pat, 0).unwrap();
+        add_clip(&mut h, &mut p, lane, pat, bar).unwrap();
+        add_clip(&mut h, &mut p, lane, pat, 2 * bar).unwrap();
+        let d1 = duplicate_clips(&mut h, &mut p, &[a]).unwrap();
+        assert_eq!(p.playlist.clip(d1[0]).unwrap().start, 3 * bar, "after C");
+        let mut starts = vec![];
+        let mut sel = d1;
+        for _ in 0..4 {
+            sel = duplicate_clips(&mut h, &mut p, &sel).unwrap();
+            starts.push(p.playlist.clip(sel[0]).unwrap().start);
+        }
+        assert_eq!(starts, [4 * bar, 5 * bar, 6 * bar, 7 * bar], "a series");
+        let n = p.playlist.clips.len();
+        h.undo(&mut p).unwrap();
+        assert_eq!(p.playlist.clips.len(), n - 1, "one undo, one copy");
+        assert!(duplicate_clips(&mut h, &mut p, &[]).unwrap().is_empty());
+
+        // Two lanes: one block, at the latest end of both lanes.
+        let lane2 = add_lane(&mut h, &mut p).unwrap();
+        let x = add_clip(&mut h, &mut p, lane2, pat, 20 * bar).unwrap();
+        let y = add_clip(&mut h, &mut p, lane, pat, 21 * bar).unwrap();
+        // Latest end on these lanes: the last copy on `lane` (ends at 7)
+        // and y (ends at 22).
+        let d = duplicate_clips(&mut h, &mut p, &[x, y]).unwrap();
+        let cx = *p.playlist.clip(d[0]).unwrap();
+        let cy = *p.playlist.clip(d[1]).unwrap();
+        assert_eq!((cx.lane, cx.start), (lane2, 22 * bar));
+        assert_eq!((cy.lane, cy.start), (lane, 23 * bar), "layout kept");
+    }
+
+    /// Spec 0.2.5 «Общие условия»: Ctrl+D on 1000 clips within 100 ms
+    /// (checked in release builds; debug builds get ten times as long).
+    #[test]
+    fn duplicating_a_thousand_clips_is_fast() {
+        let (mut p, mut h, pat, lane) = setup();
+        let ids: Vec<ClipId> = (0..1000)
+            .map(|i| add_clip(&mut h, &mut p, lane, pat, i * 3_840).unwrap())
+            .collect();
+        let t = std::time::Instant::now();
+        let new = duplicate_clips(&mut h, &mut p, &ids).unwrap();
+        let ms = t.elapsed().as_millis();
+        assert_eq!(new.len(), 1000);
+        eprintln!("duplicate 1000 clips: {ms} ms");
+        let limit = if cfg!(debug_assertions) { 1000 } else { 100 };
+        assert!(ms < limit, "{ms} ms");
     }
 
     #[test]

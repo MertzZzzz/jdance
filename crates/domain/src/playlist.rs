@@ -271,6 +271,31 @@ impl Playlist {
     }
 
     /// Structural checks against the project's patterns.
+    /// The checks of [`Self::validate`] for one new pattern clip, without
+    /// going over the others: its ID is unused by lanes and pattern clips.
+    pub fn validate_new_clip(&self, c: &PatternClip, patterns: &[Pattern]) -> Result<(), String> {
+        if self.lane(LaneId(c.id.0)).is_some() || self.clip(c.id).is_some() {
+            return Err(format!("duplicate clip ID {}", c.id.0));
+        }
+        self.validate_clip_fields(c, patterns)
+    }
+
+    fn validate_clip_fields(&self, c: &PatternClip, patterns: &[Pattern]) -> Result<(), String> {
+        if self.lane(c.lane).is_none() {
+            return Err(format!("clip {} is on a missing lane", c.id.0));
+        }
+        if !patterns.iter().any(|p| p.id == c.pattern) {
+            return Err(format!("clip {} references a missing pattern", c.id.0));
+        }
+        if c.duration == 0 || c.duration > MAX_CLIP_TICKS || c.offset > MAX_CLIP_TICKS {
+            return Err(format!("clip {} duration or offset out of range", c.id.0));
+        }
+        if c.start > MAX_START_TICKS {
+            return Err(format!("clip {} starts too late", c.id.0));
+        }
+        Ok(())
+    }
+
     pub fn validate(&self, patterns: &[Pattern]) -> Result<(), String> {
         let mut ids = BTreeSet::new();
         for l in &self.lanes {
@@ -282,18 +307,7 @@ impl Playlist {
             if !ids.insert(c.id.0) {
                 return Err(format!("duplicate clip ID {}", c.id.0));
             }
-            if self.lane(c.lane).is_none() {
-                return Err(format!("clip {} is on a missing lane", c.id.0));
-            }
-            if !patterns.iter().any(|p| p.id == c.pattern) {
-                return Err(format!("clip {} references a missing pattern", c.id.0));
-            }
-            if c.duration == 0 || c.duration > MAX_CLIP_TICKS || c.offset > MAX_CLIP_TICKS {
-                return Err(format!("clip {} duration or offset out of range", c.id.0));
-            }
-            if c.start > MAX_START_TICKS {
-                return Err(format!("clip {} starts too late", c.id.0));
-            }
+            self.validate_clip_fields(c, patterns)?;
         }
         if let Some((a, b)) = self.loop_range
             && a >= b

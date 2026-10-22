@@ -1375,7 +1375,25 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
         use playlist::PlaylistAction as A;
         let result = match action {
             A::Duplicate(ids) => {
-                duplicate_clips(&mut self.history, &mut self.project, &ids).map(|_| ())
+                duplicate_clips(&mut self.history, &mut self.project, &ids).map(|new| {
+                    // The copies are selected and shown (spec 0.2.5 §1).
+                    let pl = &self.project.playlist;
+                    let first = new
+                        .iter()
+                        .filter_map(|id| {
+                            pl.clip(*id)
+                                .map(|c| c.start)
+                                .or_else(|| pl.automation_clip(*id).map(|c| c.start))
+                                .or_else(|| {
+                                    pl.audio_clip(*id)
+                                        .and_then(|c| self.project.audio_clip_ticks(c))
+                                        .map(|s| s.0 as u64)
+                                })
+                        })
+                        .min();
+                    self.playlist_view.select_only(&new);
+                    self.playlist_view.reveal = first;
+                })
             }
             A::MakeUnique(id) => make_unique(&mut self.history, &mut self.project, id).map(|p| {
                 self.current_pattern = p;

@@ -147,6 +147,8 @@ pub(crate) struct PlaylistView {
     ruler: crate::ruler::Ruler,
     /// The take being recorded, drawn as a growing clip (REC-014).
     pub live: Option<LiveTake>,
+    /// Scroll just enough to show this tick (new copies, spec 0.2.5 §1).
+    pub reveal: Option<u64>,
     /// Keep the playhead in view while playing (REC-017).
     pub follow: bool,
     /// The user scrolled or zoomed away; following waits until the
@@ -183,6 +185,7 @@ impl Default for PlaylistView {
             caret: None,
             ruler: crate::ruler::Ruler::default(),
             live: None,
+            reveal: None,
             follow: true,
             follow_paused: false,
         }
@@ -531,7 +534,14 @@ impl PlaylistView {
                 self.tool = t;
             }
         }
+        // Esc clears the selection (spec 0.2.5 §1, open question 4).
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) && self.ruler.active().is_none() {
+            self.selection.clear();
+        }
         if self.selection.is_empty() {
+            if dup {
+                out.hint = Some("No clips selected".into());
+            }
             return;
         }
         if del {
@@ -1265,6 +1275,14 @@ impl PlaylistView {
             live_take(&painter, r, t);
         }
         self.follow_playhead(ui, playhead.map(x_of));
+        if let Some(t) = self.reveal.take() {
+            // Minimal scroll, zoom unchanged.
+            let x = x_of(t);
+            ui.scroll_to_rect(
+                Rect::from_min_size(pos2(x, ui.clip_rect().top()), vec2(48.0, 1.0)),
+                None,
+            );
+        }
         let caret = match gesture {
             Some(g) if self.caret.is_some() => Some(g.caret()),
             _ => self.caret,
