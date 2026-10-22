@@ -383,7 +383,7 @@ accessibility-меткам, заглушка `Host`) и приложение п�
 | Каретка паттерна: Play, проходы, Stop (PCR-001…009) | PASS | `engine/tests/song.rs` `pattern_mode_plays_from_its_caret_and_stop_returns_there`; тесты приложения: сброс при смене паттерна; `piano` тест линейки |
 | Piano Roll и Channel Rack в режиме Song (PCR-010…015) | PASS | `domain` тесты `pattern_position…`, `timeline_tick_of…`; тесты приложения: пересчёт каретки и playhead, линейка Piano Roll двигает каретку песни в клипе |
 | Рендер выделения (EXP-001…009) | PASS | `render` тесты: фрагмент совпадает с отрезком полного рендера (с хвостом реверберации), после конца новых нот нет, Loop не действует, обрезка аудиоклипа с затуханием; тест окна экспорта |
-| Windows MSI 0.2.4 | NOT RUN | будет собран workflow `Release` после слияния |
+| Windows MSI 0.2.4 | PASS | сборка, установка, проверка версии в workflow `Release`; https://github.com/MertzZzzz/jdance/releases/tag/v0.2.4 |
 
 Отступления от спецификации 0.2.4:
 
