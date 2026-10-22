@@ -10,6 +10,7 @@ mod browser;
 mod channel_settings;
 mod color_picker;
 mod dock;
+mod drop_name;
 mod host;
 mod icons;
 mod keys;
@@ -160,6 +161,8 @@ pub struct JdanceApp<H: Host, S: ProjectStore> {
     rename: Option<RenameDialog>,
     /// The colour window (spec 0.2.5 §6).
     color: Option<ColorWindow>,
+    /// The name and colour of what is being dragged (§7, §8).
+    dragging: Option<drop_name::Dropped>,
     show_mixer: bool,
     show_rack: bool,
     show_playlist: bool,
@@ -277,6 +280,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             settings,
             rename: None,
             color: None,
+            dragging: None,
             show_mixer: true,
             show_rack: true,
             show_playlist: true,
@@ -1445,6 +1449,24 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             }
             A::Color(id) => {
                 self.open_color(vec![Named::Lane(id)]);
+                Ok(())
+            }
+            A::NameFromDrop(id) => {
+                self.name_from_drop(Named::Lane(id), now);
+                Ok(())
+            }
+            A::ResetLane(id) => {
+                let i = self.project.playlist.lanes.iter().position(|l| l.id == id);
+                if let Some(i) = i
+                    && let Some(edit) = naming::set_name_color(
+                        &self.project,
+                        &[Named::Lane(id)],
+                        Some(&format!("Lane {}", i + 1)),
+                        Some(naming::default_color(&self.project, Named::Lane(id))),
+                    )
+                {
+                    self.apply(edit, false, now);
+                }
                 Ok(())
             }
             A::Seek(ticks) => {
@@ -2844,10 +2866,26 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 self.open_color(vec![Named::Track(id)]);
                 Ok(())
             }
+            mixer::MixerAction::NameFromDrop(id) => {
+                self.name_from_drop(Named::Track(id), now);
+                Ok(())
+            }
         };
         match result {
             Ok(()) => self.sync_needed = true,
             Err(e) => self.notify(Notice::error(e.to_string()), now),
+        }
+    }
+
+    /// Names and colours `target` after what was just dropped on it
+    /// (spec 0.2.5 §7, §8): one undo step, none when nothing changes.
+    fn name_from_drop(&mut self, target: Named, now: f64) {
+        let Some(d) = self.dragging.clone() else {
+            return;
+        };
+        if let Some(edit) = naming::set_name_color(&self.project, &[target], Some(&d.name), d.color)
+        {
+            self.apply(edit, false, now);
         }
     }
 
@@ -3282,6 +3320,10 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
         }
         self.handle_close_request(&ctx);
         self.shortcuts(&ctx, now);
+        // What a drag would name and colour, for the strips and headers.
+        self.dragging = drop_name::dragged(&ctx, &self.project);
+        self.mixer_view.drop = self.dragging.clone();
+        self.playlist_view.drop = self.dragging.clone();
 
         if !self.themed {
             theme::install(&ctx);
@@ -3962,5 +4004,54 @@ mod color_tests {
         assert_eq!(app.project.playlist.lane(a).unwrap().color, before);
         assert_ne!(app.project.playlist.lane(b).unwrap().color, red);
         assert_eq!(app.history.undo_label(), None, "one step");
+    }
+}
+
+#[cfg(test)]
+mod drop_tests {
+    use super::*;
+    use crate::drop_name::Dropped;
+    use crate::test_ui::{NoStore, StubHost};
+
+    #[test]
+    fn a_drop_names_and_colours_in_one_step_and_a_repeat_is_no_step() {
+        let mut p = Project::new();
+        let t = TrackId(p.ids.next());
+        p.mixer
+            .tracks
+            .push(jdance_domain::MixerTrack::new(t, "Insert 1"));
+        p.playlist = jdance_domain::Playlist::with_lanes(1, || p.ids.next());
+        let lane = p.playlist.lanes[0].id;
+        let mut app = JdanceApp::new(StubHost::default(), NoStore, p, None);
+        app.dragging = Some(Dropped {
+            name: "Kick".into(),
+            color: Some([200, 0, 0]),
+        });
+        app.name_from_drop(Named::Track(t), 0.0);
+        let tr = app.project.mixer.track(t).unwrap();
+        assert_eq!((tr.name.as_str(), tr.color), ("Kick", Some([200, 0, 0])));
+        assert!(app.history.undo_label().is_some());
+        app.history.undo(&mut app.project).unwrap();
+        let tr = app.project.mixer.track(t).unwrap();
+        assert_eq!(
+            (tr.name.as_str(), tr.color),
+            ("Insert 1", None),
+            "one undo: both"
+        );
+        app.history.redo(&mut app.project).unwrap();
+        // The same values again: no new step.
+        app.name_from_drop(Named::Track(t), 0.0);
+        app.history.undo(&mut app.project).unwrap();
+        assert_eq!(app.project.mixer.track(t).unwrap().name, "Insert 1");
+        // A file without colour on a lane header: the name only, no clip.
+        let colour = app.project.playlist.lane(lane).unwrap().color;
+        app.dragging = Some(Dropped {
+            name: "clap".into(),
+            color: None,
+        });
+        app.name_from_drop(Named::Lane(lane), 0.0);
+        let l = app.project.playlist.lane(lane).unwrap();
+        assert_eq!((l.name.as_str(), l.color), ("clap", colour));
+        assert!(app.project.playlist.clips.is_empty());
     }
 }

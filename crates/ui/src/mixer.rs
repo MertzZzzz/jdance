@@ -30,6 +30,9 @@ pub(crate) enum MixerAction {
     Rename(TrackId),
     /// The colour window (spec 0.2.5 §6).
     Color(TrackId),
+    /// The dragged pattern or sample was dropped on this track: its name
+    /// and colour (spec 0.2.5 §7).
+    NameFromDrop(TrackId),
 }
 
 #[derive(Debug, Default)]
@@ -90,6 +93,8 @@ pub(crate) struct MixerView {
     monitor_warned: bool,
     /// Track waiting for the feedback warning before monitoring.
     confirm_monitor: Option<TrackId>,
+    /// What a drag in progress would name and colour (spec 0.2.5 §7).
+    pub drop: Option<crate::drop_name::Dropped>,
 }
 
 impl Default for MixerView {
@@ -98,6 +103,7 @@ impl Default for MixerView {
             selected: TrackId::MASTER,
             view: StripView::Compact,
             monitor_warned: false,
+            drop: None,
             confirm_monitor: None,
         }
     }
@@ -446,231 +452,260 @@ fn strip(
             theme::PANEL
         })
         .corner_radius(CornerRadius::same(4));
-    frame.show(ui, |ui| {
-        ui.vertical(|ui| {
-            ui.set_width(width);
-            ui.spacing_mut().item_spacing.y = 0.0;
-            // 1. Number.
-            let number = if t.is_master() {
-                "M".to_owned()
-            } else {
-                format!("{index}")
-            };
-            let (r, resp) = ui.allocate_exact_size(vec2(width, 16.0), Sense::click());
-            if selected {
-                ui.painter().rect_filled(r, 3.0, theme::BLUE_BG);
-            }
-            ui.painter().text(
-                r.center(),
-                egui::Align2::CENTER_CENTER,
-                number,
-                theme::mono(11.0),
-                theme::TEXT,
-            );
-            // A track feeding the selected one gets an amber dot.
-            let feeds = !selected
-                && (t.main_out == view.selected || t.sends.iter().any(|s| s.dest == view.selected));
-            if feeds {
-                ui.painter()
-                    .circle_filled(pos2(r.right() - 6.0, r.center().y), 2.5, theme::AMBER);
-            }
-            if resp.clicked() {
-                view.selected = t.id;
-            }
-            // 2. Name (rotated) and peak meter.
-            let (r, resp) = ui.allocate_exact_size(vec2(width, 100.0), Sense::click());
-            let p = ui.painter();
-            p.rect_filled(
-                Rect::from_min_size(r.min, vec2(r.width(), 3.0)),
-                CornerRadius::ZERO,
-                color,
-            );
-            let galley = p.layout_no_wrap(
-                t.name.clone(),
-                egui::FontId::proportional(12.0),
-                theme::TEXT,
-            );
-            let text = egui::epaint::TextShape::new(
-                pos2(r.left() + 6.0, r.bottom() - 4.0),
-                galley,
-                theme::TEXT,
-            )
-            .with_angle(-std::f32::consts::FRAC_PI_2);
-            p.with_clip_rect(r).add(text);
-            let levels = if t.is_master() {
-                meters.output
-            } else {
-                meters.bus(t.id)
-            };
-            let mr = Rect::from_min_size(
-                pos2(r.right() - 14.0, r.top() + 6.0),
-                vec2(10.0, r.height() - 8.0),
-            );
-            draw_meter(ui.painter(), mr, levels, t.muted);
-            let resp = resp.on_hover_text(format!("{} · double-click or F2 to rename", t.name));
-            if resp.clicked() {
-                view.selected = t.id;
-            }
-            if resp.double_clicked() {
-                out.actions.push(MixerAction::Rename(t.id));
-            }
-            resp.context_menu(|ui| {
-                if ui.button("Rename…").clicked() {
-                    out.actions.push(MixerAction::Rename(t.id));
-                    ui.close();
-                }
-                if ui.button("Color…").clicked() {
-                    out.actions.push(MixerAction::Color(t.id));
-                    ui.close();
-                }
-                if !t.is_master() && ui.button("Remove track").clicked() {
-                    out.edits.push((Edit::RemoveTrack(t.id), false));
-                    ui.close();
-                }
-            });
-            // 3. Mute lamp (right-click: solo).
-            ui.horizontal(|ui| {
-                ui.add_space((width - 20.0) / 2.0);
-                let lamp = crate::widgets::lamp(ui, !t.muted).on_hover_text(if t.is_master() {
-                    "Mute"
+    let strip_rect = frame
+        .show(ui, |ui| {
+            ui.vertical(|ui| {
+                ui.set_width(width);
+                ui.spacing_mut().item_spacing.y = 0.0;
+                // 1. Number.
+                let number = if t.is_master() {
+                    "M".to_owned()
                 } else {
-                    "Mute (click) · solo (right-click)"
-                });
-                if lamp.clicked() {
-                    out.edits.push((Edit::SetTrackMuted(t.id, !t.muted), false));
+                    format!("{index}")
+                };
+                let (r, resp) = ui.allocate_exact_size(vec2(width, 16.0), Sense::click());
+                if selected {
+                    ui.painter().rect_filled(r, 3.0, theme::BLUE_BG);
                 }
-                if lamp.secondary_clicked() && !t.is_master() {
-                    out.edits.push((Edit::SetTrackSolo(t.id, !t.solo), false));
-                }
-                if t.solo {
-                    ui.painter().text(
-                        lamp.rect.right_top(),
-                        egui::Align2::LEFT_TOP,
-                        "S",
-                        theme::mono(9.0),
+                ui.painter().text(
+                    r.center(),
+                    egui::Align2::CENTER_CENTER,
+                    number,
+                    theme::mono(11.0),
+                    theme::TEXT,
+                );
+                // A track feeding the selected one gets an amber dot.
+                let feeds = !selected
+                    && (t.main_out == view.selected
+                        || t.sends.iter().any(|s| s.dest == view.selected));
+                if feeds {
+                    ui.painter().circle_filled(
+                        pos2(r.right() - 6.0, r.center().y),
+                        2.5,
                         theme::AMBER,
                     );
                 }
-            });
-            // Input and monitoring (INP-001, MON-001); every strip keeps
-            // the row so the faders line up.
-            let (row, _) = ui.allocate_exact_size(vec2(width, 22.0), Sense::hover());
-            let mut cell =
-                ui.new_child(egui::UiBuilder::new().max_rect(row.shrink2(vec2(2.0, 2.0))));
-            strip_input(&mut cell, t, live, view, out);
-            // 4. Pan.
-            ui.horizontal(|ui| {
-                ui.add_space((width - 26.0) / 2.0);
-                let mut pan = t.pan;
-                let r = crate::widgets::knob(ui, &mut pan, -1.0..=1.0, 0.0, theme::BLUE, 26.0)
-                    .on_hover_text(format!("Pan {:+.0} (double-click: centre)", t.pan * 100.0));
-                if r.changed() {
-                    out.edits.push((Edit::SetTrackPan(t.id, pan), true));
+                if resp.clicked() {
                     view.selected = t.id;
                 }
-                automation::attach(
-                    ui,
-                    &r,
-                    automation,
-                    AutomationTarget::TrackPan(t.id),
-                    (t.pan + 1.0) / 2.0,
-                    &mut out.automation,
+                // 2. Name (rotated) and peak meter.
+                let (r, resp) = ui.allocate_exact_size(vec2(width, 100.0), Sense::click());
+                let p = ui.painter();
+                p.rect_filled(
+                    Rect::from_min_size(r.min, vec2(r.width(), 3.0)),
+                    CornerRadius::ZERO,
+                    color,
                 );
-                out.end_gesture |= r.drag_stopped();
-            });
-            ui.add_space(4.0);
-            // 6. Fader.
-            ui.horizontal(|ui| {
-                ui.add_space((width - 22.0) / 2.0);
-                ui.spacing_mut().slider_width = view.view.fader();
-                let mut vol = t.volume;
-                let r = ui.add(
-                    egui::Slider::new(&mut vol, 0.0..=MAX_VOLUME)
-                        .vertical()
-                        .show_value(false),
+                let galley = p.layout_no_wrap(
+                    t.name.clone(),
+                    egui::FontId::proportional(12.0),
+                    theme::TEXT,
                 );
-                let r = r.on_hover_text(db_label(t.volume));
-                if r.changed() && !automation::secondary_press(ui) {
-                    out.edits.push((Edit::SetTrackVolume(t.id, vol), true));
-                }
-                if r.clicked() || r.drag_started() {
-                    view.selected = t.id;
-                }
-                automation::attach(
-                    ui,
-                    &r,
-                    automation,
-                    AutomationTarget::TrackVolume(t.id),
-                    t.volume / MAX_VOLUME,
-                    &mut out.automation,
-                );
-                out.end_gesture |= r.drag_stopped();
-            });
-            if view.view != StripView::Compact {
-                ui.label(
-                    RichText::new(format!("{}\n{:+.0}", db_label(t.volume), t.pan * 100.0))
-                        .font(theme::mono(9.5))
-                        .color(theme::MUTED),
-                );
-            }
-            ui.add_space(4.0);
-            // 8. PDC hourglass and 9/10. route from the selected track.
-            ui.horizontal(|ui| {
-                let lat = latency.track(t.id).unwrap_or(0);
-                let (r, resp) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
-                hourglass(
-                    ui.painter(),
-                    r,
-                    if lat > 0 { theme::WARN } else { theme::MUTED },
-                );
-                resp.on_hover_text(if lat > 0 {
-                    format!("Plugin delay {}", latency.format(lat))
+                let text = egui::epaint::TextShape::new(
+                    pos2(r.left() + 6.0, r.bottom() - 4.0),
+                    galley,
+                    theme::TEXT,
+                )
+                .with_angle(-std::f32::consts::FRAC_PI_2);
+                p.with_clip_rect(r).add(text);
+                let levels = if t.is_master() {
+                    meters.output
                 } else {
-                    "No plugin delay".to_owned()
-                });
-                if !selected {
-                    route_toggle(ui, mixer, view.selected, t, out);
+                    meters.bus(t.id)
+                };
+                let mr = Rect::from_min_size(
+                    pos2(r.right() - 14.0, r.top() + 6.0),
+                    vec2(10.0, r.height() - 8.0),
+                );
+                draw_meter(ui.painter(), mr, levels, t.muted);
+                let resp = resp.on_hover_text(format!("{} · double-click or F2 to rename", t.name));
+                if resp.clicked() {
+                    view.selected = t.id;
                 }
-            });
-            if let Some(src) = mixer.track(view.selected)
-                && let Some(send) = src.sends.iter().find(|s| s.dest == t.id)
-            {
+                if resp.double_clicked() {
+                    out.actions.push(MixerAction::Rename(t.id));
+                }
+                resp.context_menu(|ui| {
+                    if ui.button("Rename…").clicked() {
+                        out.actions.push(MixerAction::Rename(t.id));
+                        ui.close();
+                    }
+                    if ui.button("Color…").clicked() {
+                        out.actions.push(MixerAction::Color(t.id));
+                        ui.close();
+                    }
+                    if !t.is_master() && ui.button("Remove track").clicked() {
+                        out.edits.push((Edit::RemoveTrack(t.id), false));
+                        ui.close();
+                    }
+                });
+                // 3. Mute lamp (right-click: solo).
                 ui.horizontal(|ui| {
                     ui.add_space((width - 20.0) / 2.0);
-                    let mut level = send.level;
-                    let r = crate::widgets::knob(
-                        ui,
-                        &mut level,
-                        0.0..=MAX_SEND_LEVEL,
-                        1.0,
-                        theme::AMBER,
-                        20.0,
-                    )
-                    .on_hover_text(format!(
-                        "Send from {}: {}",
-                        src.name,
-                        db_label(send.level)
-                    ));
-                    if r.changed() {
-                        out.edits.push((Edit::SetSendLevel(send.id, level), true));
+                    let lamp = crate::widgets::lamp(ui, !t.muted).on_hover_text(if t.is_master() {
+                        "Mute"
+                    } else {
+                        "Mute (click) · solo (right-click)"
+                    });
+                    if lamp.clicked() {
+                        out.edits.push((Edit::SetTrackMuted(t.id, !t.muted), false));
                     }
+                    if lamp.secondary_clicked() && !t.is_master() {
+                        out.edits.push((Edit::SetTrackSolo(t.id, !t.solo), false));
+                    }
+                    if t.solo {
+                        ui.painter().text(
+                            lamp.rect.right_top(),
+                            egui::Align2::LEFT_TOP,
+                            "S",
+                            theme::mono(9.0),
+                            theme::AMBER,
+                        );
+                    }
+                });
+                // Input and monitoring (INP-001, MON-001); every strip keeps
+                // the row so the faders line up.
+                let (row, _) = ui.allocate_exact_size(vec2(width, 22.0), Sense::hover());
+                let mut cell =
+                    ui.new_child(egui::UiBuilder::new().max_rect(row.shrink2(vec2(2.0, 2.0))));
+                strip_input(&mut cell, t, live, view, out);
+                // 4. Pan.
+                ui.horizontal(|ui| {
+                    ui.add_space((width - 26.0) / 2.0);
+                    let mut pan = t.pan;
+                    let r = crate::widgets::knob(ui, &mut pan, -1.0..=1.0, 0.0, theme::BLUE, 26.0)
+                        .on_hover_text(format!("Pan {:+.0} (double-click: centre)", t.pan * 100.0));
+                    if r.changed() {
+                        out.edits.push((Edit::SetTrackPan(t.id, pan), true));
+                        view.selected = t.id;
+                    }
+                    automation::attach(
+                        ui,
+                        &r,
+                        automation,
+                        AutomationTarget::TrackPan(t.id),
+                        (t.pan + 1.0) / 2.0,
+                        &mut out.automation,
+                    );
                     out.end_gesture |= r.drag_stopped();
                 });
-            }
-            if view.view == StripView::WideFx {
                 ui.add_space(4.0);
-                for ins in &t.inserts {
-                    let name = ins.effect.name();
-                    let c = if ins.bypass {
-                        theme::MUTED
-                    } else {
-                        theme::TEXT
-                    };
-                    ui.add(egui::Label::new(RichText::new(name).size(10.5).color(c)).truncate());
+                // 6. Fader.
+                ui.horizontal(|ui| {
+                    ui.add_space((width - 22.0) / 2.0);
+                    ui.spacing_mut().slider_width = view.view.fader();
+                    let mut vol = t.volume;
+                    let r = ui.add(
+                        egui::Slider::new(&mut vol, 0.0..=MAX_VOLUME)
+                            .vertical()
+                            .show_value(false),
+                    );
+                    let r = r.on_hover_text(db_label(t.volume));
+                    if r.changed() && !automation::secondary_press(ui) {
+                        out.edits.push((Edit::SetTrackVolume(t.id, vol), true));
+                    }
+                    if r.clicked() || r.drag_started() {
+                        view.selected = t.id;
+                    }
+                    automation::attach(
+                        ui,
+                        &r,
+                        automation,
+                        AutomationTarget::TrackVolume(t.id),
+                        t.volume / MAX_VOLUME,
+                        &mut out.automation,
+                    );
+                    out.end_gesture |= r.drag_stopped();
+                });
+                if view.view != StripView::Compact {
+                    ui.label(
+                        RichText::new(format!("{}\n{:+.0}", db_label(t.volume), t.pan * 100.0))
+                            .font(theme::mono(9.5))
+                            .color(theme::MUTED),
+                    );
                 }
+                ui.add_space(4.0);
+                // 8. PDC hourglass and 9/10. route from the selected track.
+                ui.horizontal(|ui| {
+                    let lat = latency.track(t.id).unwrap_or(0);
+                    let (r, resp) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
+                    hourglass(
+                        ui.painter(),
+                        r,
+                        if lat > 0 { theme::WARN } else { theme::MUTED },
+                    );
+                    resp.on_hover_text(if lat > 0 {
+                        format!("Plugin delay {}", latency.format(lat))
+                    } else {
+                        "No plugin delay".to_owned()
+                    });
+                    if !selected {
+                        route_toggle(ui, mixer, view.selected, t, out);
+                    }
+                });
+                if let Some(src) = mixer.track(view.selected)
+                    && let Some(send) = src.sends.iter().find(|s| s.dest == t.id)
+                {
+                    ui.horizontal(|ui| {
+                        ui.add_space((width - 20.0) / 2.0);
+                        let mut level = send.level;
+                        let r = crate::widgets::knob(
+                            ui,
+                            &mut level,
+                            0.0..=MAX_SEND_LEVEL,
+                            1.0,
+                            theme::AMBER,
+                            20.0,
+                        )
+                        .on_hover_text(format!(
+                            "Send from {}: {}",
+                            src.name,
+                            db_label(send.level)
+                        ));
+                        if r.changed() {
+                            out.edits.push((Edit::SetSendLevel(send.id, level), true));
+                        }
+                        out.end_gesture |= r.drag_stopped();
+                    });
+                }
+                if view.view == StripView::WideFx {
+                    ui.add_space(4.0);
+                    for ins in &t.inserts {
+                        let name = ins.effect.name();
+                        let c = if ins.bypass {
+                            theme::MUTED
+                        } else {
+                            theme::TEXT
+                        };
+                        ui.add(
+                            egui::Label::new(RichText::new(name).size(10.5).color(c)).truncate(),
+                        );
+                    }
+                }
+            });
+        })
+        .response
+        .rect;
+    // A pattern or sample dropped anywhere on the strip (§7); not on the
+    // master.
+    if let Some(d) = view.drop.clone() {
+        let rect = strip_rect;
+        let resp = ui.interact(
+            rect,
+            egui::Id::unique(("strip_drop", t.id.0)),
+            Sense::hover(),
+        );
+        if resp.contains_pointer() {
+            if t.is_master() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::NoDrop);
+            } else {
+                crate::drop_name::feedback(ui, rect, &d);
             }
-        });
-    });
+        }
+        if crate::drop_name::released_on(&resp) && !t.is_master() {
+            out.actions.push(MixerAction::NameFromDrop(t.id));
+        }
+    }
 }
 
 /// Sand-glass PDC mark.
@@ -1503,5 +1538,59 @@ mod input_tests {
                 false
             )]
         );
+    }
+}
+
+#[cfg(test)]
+mod drop_tests {
+    use super::*;
+    use crate::drop_name::Dropped;
+    use crate::project_browser::ProjectItem;
+    use crate::test_ui::{Driver, StubHost};
+
+    /// Drags a pattern over the strip named `label` and drops it there.
+    fn drop_on(label: &str) -> Vec<MixerAction> {
+        let mut m = Mixer::default();
+        m.tracks.push(MixerTrack::new(TrackId(1), "Insert 1"));
+        let mut d = Driver::new();
+        let mut host = StubHost::default();
+        let mut view = MixerView::default();
+        let mut actions = Vec::new();
+        let mut ui = |ui: &mut egui::Ui| {
+            view.drop = Some(Dropped {
+                name: "Kick".into(),
+                color: Some([200, 0, 0]),
+            });
+            let out = show(
+                ui,
+                &m,
+                &[],
+                &LatencyInfo::default(),
+                &MeterReadings::default(),
+                &mut host,
+                &mut view,
+            );
+            actions.extend(out.actions);
+        };
+        d.frame(vec![], &mut ui);
+        let at = d.find(label).expect("strip");
+        egui::DragAndDrop::set_payload(
+            &d.ctx,
+            ProjectItem(crate::playlist::Source::Pattern(jdance_domain::PatternId(
+                1,
+            ))),
+        );
+        d.frame(vec![d.moved(at)], &mut ui);
+        d.frame(vec![d.moved(at)], &mut ui);
+        d.frame(vec![d.button(at, false)], &mut ui);
+        actions
+    }
+
+    #[test]
+    fn a_drop_on_a_strip_names_it_and_the_master_refuses() {
+        let a = drop_on("Insert 1 · double-click or F2 to rename");
+        assert_eq!(a, [MixerAction::NameFromDrop(TrackId(1))]);
+        let a = drop_on("Master · double-click or F2 to rename");
+        assert!(a.is_empty(), "{a:?}");
     }
 }

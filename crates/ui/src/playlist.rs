@@ -151,6 +151,8 @@ pub(crate) struct PlaylistView {
     pub reveal: Option<u64>,
     /// Zoom keeps the mouse rather than the caret in place (§2).
     pub zoom_to_mouse: bool,
+    /// What a drag in progress would name and colour (§8).
+    pub drop: Option<crate::drop_name::Dropped>,
     /// The clip area as of the last frame.
     view: Option<View>,
     /// Zoom before Shift+4 went to the widest view.
@@ -218,6 +220,7 @@ impl Default for PlaylistView {
             live: None,
             reveal: None,
             zoom_to_mouse: false,
+            drop: None,
             view: None,
             zoom_back: None,
             follow: true,
@@ -246,6 +249,11 @@ pub(crate) enum PlaylistAction {
     RenameLane(LaneId),
     /// The colour window for a lane (spec 0.2.5 §6).
     Color(LaneId),
+    /// The dragged pattern or sample was dropped on this lane's header:
+    /// its name and colour (spec 0.2.5 §8).
+    NameFromDrop(LaneId),
+    /// Default name and colour (§8 item 10).
+    ResetLane(LaneId),
     /// Put the caret and the playhead at a position.
     Seek(u64),
     /// The caret during a ruler gesture: the playhead follows only while
@@ -711,6 +719,21 @@ impl PlaylistView {
                         .max_rect(row.shrink2(vec2(2.0, 3.0)))
                         .layout(egui::Layout::left_to_right(egui::Align::Center)),
                 );
+                // A pattern or sample dropped on the header names and
+                // colours the lane; no clip is added (spec 0.2.5 §8).
+                if let Some(d) = &self.drop {
+                    let resp = child.interact(
+                        row,
+                        egui::Id::unique(("lane_drop", lane.id.0)),
+                        Sense::hover(),
+                    );
+                    if resp.contains_pointer() {
+                        crate::drop_name::feedback(&child, row, d);
+                    }
+                    if crate::drop_name::released_on(&resp) {
+                        out.actions.push(PlaylistAction::NameFromDrop(lane.id));
+                    }
+                }
                 let ui = &mut child;
                 ui.spacing_mut().item_spacing.x = 4.0;
                 let (bar, resp) = ui.allocate_exact_size(vec2(4.0, ROW_H - 8.0), Sense::click());
@@ -741,6 +764,10 @@ impl PlaylistView {
                         }
                         if ui.button("Color…").clicked() {
                             out.actions.push(PlaylistAction::Color(lane.id));
+                            ui.close();
+                        }
+                        if ui.button("Reset name and color").clicked() {
+                            out.actions.push(PlaylistAction::ResetLane(lane.id));
                             ui.close();
                         }
                         if ui.button("Remove lane").clicked() {
