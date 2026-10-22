@@ -17,6 +17,9 @@ pub(crate) struct RecordingPanel {
     /// Monitoring needs a confirmation (feedback warning).
     confirm_monitor: bool,
     problem: Option<String>,
+    /// Input devices and when they were listed: ASIO lists through the
+    /// driver, so the list is refreshed once a second, not every frame.
+    devices: Option<(f64, Vec<crate::host::InputDevice>)>,
 }
 
 impl RecordingPanel {
@@ -45,7 +48,11 @@ impl RecordingPanel {
             .show(ctx, |ui| {
                 let mut s = host.recording_settings();
                 let before = s.clone();
-                let devices = host.input_devices();
+                let now = ui.input(|i| i.time);
+                if self.devices.as_ref().is_none_or(|(t, _)| now - t > 1.0) {
+                    self.devices = Some((now, host.input_devices()));
+                }
+                let devices = self.devices.as_ref().map_or(&[][..], |(_, d)| d.as_slice());
                 egui::Grid::new("recording_grid")
                     .num_columns(2)
                     .spacing([10.0, 8.0])
@@ -71,7 +78,7 @@ impl RecordingPanel {
                             .selected_text(current)
                             .show_ui(ui, |ui| {
                                 ui.selectable_value(&mut s.device, None, "None");
-                                for d in &devices {
+                                for d in devices {
                                     let label = if d.is_default {
                                         format!("{} (default)", d.name)
                                     } else {
@@ -82,11 +89,13 @@ impl RecordingPanel {
                             });
                         ui.end_row();
                         ui.label("Channels");
-                        let count = s
+                        let selected = s
                             .device
                             .as_ref()
-                            .and_then(|id| devices.iter().find(|d| &d.id == id))
-                            .map_or(0, |d| d.channels);
+                            .and_then(|id| devices.iter().find(|d| &d.id == id));
+                        let count = selected.map_or(0, |d| d.channels);
+                        let names = selected.map(|d| d.names.clone()).unwrap_or_default();
+                        let channel_label = |c| channel_label(&names, c);
                         egui::ComboBox::from_id_salt("rec_channels")
                             .width(260.0)
                             .selected_text(channel_label(s.channels))
@@ -201,10 +210,11 @@ impl RecordingPanel {
     }
 }
 
-fn channel_label(c: InputChannels) -> String {
+/// «Input 1 (mono)», with the driver's channel names where it has them.
+fn channel_label(names: &jdance_audio_api::ChannelNames, c: InputChannels) -> String {
     match c {
-        InputChannels::Mono(_) => format!("{} (mono)", c.label()),
-        InputChannels::Stereo(_) => format!("{} (stereo)", c.label()),
+        InputChannels::Mono(_) => format!("{} (mono)", names.input_label(c)),
+        InputChannels::Stereo(_) => format!("{} (stereo)", names.input_label(c)),
     }
 }
 

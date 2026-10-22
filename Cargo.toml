@@ -7,6 +7,7 @@ members = [
     "crates/engine",
     "crates/audio-api",
     "crates/audio-cpal",
+    "crates/audio-asio",
     "crates/persistence",
     "crates/mp3",
     "crates/scripts",
@@ -39,6 +40,7 @@ jdance-dsp = { path = "crates/dsp" }
 jdance-engine = { path = "crates/engine" }
 jdance-audio-api = { path = "crates/audio-api" }
 jdance-audio-cpal = { path = "crates/audio-cpal" }
+jdance-audio-asio = { path = "crates/audio-asio" }
 jdance-persistence = { path = "crates/persistence" }
 jdance-plugin-api = { path = "crates/plugin-api" }
 jdance-plugin-vst3 = { path = "crates/plugin-vst3" }

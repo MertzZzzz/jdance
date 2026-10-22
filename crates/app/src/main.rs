@@ -301,7 +301,7 @@ fn cmd_gui(args: &[String]) -> Result<(), String> {
     let path = project.as_ref().and(path);
     let project = project.unwrap_or_default();
 
-    let mut audio = host::AudioHost::new(jdance_audio_cpal::backends());
+    let mut audio = host::AudioHost::new(audio_backends());
     audio.open_initial();
     // On start only changed modules are scanned (PLG-023).
     jdance_ui::Host::rescan_plugins(&mut audio, false);
@@ -403,6 +403,26 @@ fn native_options(renderer: eframe::Renderer) -> eframe::NativeOptions {
         renderer,
         ..Default::default()
     }
+}
+
+/// Audio backends in the order of Audio settings: on Windows ASIO first
+/// when a driver is installed (spec 0.2.2 ASIO-020), then CPAL's.
+fn audio_backends() -> Vec<Box<dyn jdance_audio_api::AudioBackend>> {
+    let mut list: Vec<Box<dyn jdance_audio_api::AudioBackend>> = Vec::new();
+    #[cfg(windows)]
+    {
+        use jdance_audio_api::AudioBackend as _;
+        let asio = jdance_audio_asio::AsioBackend::system();
+        if asio.devices().is_ok_and(|d| !d.is_empty()) {
+            list.push(Box::new(asio));
+        }
+    }
+    list.extend(
+        jdance_audio_cpal::backends()
+            .into_iter()
+            .map(|b| Box::new(b) as Box<dyn jdance_audio_api::AudioBackend>),
+    );
+    list
 }
 
 #[cfg(test)]

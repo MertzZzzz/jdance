@@ -182,6 +182,8 @@ pub struct InputDevice {
     pub name: String,
     pub channels: u16,
     pub is_default: bool,
+    /// Driver channel names (ASIO); empty when the backend has none.
+    pub names: jdance_audio_api::ChannelNames,
 }
 
 /// Recording input (spec 0.2.0 §7); a user setting, not part of projects.
@@ -234,6 +236,9 @@ pub enum Recovery {
 pub struct FinishedTake {
     pub audio: ImportedAudio,
     pub problem: Option<String>,
+    /// Driver-reported input + output latency at the take's rate, taken
+    /// off the take's position once (ASIO-042); 0 when not reported.
+    pub latency_frames: u32,
 }
 
 /// An audio file read for import (spec 0.2.0 §2): copied into the
@@ -439,6 +444,19 @@ pub trait Host {
     fn open_device(&mut self, key: DeviceKey, settings: DeviceSettings) -> Result<(), AudioError>;
     fn close_device(&mut self);
     fn open_control_panel(&mut self, key: &DeviceKey) -> Result<(), AudioError>;
+    /// ASIO-025: whether the ASIO driver is released while the window is
+    /// inactive.
+    fn release_on_blur(&self) -> bool {
+        false
+    }
+    fn set_release_on_blur(&mut self, _on: bool) {}
+    /// The window gained or lost focus; with the option on, an ASIO
+    /// driver is closed while inactive and reopened on return.
+    fn focus_changed(&mut self, _focused: bool) {}
+    /// Driver channel names (ASIO-023); empty when the backend has none.
+    fn channel_names(&self, _key: &DeviceKey) -> jdance_audio_api::ChannelNames {
+        jdance_audio_api::ChannelNames::default()
+    }
 
     /// Starts an offline render to `out` (WAV or MP3); the result arrives
     /// as a notice. `title`/`artist` go into MP3 tags.

@@ -30,13 +30,16 @@ const ALLOWED: &[(&str, &[&str])] = &[
     ),
     ("jdance-audio-api", &[]),
     ("jdance-audio-cpal", &["jdance-audio-api"]),
+    // ASIO host (ADR-006): COM and driver callbacks, unsafe in this crate.
+    ("jdance-audio-asio", &["jdance-audio-api"]),
     ("jdance-persistence", &["jdance-domain"]),
     // LAME adapter: no workspace dependencies.
     ("jdance-mp3", &[]),
     // Script tools: run on the pure note tools.
     ("jdance-scripts", &["jdance-domain", "jdance-commands"]),
     ("jdance-plugin-api", &[]),
-    // VST3 hosting; the only crate besides the test plugin with unsafe code.
+    // VST3 hosting; with audio-asio and the test plugin, the only crates
+    // with unsafe code.
     ("jdance-plugin-vst3", &["jdance-plugin-api"]),
     ("jdance-test-fx", &[]),
     // dsp is pure math with no dependencies (EQ response graph).
@@ -61,6 +64,7 @@ const ALLOWED: &[(&str, &[&str])] = &[
             "jdance-scripts",
             "jdance-audio-api",
             "jdance-audio-cpal",
+            "jdance-audio-asio",
             "jdance-persistence",
             "jdance-plugin-api",
             "jdance-plugin-vst3",

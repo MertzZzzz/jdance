@@ -130,6 +130,8 @@ pub struct JdanceApp<H: Host, S: ProjectStore> {
     show_library: bool,
     show_recording: bool,
     recording_panel: recording::RecordingPanel,
+    /// Window focus last frame (ASIO-025).
+    focused: Option<bool>,
     /// Lane and start tick of the take being recorded.
     record_target: Option<(LaneId, u64)>,
     /// Record was pressed with the loop on: ask first.
@@ -223,6 +225,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             show_library: false,
             show_recording: false,
             recording_panel: recording::RecordingPanel::default(),
+            focused: None,
             record_target: None,
             loop_prompt: false,
             recovery: None,
@@ -2260,8 +2263,11 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             frames: audio.frames,
         };
         let fpt = jdance_domain::frames_per_tick(p.tempo_bpm, p.timebase_rate);
+        // ASIO-042: the driver's input + output latency is subtracted once.
+        let latency = f64::from(take.latency_frames) / f64::from(audio.sample_rate.max(1));
         let at = (start as f64 * fpt).round() as i64
-            + (f64::from(offset_ms) / 1000.0 * f64::from(p.timebase_rate)).round() as i64;
+            + (f64::from(offset_ms) / 1000.0 * f64::from(p.timebase_rate)).round() as i64
+            - (latency * f64::from(p.timebase_rate)).round() as i64;
         let mut edits = vec![Edit::AddAsset(asset.clone())];
         let channel = audio_channels::take_channel(p, asset.id, &input, &mut edits);
         let cid = ClipId(p.ids.next());
@@ -2279,7 +2285,16 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 self.sync_needed = true;
                 self.new_channels.push(channel);
                 self.playlist_view.select_only(&[cid]);
-                self.notify(Notice::info(format!("Recorded {seconds:.1} s")), now);
+                let text = if take.latency_frames > 0 {
+                    format!(
+                        "Recorded {seconds:.1} s; driver latency {} frames ({:.1} ms) compensated",
+                        take.latency_frames,
+                        latency * 1000.0
+                    )
+                } else {
+                    format!("Recorded {seconds:.1} s")
+                };
+                self.notify(Notice::info(text), now);
             }
             Err(e) => self.notify(Notice::error(format!("Recording not added: {e}")), now),
         }
@@ -2630,6 +2645,11 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let now = ctx.input(|i| i.time);
+        let focused = ctx.input(|i| i.focused);
+        if self.focused != Some(focused) {
+            self.focused = Some(focused);
+            self.host.focus_changed(focused);
+        }
         self.host.poll();
         for n in self.host.take_notices() {
             self.notify(n, now);

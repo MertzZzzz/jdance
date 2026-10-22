@@ -16,6 +16,8 @@ pub(crate) struct SettingsWindow {
     devices: Result<Vec<DeviceInfo>, String>,
     device: Option<DeviceId>,
     caps: Option<Result<DeviceCapabilities, String>>,
+    /// Driver channel names of the selected device (ASIO-031).
+    names: jdance_audio_api::ChannelNames,
     sample_rate: u32,
     buffer: BufferRequest,
     first_output: u16,
@@ -36,6 +38,7 @@ impl SettingsWindow {
             devices: Ok(Vec::new()),
             device: None,
             caps: None,
+            names: Default::default(),
             sample_rate: 48_000,
             buffer: BufferRequest::Default,
             first_output: 0,
@@ -71,6 +74,10 @@ impl SettingsWindow {
         self.caps = self
             .key()
             .map(|k| host.capabilities(&k).map_err(|e| e.to_string()));
+        self.names = self
+            .key()
+            .map(|k| host.channel_names(&k))
+            .unwrap_or_default();
         let saved = self.key().and_then(|k| host.saved_settings(&k));
         if let Some(Ok(caps)) = &self.caps {
             let s = saved.unwrap_or(DeviceSettings {
@@ -194,7 +201,7 @@ impl SettingsWindow {
                 ui.end_row();
 
                 ui.label("Buffer size");
-                buffer_row(ui, &caps, &mut self.buffer);
+                buffer_row(ui, &caps, self.sample_rate, &mut self.buffer);
                 ui.end_row();
 
                 ui.label("Output");
@@ -205,13 +212,13 @@ impl SettingsWindow {
                 } else {
                     self.first_output = self.first_output.min((pairs - 1) * 2);
                     egui::ComboBox::from_id_salt("pair")
-                        .selected_text(pair_label(self.first_output))
+                        .selected_text(self.names.output_pair_label(self.first_output))
                         .show_ui(ui, |ui| {
                             for p in 0..pairs {
                                 ui.selectable_value(
                                     &mut self.first_output,
                                     p * 2,
-                                    pair_label(p * 2),
+                                    self.names.output_pair_label(p * 2),
                                 );
                             }
                         });
@@ -268,8 +275,27 @@ impl SettingsWindow {
             None => {}
         }
 
+        if self.backend.as_ref().is_some_and(|b| b.0 == "asio") {
+            let mut on = host.release_on_blur();
+            if ui
+                .checkbox(&mut on, "Release the ASIO driver while jdance is inactive")
+                .on_hover_text(
+                    "Closes the driver when the window loses focus and the transport is \
+                     stopped, so other programs can use it; it reopens on return.",
+                )
+                .changed()
+            {
+                host.set_release_on_blur(on);
+            }
+        }
+
         ui.separator();
         ui.strong("Active stream");
+        let active_names = if host.current_device() == self.key() {
+            self.names.clone()
+        } else {
+            Default::default()
+        };
         match host.stream() {
             None => {
                 ui.label("No stream is running.");
@@ -283,8 +309,24 @@ impl SettingsWindow {
                             ("Device", s.info.device_name.clone()),
                             ("Sample rate", format!("{} Hz", s.info.sample_rate)),
                             ("Device channels", s.info.channels.to_string()),
-                            ("Output pair", pair_label(s.info.first_output_channel)),
+                            (
+                                "Output pair",
+                                active_names.output_pair_label(s.info.first_output_channel),
+                            ),
                             ("Sample format", format!("{:?}", s.info.sample_format)),
+                            (
+                                "Latency (in / out)",
+                                match s.info.latency {
+                                    Some((i, o)) => {
+                                        let ms = |f: u32| {
+                                            f64::from(f) * 1000.0
+                                                / f64::from(s.info.sample_rate.max(1))
+                                        };
+                                        format!("{i} / {o} frames ({:.1} / {:.1} ms)", ms(i), ms(o))
+                                    }
+                                    None => "not reported".into(),
+                                },
+                            ),
                             (
                                 "Requested buffer",
                                 match s.info.requested_buffer {
@@ -319,14 +361,18 @@ impl SettingsWindow {
     }
 }
 
-fn pair_label(first: u16) -> String {
-    format!("Outputs {} / {}", first + 1, first + 2)
+/// «256 frames (5.3 ms)» at `rate`.
+fn frames_label(frames: u32, rate: u32) -> String {
+    let ms = f64::from(frames) * 1000.0 / f64::from(rate.max(1));
+    format!("{frames} frames ({ms:.1} ms)")
 }
 
-fn buffer_row(ui: &mut egui::Ui, caps: &DeviceCapabilities, buffer: &mut BufferRequest) {
+fn buffer_row(ui: &mut egui::Ui, caps: &DeviceCapabilities, rate: u32, buffer: &mut BufferRequest) {
     if !caps.can_change_buffer_from_app {
         let text = match &caps.buffer_size {
-            BufferSizeCaps::FixedByDriver(f) => format!("{f} frames (set by the driver)"),
+            BufferSizeCaps::FixedByDriver(f) => {
+                format!("{} (set by the driver)", frames_label(*f, rate))
+            }
             _ => "Chosen by the backend; it can't be set from the app".into(),
         };
         let hint = if caps.has_control_panel {
@@ -341,14 +387,14 @@ fn buffer_row(ui: &mut egui::Ui, caps: &DeviceCapabilities, buffer: &mut BufferR
     let sizes = caps.buffer_size.offered();
     let label = match buffer {
         BufferRequest::Default => "Backend default".to_owned(),
-        BufferRequest::Frames(f) => format!("{f} frames"),
+        BufferRequest::Frames(f) => frames_label(*f, rate),
     };
     egui::ComboBox::from_id_salt("buffer")
         .selected_text(label)
         .show_ui(ui, |ui| {
             ui.selectable_value(buffer, BufferRequest::Default, "Backend default");
             for s in sizes {
-                ui.selectable_value(buffer, BufferRequest::Frames(s), format!("{s} frames"));
+                ui.selectable_value(buffer, BufferRequest::Frames(s), frames_label(s, rate));
             }
         });
 }

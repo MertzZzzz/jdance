@@ -11,7 +11,6 @@ use jdance_audio_api::{
     AudioBackend, AudioError, BackendId, BufferRequest, DeviceCapabilities, DeviceId, DeviceInfo,
     DeviceKey, DeviceSettings, InputStream, OutputStream, RenderCallback, StreamState,
 };
-use jdance_audio_cpal::CpalBackend;
 use jdance_domain::PluginTarget;
 use jdance_domain::TrackId;
 use jdance_domain::{ExportOptions, Project, SampleRef};
@@ -92,6 +91,9 @@ struct Recorder {
     monitor: Option<MonitorControl>,
     /// Why no input is open.
     problem: Option<String>,
+    /// Input plus output latency the driver reports for the open input,
+    /// in frames; taken off takes once (spec 0.2.2 ASIO-042).
+    round_trip: u32,
     monitor_on: bool,
     project_dir: Option<PathBuf>,
 }
@@ -106,6 +108,7 @@ impl Default for Recorder {
             finished: None,
             monitor: None,
             problem: None,
+            round_trip: 0,
             monitor_on: false,
             project_dir: None,
         }
@@ -120,7 +123,7 @@ struct Active {
 }
 
 pub struct AudioHost {
-    backends: Vec<CpalBackend>,
+    backends: Vec<Box<dyn AudioBackend>>,
     active: Option<Active>,
     reading: FeedbackReading,
     latency: LatencyInfo,
@@ -158,6 +161,8 @@ pub struct AudioHost {
     next_import: u64,
     recorder: Recorder,
     scripts: ScriptHost,
+    /// ASIO-025: the device closed while the window is inactive.
+    suspended: Option<(DeviceKey, DeviceSettings)>,
 }
 
 /// Script tools: the loaded scripts and the run in flight.
@@ -214,7 +219,7 @@ impl std::fmt::Debug for AudioHost {
 }
 
 impl AudioHost {
-    pub fn new(backends: Vec<CpalBackend>) -> Self {
+    pub fn new(backends: Vec<Box<dyn AudioBackend>>) -> Self {
         let settings_path = config::settings_path();
         let mut notices = Vec::new();
         let settings = match &settings_path {
@@ -266,6 +271,7 @@ impl AudioHost {
             next_import: 0,
             recorder: Recorder::default(),
             scripts: ScriptHost::default(),
+            suspended: None,
         }
     }
 
@@ -298,6 +304,7 @@ impl AudioHost {
         };
         match backend.open_input(&DeviceId(device), &request, Box::new(capture)) {
             Ok(stream) => {
+                rec.round_trip = stream.info().round_trip.unwrap_or(0);
                 rec.input = Some(stream);
                 rec.ring = Some(ring);
                 if let Some(m) = &mut rec.monitor {
@@ -343,6 +350,7 @@ impl AudioHost {
                 rec.ring = ring;
             }
             let dir = rec.project_dir.clone();
+            let latency_frames = rec.round_trip;
             rec.finished = Some(result.and_then(|take| {
                 if take.frames == 0 {
                     let _ = std::fs::remove_file(&take.path);
@@ -354,6 +362,7 @@ impl AudioHost {
                 Ok(FinishedTake {
                     audio,
                     problem: take.problem,
+                    latency_frames,
                 })
             }));
         }
@@ -411,8 +420,11 @@ impl AudioHost {
         self.scan = Some(rx);
     }
 
-    fn backend(&self, id: &BackendId) -> Option<&CpalBackend> {
-        self.backends.iter().find(|b| &b.id() == id)
+    fn backend(&self, id: &BackendId) -> Option<&dyn AudioBackend> {
+        self.backends
+            .iter()
+            .find(|b| &b.id() == id)
+            .map(|b| b.as_ref())
     }
 
     /// Opens the last used device, or the system default on first start.
@@ -445,17 +457,21 @@ impl AudioHost {
             }
             return;
         }
-        let Some(backend) = self.backends.first() else {
+        if self.backends.is_empty() {
             self.notices.push(Notice::error(
                 "No audio backend is available on this system.",
             ));
             return;
-        };
-        let default = backend
-            .devices()
-            .ok()
-            .and_then(|list| list.into_iter().find(|d| d.is_default));
-        let Some(device) = default else {
+        }
+        // The first backend with a system default output (ASIO, listed
+        // first on Windows, has none: its drivers are chosen explicitly).
+        let default = self.backends.iter().find_map(|b| {
+            b.devices()
+                .ok()
+                .and_then(|list| list.into_iter().find(|d| d.is_default))
+                .map(|d| (b.as_ref(), d))
+        });
+        let Some((backend, device)) = default else {
             self.notices.push(Notice::warning(
                 "No default audio output was found. Choose one in Audio settings.",
             ));
@@ -813,6 +829,7 @@ impl Host for AudioHost {
             .into_iter()
             .map(|d| InputDevice {
                 channels: backend.input_channels(&d.id).unwrap_or(0),
+                names: backend.channel_names(&d.id).unwrap_or_default(),
                 id: d.id.0,
                 name: d.name,
                 is_default: d.is_default,
@@ -1029,6 +1046,7 @@ impl Host for AudioHost {
     fn open_device(&mut self, key: DeviceKey, settings: DeviceSettings) -> Result<(), AudioError> {
         // AUD-014: stop and close the old stream before opening a new one.
         self.close_device();
+        self.suspended = None;
         let backend = self
             .backend(&key.backend)
             .ok_or_else(|| AudioError::Unsupported(format!("backend {}", key.backend)))?;
@@ -1075,6 +1093,48 @@ impl Host for AudioHost {
         self.backend(&key.backend)
             .ok_or_else(|| AudioError::Unsupported(format!("backend {}", key.backend)))?
             .open_control_panel(&key.device)
+    }
+
+    fn release_on_blur(&self) -> bool {
+        self.settings.release_asio_on_blur
+    }
+
+    fn set_release_on_blur(&mut self, on: bool) {
+        self.settings.release_asio_on_blur = on;
+        self.save_settings();
+    }
+
+    fn focus_changed(&mut self, focused: bool) {
+        if focused {
+            if let Some((key, settings)) = self.suspended.take()
+                && self.active.is_none()
+                && let Err(e) = self.open_device(key, settings)
+            {
+                self.notices.push(Notice::error(format!(
+                    "The ASIO driver did not reopen: {e}"
+                )));
+            }
+            return;
+        }
+        // Never during playback or recording.
+        let Some(a) = &self.active else { return };
+        if !self.settings.release_asio_on_blur
+            || a.key.backend.0 != "asio"
+            || self.transport().playing
+            || self.recorder.shared.recording.load(Relaxed)
+        {
+            return;
+        }
+        if let Some(settings) = self.settings.audio.get(&a.key) {
+            self.suspended = Some((a.key.clone(), settings));
+            self.close_device();
+        }
+    }
+
+    fn channel_names(&self, key: &DeviceKey) -> jdance_audio_api::ChannelNames {
+        self.backend(&key.backend)
+            .and_then(|b| b.channel_names(&key.device).ok())
+            .unwrap_or_default()
     }
 
     fn export_audio(

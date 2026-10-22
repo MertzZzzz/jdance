@@ -73,6 +73,9 @@ pub struct UserSettings {
     /// Recording input (monitoring is never stored: it starts off).
     #[serde(default)]
     pub recording: RecordingConfig,
+    /// ASIO-025: close the ASIO driver while the window is inactive.
+    #[serde(default)]
+    pub release_asio_on_blur: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

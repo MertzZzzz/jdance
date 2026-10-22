@@ -170,6 +170,9 @@ pub struct ActiveStreamInfo {
     pub sample_format: SampleFormat,
     pub requested_buffer: BufferRequest,
     pub first_output_channel: u16,
+    /// Input and output latency in frames as the driver reports them;
+    /// `None` when the backend does not report latency (AUD-011).
+    pub latency: Option<(u32, u32)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -242,6 +245,45 @@ pub struct ActiveInputInfo {
     /// Hardware channels of the opened configuration.
     pub device_channels: u16,
     pub channels: InputChannels,
+    /// Input plus output latency in frames reported by the driver, to be
+    /// taken off recorded takes once (spec 0.2.2 ASIO-042); `None` when
+    /// unknown.
+    pub round_trip: Option<u32>,
+}
+
+/// Driver-provided channel names of a device (spec 0.2.2 ASIO-023);
+/// empty when the backend has none.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ChannelNames {
+    pub inputs: Vec<String>,
+    pub outputs: Vec<String>,
+}
+
+impl ChannelNames {
+    /// «Input 1+2 (Mic 1/Mic 2)» with names, «Input 1+2» without.
+    pub fn input_label(&self, channels: InputChannels) -> String {
+        let name = |c: u16| self.inputs.get(usize::from(c)).filter(|n| !n.is_empty());
+        match channels {
+            InputChannels::Mono(c) => match name(c) {
+                Some(n) => format!("{} ({n})", channels.label()),
+                None => channels.label(),
+            },
+            InputChannels::Stereo(c) => match (name(c), name(c + 1)) {
+                (Some(a), Some(b)) => format!("{} ({a}/{b})", channels.label()),
+                _ => channels.label(),
+            },
+        }
+    }
+
+    /// «Outputs 1 / 2 (Main L/Main R)» for the output pair from `first`.
+    pub fn output_pair_label(&self, first: u16) -> String {
+        let base = format!("Outputs {} / {}", first + 1, first + 2);
+        let name = |c: u16| self.outputs.get(usize::from(c)).filter(|n| !n.is_empty());
+        match (name(first), name(first + 1)) {
+            (Some(a), Some(b)) => format!("{base} ({a}/{b})"),
+            _ => base,
+        }
+    }
 }
 
 /// Receives captured audio on the device thread; same realtime rules as
@@ -284,6 +326,10 @@ pub trait AudioBackend {
         _callback: Box<dyn CaptureCallback>,
     ) -> Result<Box<dyn InputStream>, AudioError> {
         Err(AudioError::Unsupported("this backend cannot record".into()))
+    }
+    /// Names of the device's channels where the driver provides them.
+    fn channel_names(&self, _device: &DeviceId) -> Result<ChannelNames, AudioError> {
+        Ok(ChannelNames::default())
     }
     /// Opens the driver's own settings dialog where supported.
     fn open_control_panel(&self, _device: &DeviceId) -> Result<(), AudioError> {

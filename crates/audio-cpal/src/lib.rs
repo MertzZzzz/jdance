@@ -246,6 +246,7 @@ impl AudioBackend for CpalBackend {
                 sample_format: map_format(format),
                 requested_buffer: request.buffer,
                 first_output_channel: request.first_output_channel,
+                latency: None,
             },
         }))
     }
@@ -332,6 +333,7 @@ impl AudioBackend for CpalBackend {
                 sample_rate: config.sample_rate,
                 device_channels: config.channels,
                 channels: ch,
+                round_trip: None,
             },
         }))
     }

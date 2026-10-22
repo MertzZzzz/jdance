@@ -1269,6 +1269,7 @@ dependencies = [
  "eframe",
  "hound",
  "jdance-audio-api",
+ "jdance-audio-asio",
  "jdance-audio-cpal",
  "jdance-commands",
  "jdance-domain",
@@ -1294,6 +1295,14 @@ version = "0.2.1"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "jdance-audio-asio"
+version = "0.2.1"
+dependencies = [
+ "jdance-audio-api",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
