@@ -789,6 +789,22 @@ impl Host for AudioHost {
         for p in paths {
             self.samples.request(&p);
         }
+        // Processed samples (spec 0.2.5 §4), recomputed when a knob or a
+        // fitted tempo changes.
+        let mut keep = std::collections::HashSet::new();
+        for c in &project.channels {
+            if let (Some(s), Some(p), Some(d)) = (
+                c.sample(),
+                c.sampler.processing(project.tempo_bpm),
+                c.playback_sample(project.tempo_bpm),
+            ) {
+                let derived = self.resolve(&d);
+                self.samples
+                    .request_processed(&derived, &self.resolve(s), p);
+                keep.insert(derived);
+            }
+        }
+        self.samples.retain_processed(&keep);
         self.needs_compile = true;
         self.recompile();
     }

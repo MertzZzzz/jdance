@@ -11,6 +11,7 @@ pub mod limiter;
 pub mod processor;
 mod resample;
 pub mod reverb;
+mod sample_tools;
 mod sampler;
 pub mod tempo_delay;
 
@@ -21,6 +22,7 @@ pub use limiter::SafetyLimiter;
 pub use processor::{ParamEvent, ProcessContext, Processor, Tail, process_with_events};
 pub use resample::resample_cubic;
 pub use reverb::Reverb;
+pub use sample_tools::{Tools, apply_tools, change_speed, stretch_and_pitch, time_stretch};
 pub use sampler::{Adsr, Playback, SampleBuffer, SamplerVoice, key_rate};
 pub use tempo_delay::TempoDelay;
 

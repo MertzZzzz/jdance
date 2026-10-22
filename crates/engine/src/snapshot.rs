@@ -176,6 +176,10 @@ pub struct ChannelRt {
     pub polyphony: u16,
     pub mono: bool,
     pub sampler: SamplerRt,
+    /// Cut group: notes of this channel cut voices of channels whose
+    /// `cut_by` is this number (spec 0.2.5 §4); 0 = none.
+    pub cut: u8,
+    pub cut_by: u8,
 }
 
 /// Sampler settings in frames of the loaded sample and samples of the
@@ -188,6 +192,11 @@ pub struct SamplerRt {
     /// Linear sampler gain.
     pub gain: f32,
     pub root_key: u8,
+    /// Fine tuning as a rate factor.
+    pub fine: f64,
+    /// The channel's pitch acts on notes; note keys change the pitch.
+    pub main_pitch: bool,
+    pub add_to_key: bool,
 }
 
 impl SamplerRt {
@@ -200,6 +209,7 @@ impl SamplerRt {
             at(s.end).max(at(s.start) + 1).min(frames.max(1)),
         );
         let whole = start == 0 && end >= frames;
+        let (fade_in, fade_out, bleed) = s.declick.fades();
         let playback = jdance_dsp::Playback {
             start,
             end: if whole { usize::MAX } else { end },
@@ -212,12 +222,18 @@ impl SamplerRt {
             }),
             gate: None,
             gate_release: (sample_rate / 200).max(1),
+            fade_in: ms(fade_in),
+            fade_out: ms(fade_out),
+            bleed,
         };
         Self {
             playback,
             gated: s.envelope || looping,
             gain: 10f32.powf(s.gain_db / 20.0),
             root_key: s.root_key,
+            fine: 2f64.powf(f64::from(s.fine_tune) / 1200.0),
+            main_pitch: s.main_pitch,
+            add_to_key: s.add_to_key,
         }
     }
 }
@@ -732,17 +748,25 @@ pub fn compile_full(
             let track = track_of(c.track);
             // Audio channels carry stereo material: balance, unity at
             // the center (ACH-011).
+            // Level offsets of the sampler's Instrument tab (§4).
+            let lv = c.sampler.levels;
+            let pan = (c.pan + lv.pan).clamp(-1.0, 1.0);
             let (l, r) = if c.is_audio() {
                 balance_gains(c.pan)
             } else {
-                pan_gains(c.pan)
+                pan_gains(pan)
             };
-            let g = if c.muted { 0.0 } else { c.volume };
+            let g = if c.muted {
+                0.0
+            } else {
+                c.volume * (1.0 + lv.vol).max(0.0)
+            };
             let instrument = instruments[i].take();
             let own = instrument.as_ref().map_or(0, |x| x.plugin.latency());
+            // The file, or its processed data (spec 0.2.5 §4).
             let sample = c
-                .sample()
-                .and_then(&samples)
+                .playback_sample(project.tempo_bpm)
+                .and_then(|s| samples(&s))
                 .filter(|s| s.sample_rate == sample_rate);
             let frames = sample.as_ref().map_or(0, |s| s.len());
             ChannelRt {
@@ -757,6 +781,8 @@ pub fn compile_full(
                 polyphony: c.polyphony,
                 mono: c.mono,
                 sampler: SamplerRt::new(&c.sampler, frames, sample_rate),
+                cut: c.sampler.cut,
+                cut_by: c.sampler.cut_by,
             }
         })
         .collect();

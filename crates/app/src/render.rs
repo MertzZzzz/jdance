@@ -7,6 +7,7 @@
 use crate::plugins::{Catalog, ModuleCache, create_instance};
 use jdance_domain::{
     ClipId, ExportOptions, ExportRange, MAX_REPEAT, PatternClip, Playlist, Project, SampleRef,
+    sample_processing::Processing,
 };
 use jdance_dsp::SampleBuffer;
 use jdance_engine::{
@@ -47,6 +48,39 @@ pub fn load_sample_info(path: &Path, sample_rate: u32) -> Result<LoadedSample, S
         format: decoded.format,
         warnings: decoded.warnings,
     })
+}
+
+/// A channel's sample with its precomputed processing (spec 0.2.5 §4):
+/// the Tools panel, then the length and pitch. At the file's own rate.
+pub fn process_sample(original: &SampleBuffer, p: &Processing) -> SampleBuffer {
+    let c = &p.precompute;
+    let tools = jdance_dsp::Tools {
+        remove_dc: c.remove_dc,
+        reverse_polarity: c.reverse_polarity,
+        normalize: c.normalize,
+        fade_stereo: c.fade_stereo,
+        reverse: c.reverse,
+        swap_stereo: c.swap_stereo,
+        start: c.start,
+        length: c.length,
+        fade_in: c.fade_in,
+        fade_out: c.fade_out,
+        crossfade: c.crossfade,
+        trim: c.trim,
+        trim_on: c.trim_on,
+    };
+    let tooled = if c.is_identity() {
+        original.clone()
+    } else {
+        jdance_dsp::apply_tools(original, &tools)
+    };
+    let s = &p.stretch;
+    if s.is_identity() {
+        return tooled;
+    }
+    let secs = tooled.len() as f64 / f64::from(tooled.sample_rate.max(1));
+    let factor = s.length_factor(secs, p.tempo_bpm).clamp(0.05, 20.0);
+    jdance_dsp::stretch_and_pitch(&tooled, factor, f64::from(s.pitch), s.stretches())
 }
 
 #[derive(Debug)]
@@ -235,6 +269,23 @@ pub fn render_project_with(
             Err(e) => warnings.push(format!("missing sample {}: {e}", path.display())),
         }
     }
+    // Processed samples under their own keys (spec 0.2.5 §4).
+    for c in &project.channels {
+        let (Some(s), Some(p)) = (c.sample(), c.sampler.processing(project.tempo_bpm)) else {
+            continue;
+        };
+        let Some(derived) = c.playback_sample(project.tempo_bpm) else {
+            continue;
+        };
+        let path = resolve_sample_path(project_dir, &derived);
+        if samples.contains_key(&path) {
+            continue;
+        }
+        if let Ok((original, _)) = load_sample(&resolve_sample_path(project_dir, s), sample_rate) {
+            let processed = process_sample(&original, &p).resampled(sample_rate);
+            samples.insert(path, Arc::new(processed));
+        }
+    }
     let mut controllers = Vec::new();
     let snapshot = compile_full(
         &project,
@@ -392,6 +443,35 @@ mod tests {
     const RATE: u32 = 48_000;
     /// One 16-step bar at 120 BPM.
     const BAR: usize = 96_000;
+
+    #[test]
+    fn processing_refits_to_the_project_tempo_and_applies_tools() {
+        use jdance_domain::sample_processing::{Precompute, Stretch, TimeFit};
+        // One second of a ramp: reversed, it falls.
+        let ramp: Vec<f32> = (0..RATE).map(|i| i as f32 / RATE as f32).collect();
+        let buf = SampleBuffer::from_interleaved(RATE, 1, &ramp);
+        let p = |tempo| Processing {
+            precompute: Precompute {
+                reverse: true,
+                ..Precompute::default()
+            },
+            stretch: Stretch {
+                time: TimeFit::Beats { beats: 4.0 },
+                ..Stretch::default()
+            },
+            tempo_bpm: tempo,
+        };
+        // Four beats: 2 s at 120 BPM, 1 s at 240 BPM.
+        let slow = process_sample(&buf, &p(120.0));
+        let fast = process_sample(&buf, &p(240.0));
+        assert!(
+            slow.len().abs_diff(2 * RATE as usize) < 64,
+            "{}",
+            slow.len()
+        );
+        assert!(fast.len().abs_diff(RATE as usize) < 64, "{}", fast.len());
+        assert!(fast.left[100] > fast.left[RATE as usize - 100], "reversed");
+    }
 
     fn setup(channels: usize) -> (tempfile::TempDir, Project) {
         let dir = tempfile::tempdir().unwrap();

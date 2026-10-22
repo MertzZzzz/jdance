@@ -25,6 +25,9 @@ enum Tab {
     Sample,
     Envelope,
     Instrument,
+    /// The sampler's Instrument tab (spec 0.2.5 §4): levels, cut groups,
+    /// root note.
+    Keys,
 }
 
 /// Which marker a waveform drag moves.
@@ -102,7 +105,7 @@ impl ChannelSettingsWindow {
         let color = theme::rgb(color_or_default(ch.color, index));
         let instrument = ch.instrument().is_some();
         let audio = ch.is_audio();
-        if instrument && matches!(self.tab, Tab::Sample | Tab::Envelope)
+        if instrument && matches!(self.tab, Tab::Sample | Tab::Envelope | Tab::Keys)
             || !instrument && self.tab == Tab::Instrument
             || audio
         {
@@ -139,6 +142,7 @@ impl ChannelSettingsWindow {
                     &[
                         (Tab::Channel, "Channel"),
                         (Tab::Sample, "Sample"),
+                        (Tab::Keys, "Instrument"),
                         (Tab::Envelope, "Envelope"),
                     ]
                 };
@@ -146,10 +150,15 @@ impl ChannelSettingsWindow {
                     ui.selectable_value(&mut self.tab, *tab, *label);
                 }
             });
+            // The header stays while the sampler's tabs change (§4).
+            if matches!(self.tab, Tab::Sample | Tab::Keys) {
+                header(ui, project, ch, &mut out);
+            }
             ui.separator();
             match self.tab {
                 Tab::Channel => self.channel_tab(ui, project, index, &mut out),
-                Tab::Sample => self.sample_tab(ui, ch, host, dir, &mut out),
+                Tab::Sample => self.sample_tab(ui, ch, project.tempo_bpm, host, dir, &mut out),
+                Tab::Keys => keys_tab(ui, project, ch, &mut out),
                 Tab::Envelope => envelope_tab(ui, ch, &mut out),
                 Tab::Instrument => instrument_tab(ui, project, ch, host, &mut out),
             }
@@ -333,6 +342,7 @@ impl ChannelSettingsWindow {
         &mut self,
         ui: &mut egui::Ui,
         ch: &Channel,
+        tempo: f64,
         host: &dyn Host,
         dir: Option<&Path>,
         out: &mut SettingsOutput,
@@ -393,7 +403,11 @@ impl ChannelSettingsWindow {
             }
             _ => {}
         }
-        let peaks = ch.sample().and_then(|smp| host.sample_peaks(smp, dir));
+        // The waveform shows the processed data once it is computed (§4).
+        let peaks = ch
+            .playback_sample(tempo)
+            .and_then(|smp| host.sample_peaks(&smp, dir))
+            .or_else(|| ch.sample().and_then(|smp| host.sample_peaks(smp, dir)));
         let mut edited = s;
         self.waveform(
             ui,
@@ -405,25 +419,10 @@ impl ChannelSettingsWindow {
         ui.columns(3, |cols| {
             let ui = &mut cols[0];
             theme_label(ui, "Pitch and level");
-            ui.horizontal(|ui| {
-                ui.label("Root note");
-                egui::ComboBox::from_id_salt("root_key")
-                    .width(90.0)
-                    .selected_text(format!(
-                        "{} ({})",
-                        key_name(edited.root_key),
-                        edited.root_key
-                    ))
-                    .show_ui(ui, |ui| {
-                        for k in (0..=127u8).rev() {
-                            ui.selectable_value(
-                                &mut edited.root_key,
-                                k,
-                                format!("{} ({k})", key_name(k)),
-                            );
-                        }
-                    });
-            });
+            ui.label(format!(
+                "Root note {} (Instrument tab)",
+                key_name(edited.root_key)
+            ));
             ui.horizontal(|ui| {
                 ui.label("Gain");
                 let r = ui.add(
@@ -493,8 +492,14 @@ impl ChannelSettingsWindow {
                 edited.loop_end = d.loop_end;
             }
         });
+        ui.add_space(8.0);
+        let mp3 = matches!(&status, Some(SampleStatus::Ready { format, .. }) if format.starts_with("MP3"));
+        processing_ui(ui, &mut edited, frames_rate, tempo, mp3, out);
         if edited != s && edited.validate().is_ok() {
-            let merging = self.dragging.is_some() || edited.gain_db != s.gain_db;
+            let merging = self.dragging.is_some()
+                || edited.gain_db != s.gain_db
+                || edited.stretch != s.stretch
+                || edited.precompute != s.precompute;
             out.edits.push((Edit::SetSampler(id, edited), merging));
         }
     }
@@ -629,6 +634,413 @@ impl ChannelSettingsWindow {
         }
         resp
     }
+}
+
+/// ON, PAN, VOL, PITCH and TRACK above the sampler's tabs (§4).
+fn header(ui: &mut egui::Ui, project: &Project, ch: &Channel, out: &mut SettingsOutput) {
+    let id = ch.id;
+    ui.horizontal(|ui| {
+        let mut on = !ch.muted;
+        if ui
+            .checkbox(&mut on, "ON")
+            .on_hover_text("The channel plays")
+            .changed()
+        {
+            out.edits.push((Edit::SetChannelMuted(id, !on), false));
+        }
+        ui.label("PAN");
+        let mut pan = ch.pan;
+        let r = ui.add(egui::DragValue::new(&mut pan).range(-1.0..=1.0).speed(0.01));
+        if r.changed() {
+            out.edits.push((Edit::SetChannelPan(id, pan), true));
+        }
+        out.end_gesture |= r.drag_stopped() || r.lost_focus();
+        ui.label("VOL");
+        let mut vol = ch.volume;
+        let r = ui.add(
+            egui::DragValue::new(&mut vol)
+                .range(0.0..=MAX_VOLUME)
+                .speed(0.01)
+                .custom_formatter(|v, _| db_text(v as f32)),
+        );
+        if r.changed() {
+            out.edits.push((Edit::SetChannelVolume(id, vol), true));
+        }
+        out.end_gesture |= r.drag_stopped() || r.lost_focus();
+        ui.label("PITCH");
+        let mut pitch = ch.pitch;
+        let r = ui.add(
+            egui::DragValue::new(&mut pitch)
+                .range(-MAX_CHANNEL_PITCH..=MAX_CHANNEL_PITCH)
+                .suffix(" st"),
+        );
+        if r.changed() {
+            out.edits.push((
+                Edit::SetChannelPlayback {
+                    channel: id,
+                    pitch,
+                    polyphony: ch.polyphony,
+                    mono: ch.mono,
+                },
+                true,
+            ));
+        }
+        out.end_gesture |= r.drag_stopped() || r.lost_focus();
+        ui.label("TRACK");
+        egui::ComboBox::from_id_salt("sampler_header_track")
+            .width(120.0)
+            .selected_text(track_label(project, ch.track))
+            .show_ui(ui, |ui| {
+                for t in project.mixer.all_tracks() {
+                    if ui
+                        .selectable_label(t.id == ch.track, track_label(project, t.id))
+                        .clicked()
+                        && t.id != ch.track
+                    {
+                        out.edits.push((Edit::SetChannelTrack(id, t.id), false));
+                    }
+                }
+            });
+    });
+}
+
+/// Content, declicking, time stretching and the Tools panel of the
+/// Sample tab (§4).
+fn processing_ui(
+    ui: &mut egui::Ui,
+    e: &mut SamplerSettings,
+    frames_rate: Option<(usize, u32)>,
+    tempo: f64,
+    mp3: bool,
+    out: &mut SettingsOutput,
+) {
+    use jdance_domain::sample_processing::{Declick, StretchMode, TimeFit};
+    let stopped = std::cell::Cell::new(false);
+    let drag = |ui: &mut egui::Ui, v: &mut f32, lo: f32, hi: f32, speed: f64| {
+        let r = ui.add(egui::DragValue::new(v).range(lo..=hi).speed(speed));
+        stopped.set(stopped.get() | r.drag_stopped() || r.lost_focus());
+        r.changed()
+    };
+    ui.columns(3, |cols| {
+        let ui = &mut cols[0];
+        theme_label(ui, "Content");
+        ui.add_enabled(false, egui::Checkbox::new(&mut true, "Resample"))
+            .on_disabled_hover_text("Always on: the sample is converted to the device rate.");
+        ui.add_enabled_ui(!mp3, |ui| {
+            ui.checkbox(&mut e.keep_on_disk, "Keep on disk")
+                .on_hover_text(
+                    "Stored with the project; the sample still loads into memory in this \
+                     version. Turns the precomputed effects off.",
+                )
+                .on_disabled_hover_text("Not for MP3 files");
+        });
+        ui.add_space(6.0);
+        theme_label(ui, "Declicking");
+        egui::ComboBox::from_id_salt("declick")
+            .width(200.0)
+            .selected_text(e.declick.label())
+            .show_ui(ui, |ui| {
+                for d in Declick::ALL {
+                    ui.selectable_value(&mut e.declick, d, d.label());
+                }
+            });
+
+        let ui = &mut cols[1];
+        theme_label(ui, "Time stretching");
+        egui::Grid::new("stretch_grid")
+            .num_columns(2)
+            .spacing([10.0, 6.0])
+            .show(ui, |ui| {
+                ui.label("PITCH");
+                let before = e.stretch.pitch;
+                drag(ui, &mut e.stretch.pitch, -24.0, 24.0, 0.05);
+                // Turning PITCH in resampling switches to Auto (§4).
+                if e.stretch.pitch != before && e.stretch.mode == StretchMode::Resample {
+                    e.stretch.mode = StretchMode::Auto;
+                }
+                ui.end_row();
+                ui.label("MUL");
+                drag(ui, &mut e.stretch.mul, 0.25, 4.0, 0.01);
+                ui.end_row();
+                ui.label("TIME");
+                ui.horizontal(|ui| {
+                    let mut fit = matches!(e.stretch.time, TimeFit::Beats { .. });
+                    if ui
+                        .checkbox(&mut fit, "Project tempo")
+                        .on_hover_text("The length follows the project tempo")
+                        .changed()
+                    {
+                        e.stretch.time = if fit {
+                            // The sample's length in beats now, at least one.
+                            let beats = frames_rate.map_or(4.0, |(f, r)| {
+                                (f as f64 / f64::from(r.max(1)) * tempo / 60.0)
+                                    .round()
+                                    .max(1.0)
+                            });
+                            TimeFit::Beats {
+                                beats: (beats as f32).min(1024.0),
+                            }
+                        } else {
+                            TimeFit::None
+                        };
+                    }
+                    if let TimeFit::Beats { beats } = &mut e.stretch.time {
+                        let r = ui.add(
+                            egui::DragValue::new(beats)
+                                .range(0.25..=1024.0)
+                                .speed(0.25)
+                                .suffix(" beats"),
+                        );
+                        stopped.set(stopped.get() | r.drag_stopped() || r.lost_focus());
+                    }
+                });
+                ui.end_row();
+                ui.label("Mode");
+                egui::ComboBox::from_id_salt("stretch_mode")
+                    .width(120.0)
+                    .selected_text(e.stretch.mode.label())
+                    .show_ui(ui, |ui| {
+                        for m in StretchMode::ALL {
+                            ui.selectable_value(&mut e.stretch.mode, m, m.label());
+                        }
+                    });
+                ui.end_row();
+            });
+
+        let ui = &mut cols[2];
+        theme_label(ui, "Precomputed effects");
+        ui.add_enabled_ui(!e.keep_on_disk, |ui| {
+            let p = &mut e.precompute;
+            egui::Grid::new("tools_flags")
+                .num_columns(2)
+                .show(ui, |ui| {
+                    ui.checkbox(&mut p.remove_dc, "Remove DC offset");
+                    ui.checkbox(&mut p.reverse_polarity, "Reverse polarity");
+                    ui.end_row();
+                    ui.checkbox(&mut p.normalize, "Normalize");
+                    ui.checkbox(&mut p.fade_stereo, "Fade stereo");
+                    ui.end_row();
+                    ui.checkbox(&mut p.reverse, "Reverse");
+                    ui.checkbox(&mut p.swap_stereo, "Swap stereo");
+                    ui.end_row();
+                });
+            egui::Grid::new("tools_knobs")
+                .num_columns(2)
+                .spacing([10.0, 4.0])
+                .show(ui, |ui| {
+                    let pct = |v: f64, _| format!("{:.1}%", v * 100.0);
+                    for (label, v, hi) in [
+                        ("SMP START", &mut p.start, 1.0),
+                        ("LENGTH", &mut p.length, 1.0),
+                        ("IN", &mut p.fade_in, 0.5),
+                        ("OUT", &mut p.fade_out, 0.5),
+                        ("CROSSFADE", &mut p.crossfade, 0.5),
+                    ] {
+                        ui.label(label);
+                        let r = ui.add(
+                            egui::DragValue::new(v)
+                                .range(0.0..=hi)
+                                .speed(0.002)
+                                .custom_formatter(pct),
+                        );
+                        stopped.set(stopped.get() | r.drag_stopped() || r.lost_focus());
+                        ui.end_row();
+                    }
+                    ui.checkbox(&mut p.trim_on, "TRIM");
+                    let r = ui.add_enabled(
+                        p.trim_on,
+                        egui::DragValue::new(&mut p.trim)
+                            .range(0.0..=1.0)
+                            .speed(0.001)
+                            .custom_formatter(|v, _| {
+                                if v <= 0.0 {
+                                    "silence".to_owned()
+                                } else {
+                                    db_text(v as f32)
+                                }
+                            }),
+                    );
+                    stopped.set(stopped.get() | r.drag_stopped() || r.lost_focus());
+                    ui.end_row();
+                });
+        });
+    });
+    out.end_gesture |= stopped.get();
+}
+
+/// The sampler's Instrument tab: level offsets, cut groups, root note
+/// and fine tuning (§4).
+fn keys_tab(ui: &mut egui::Ui, project: &Project, ch: &Channel, out: &mut SettingsOutput) {
+    let s = ch.sampler;
+    let mut e = s;
+    let mut stopped = false;
+    theme_label(ui, "Levels adjustment");
+    ui.horizontal(|ui| {
+        for (label, v, hint) in [
+            ("PAN", &mut e.levels.pan, "Added to the channel's pan"),
+            ("VOL", &mut e.levels.vol, "Added to the channel's volume"),
+            ("MOD X", &mut e.levels.mod_x, "Stored for a later version"),
+            ("MOD Y", &mut e.levels.mod_y, "Stored for a later version"),
+        ] {
+            ui.label(label);
+            let r = ui
+                .add(egui::DragValue::new(v).range(-1.0..=1.0).speed(0.01))
+                .on_hover_text(hint);
+            stopped |= r.drag_stopped() || r.lost_focus();
+        }
+    });
+    ui.add_space(8.0);
+    theme_label(ui, "Group");
+    ui.horizontal(|ui| {
+        let group = |n: u8| {
+            if n == 0 {
+                "…".to_owned()
+            } else {
+                n.to_string()
+            }
+        };
+        for (label, v, salt) in [("Cut", &mut e.cut, "cut"), ("By", &mut e.cut_by, "cut_by")] {
+            ui.label(label);
+            egui::ComboBox::from_id_salt(salt)
+                .width(50.0)
+                .selected_text(group(*v))
+                .show_ui(ui, |ui| {
+                    for n in 0..=MAX_CUT_GROUP {
+                        ui.selectable_value(v, n, group(n));
+                    }
+                });
+        }
+        if ui
+            .button("Cut self")
+            .on_hover_text("Each new note cuts the one before")
+            .clicked()
+        {
+            let n = free_cut_group(project);
+            e.cut = n;
+            e.cut_by = n;
+        }
+    });
+    ui.label(
+        RichText::new("Notes of this channel cut channels whose By is this channel's Cut.")
+            .size(11.5)
+            .color(theme::MUTED),
+    );
+    ui.add_space(8.0);
+    theme_label(ui, "Root note");
+    ui.horizontal(|ui| {
+        ui.label(format!("Root note: {}", key_name(e.root_key)));
+        if ui.button("Reset").on_hover_text("Back to C5").clicked() {
+            e.root_key = jdance_domain::ROOT_KEY;
+        }
+        ui.checkbox(&mut e.main_pitch, "Enable main pitch")
+            .on_hover_text("The channel's PITCH acts on notes");
+        ui.checkbox(&mut e.add_to_key, "Add to key")
+            .on_hover_text("Note keys change the pitch; off, every note plays at the root");
+    });
+    ui.horizontal(|ui| {
+        ui.label("Fine tune");
+        let r = ui.add(
+            egui::Slider::new(&mut e.fine_tune, -100.0..=100.0)
+                .suffix(" ct")
+                .fixed_decimals(0),
+        );
+        stopped |= r.drag_stopped() || r.lost_focus();
+    });
+    if let Some(k) = root_keyboard(ui, e.root_key) {
+        e.root_key = k;
+    }
+    ui.label(
+        RichText::new("Right-click a key to make it the root note.")
+            .size(11.5)
+            .color(theme::MUTED),
+    );
+    if e != s && e.validate().is_ok() {
+        let merging = e.levels != s.levels || e.fine_tune != s.fine_tune;
+        out.edits.push((Edit::SetSampler(ch.id, e), merging));
+    }
+    out.end_gesture |= stopped;
+}
+
+/// Highest cut group number.
+const MAX_CUT_GROUP: u8 = 32;
+
+/// The lowest cut group no channel uses (for Cut self).
+fn free_cut_group(project: &Project) -> u8 {
+    (1..=MAX_CUT_GROUP)
+        .find(|n| {
+            !project
+                .channels
+                .iter()
+                .any(|c| c.sampler.cut == *n || c.sampler.cut_by == *n)
+        })
+        .unwrap_or(MAX_CUT_GROUP)
+}
+
+/// Keys C2–C8 with the root highlighted; returns the right-clicked key.
+fn root_keyboard(ui: &mut egui::Ui, root: u8) -> Option<u8> {
+    const LO: u8 = 24;
+    const HI: u8 = 96;
+    let black = |k: u8| matches!(k % 12, 1 | 3 | 6 | 8 | 10);
+    let whites = (LO..=HI).filter(|k| !black(*k)).count() as f32;
+    let width = ui.available_width().min(760.0);
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, 56.0), Sense::click());
+    let painter = ui.painter_at(rect);
+    let w = rect.width() / whites;
+    let mut white_rects = Vec::new();
+    let mut black_rects = Vec::new();
+    let mut i = 0.0;
+    for k in LO..=HI {
+        if black(k) {
+            let x = rect.left() + i * w - w * 0.3;
+            black_rects.push((
+                k,
+                Rect::from_min_size(pos2(x, rect.top()), vec2(w * 0.6, rect.height() * 0.6)),
+            ));
+        } else {
+            white_rects.push((
+                k,
+                Rect::from_min_size(
+                    pos2(rect.left() + i * w, rect.top()),
+                    vec2(w, rect.height()),
+                ),
+            ));
+            i += 1.0;
+        }
+    }
+    for (k, r) in &white_rects {
+        let fill = if *k == root {
+            theme::AMBER
+        } else {
+            egui::Color32::from_rgb(0xD8, 0xDA, 0xDE)
+        };
+        painter.rect_filled(r.shrink(0.5), 1.0, fill);
+        if k % 12 == 0 {
+            painter.text(
+                pos2(r.center().x, r.bottom() - 8.0),
+                egui::Align2::CENTER_CENTER,
+                key_name(*k),
+                egui::FontId::proportional(9.0),
+                egui::Color32::from_rgb(0x30, 0x33, 0x38),
+            );
+        }
+    }
+    for (k, r) in &black_rects {
+        let fill = if *k == root {
+            theme::AMBER
+        } else {
+            egui::Color32::from_rgb(0x1A, 0x1C, 0x20)
+        };
+        painter.rect_filled(*r, 1.0, fill);
+    }
+    if !resp.secondary_clicked() {
+        return None;
+    }
+    let p = resp.interact_pointer_pos()?;
+    black_rects
+        .iter()
+        .chain(&white_rects)
+        .find(|(_, r)| r.contains(p))
+        .map(|(k, _)| *k)
 }
 
 fn envelope_tab(ui: &mut egui::Ui, ch: &Channel, out: &mut SettingsOutput) {

@@ -3,6 +3,7 @@
 //! resampling on the UI thread).
 
 use crate::render::load_sample_info;
+use jdance_domain::sample_processing::Processing;
 use jdance_dsp::SampleBuffer;
 use jdance_ui::SampleStatus;
 use std::collections::HashMap;
@@ -43,6 +44,9 @@ pub struct SampleCache {
     rx: Receiver<Loaded>,
     /// Import warnings not yet shown.
     warnings: Vec<String>,
+    /// Processed samples waiting for their file: derived path → file
+    /// path and processing (spec 0.2.5 §4).
+    derived: HashMap<PathBuf, (PathBuf, Processing)>,
 }
 
 impl SampleCache {
@@ -54,6 +58,75 @@ impl SampleCache {
             tx,
             rx,
             warnings: Vec::new(),
+            derived: HashMap::new(),
+        }
+    }
+
+    /// Starts computing `processing` of the file at `base` into a sample
+    /// cached under `derived`, once the file is loaded.
+    pub fn request_processed(&mut self, derived: &Path, base: &Path, processing: Processing) {
+        if self.entries.contains_key(derived) {
+            return;
+        }
+        self.request(base);
+        self.entries.insert(derived.to_path_buf(), Entry::Loading);
+        self.derived
+            .insert(derived.to_path_buf(), (base.to_path_buf(), processing));
+        self.start_derived();
+    }
+
+    /// Forgets processed samples not in `keep`: every knob position makes
+    /// a new one.
+    pub fn retain_processed(&mut self, keep: &std::collections::HashSet<PathBuf>) {
+        let stale: Vec<PathBuf> = self
+            .entries
+            .keys()
+            .filter(|p| is_derived(p) && !keep.contains(*p))
+            .cloned()
+            .collect();
+        for p in stale {
+            self.entries.remove(&p);
+            self.derived.remove(&p);
+        }
+    }
+
+    /// Processes the waiting samples whose file is loaded.
+    fn start_derived(&mut self) {
+        let mut done = Vec::new();
+        for (derived, (base, processing)) in &self.derived {
+            match self.entries.get(base) {
+                Some(Entry::Ready { original, .. }) => {
+                    done.push(derived.clone());
+                    let (tx, path, original, p, rate) = (
+                        self.tx.clone(),
+                        derived.clone(),
+                        Arc::clone(original),
+                        *processing,
+                        self.rate,
+                    );
+                    std::thread::spawn(move || {
+                        let processed = crate::render::process_sample(&original, &p);
+                        let converted = processed.resampled(rate);
+                        let peaks = peaks(&processed, PEAK_BUCKETS);
+                        let loaded = crate::render::LoadedSample {
+                            original: processed,
+                            converted,
+                            format: jdance_persistence::SourceFormat::Unknown,
+                            warnings: Vec::new(),
+                        };
+                        let _ = tx.send(Loaded::Decoded(path, Ok((loaded, peaks)), rate));
+                    });
+                }
+                Some(Entry::Failed(e)) => {
+                    done.push(derived.clone());
+                    let e = e.clone();
+                    self.entries.insert(derived.clone(), Entry::Failed(e));
+                }
+                _ => {}
+            }
+        }
+        for d in done {
+            self.derived.remove(&d);
         }
     }
 
@@ -102,6 +175,9 @@ impl SampleCache {
             changed = true;
             match msg {
                 Loaded::Decoded(path, result, rate) => {
+                    if !self.entries.contains_key(&path) {
+                        continue; // a processed sample no longer wanted
+                    }
                     let entry = match result {
                         Ok((loaded, peaks)) => {
                             let name = path.file_name().map_or_else(
@@ -147,6 +223,9 @@ impl SampleCache {
                 }
             }
         }
+        if changed {
+            self.start_derived();
+        }
         changed
     }
 
@@ -189,6 +268,12 @@ impl SampleCache {
             Entry::Failed(e) => SampleStatus::Failed(e.clone()),
         })
     }
+}
+
+/// A processed sample's path ([`jdance_domain::sample_processing::processed_ref`]).
+fn is_derived(p: &Path) -> bool {
+    p.to_string_lossy()
+        .contains(jdance_domain::sample_processing::PROCESSED_SEPARATOR)
 }
 
 /// Resolution of waveform peaks.

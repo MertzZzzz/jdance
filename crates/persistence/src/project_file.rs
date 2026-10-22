@@ -712,6 +712,17 @@ mod tests {
         ch.sampler.mode = jdance_domain::PlaybackMode::Loop;
         ch.sampler.envelope = true;
         ch.sampler.root_key = 57;
+        // The advanced sampler (spec 0.2.5 §4).
+        ch.sampler.declick = jdance_domain::sample_processing::Declick::Generic;
+        ch.sampler.stretch.pitch = 3.0;
+        ch.sampler.stretch.time = jdance_domain::sample_processing::TimeFit::Beats { beats: 8.0 };
+        ch.sampler.precompute.reverse = true;
+        ch.sampler.precompute.fade_in = 0.1;
+        ch.sampler.cut = 2;
+        ch.sampler.cut_by = 2;
+        ch.sampler.fine_tune = -12.0;
+        ch.sampler.add_to_key = false;
+        ch.sampler.levels.pan = 0.5;
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("a.jdance");
         save_project(&file, &p).unwrap();

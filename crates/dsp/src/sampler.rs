@@ -78,6 +78,12 @@ pub struct Playback {
     pub gate: Option<u64>,
     /// Fade length at note-off when there is no envelope.
     pub gate_release: u32,
+    /// Declicking (spec 0.2.5 §4): S-curve fades at the region's start
+    /// and end, in samples; with `bleed` the fade out runs past the end
+    /// into the data after it, where there is some.
+    pub fade_in: u32,
+    pub fade_out: u32,
+    pub bleed: bool,
 }
 
 impl Playback {
@@ -89,10 +95,41 @@ impl Playback {
         adsr: None,
         gate: None,
         gate_release: 1,
+        fade_in: 0,
+        fade_out: 0,
+        bleed: false,
     };
 
     fn is_plain(&self) -> bool {
-        self.start == 0 && self.loop_range.is_none() && self.adsr.is_none() && self.gate.is_none()
+        self.start == 0
+            && self.loop_range.is_none()
+            && self.adsr.is_none()
+            && self.gate.is_none()
+            && self.fade_in == 0
+            && self.fade_out == 0
+    }
+}
+
+/// S-curve gain for `done` of `len` samples, rising from 0 to 1.
+#[inline]
+fn s_curve(done: usize, len: u32) -> f32 {
+    if len == 0 || done >= len as usize {
+        return 1.0;
+    }
+    let t = done as f32 / len as f32;
+    0.5 - 0.5 * (std::f32::consts::PI * t).cos()
+}
+
+impl Playback {
+    /// Where one-shot playback ends: the region's end, or past it by the
+    /// fade out when bleeding.
+    fn play_end(&self, len: usize) -> usize {
+        let end = self.end.min(len);
+        if self.bleed {
+            end.saturating_add(self.fade_out as usize).min(len)
+        } else {
+            end
+        }
     }
 }
 
@@ -331,7 +368,7 @@ impl SamplerVoice {
             .filter(|(a, b)| a < b);
         let end = match looping {
             Some((_, b)) => b,
-            None => self.playback.end.min(len),
+            None => self.playback.play_end(len),
         };
         for i in 0..n {
             if self.pos >= end {
@@ -367,6 +404,14 @@ impl SamplerVoice {
             let l = sample.left[self.pos] + (sample.left[next] - sample.left[self.pos]) * t;
             let r = sample.right[self.pos] + (sample.right[next] - sample.right[self.pos]) * t;
             let mut g = level;
+            // Declicking: in from the start, out before the end.
+            let pb = &self.playback;
+            if pb.fade_in > 0 {
+                g *= s_curve(self.pos.saturating_sub(pb.start), pb.fade_in);
+            }
+            if pb.fade_out > 0 && looping.is_none() {
+                g *= s_curve(end.saturating_sub(self.pos + 1), pb.fade_out);
+            }
             if self.step > 0.0 {
                 self.env -= self.step;
                 if self.env <= 0.0 {
@@ -523,5 +568,50 @@ mod tests {
         let mut b = SamplerVoice::default();
         b.start_with(0, 0, 0.5, 0.5, 1.0, Playback::WHOLE);
         assert_eq!(render(&mut a, &s, 8), render(&mut b, &s, 8));
+    }
+}
+
+#[cfg(test)]
+mod declick_tests {
+    use super::*;
+
+    fn render(fade_in: u32, fade_out: u32, bleed: bool, end: usize) -> Vec<f32> {
+        let s = SampleBuffer::from_interleaved(48_000, 1, &[1.0; 200]);
+        let mut v = SamplerVoice::default();
+        v.start_with(
+            0,
+            0,
+            1.0,
+            1.0,
+            1.0,
+            Playback {
+                end,
+                fade_in,
+                fade_out,
+                bleed,
+                ..Playback::WHOLE
+            },
+        );
+        let (mut l, mut r) = (vec![0.0; 256], vec![0.0; 256]);
+        v.render_add(&s, &mut l, &mut r);
+        l
+    }
+
+    #[test]
+    fn fades_shape_the_start_and_the_end() {
+        let plain = render(0, 0, false, 100);
+        assert_eq!(plain[99], 1.0);
+        assert_eq!(plain[100], 0.0);
+        // Fade out inside the region: silent at the end, full before.
+        let out = render(0, 20, false, 100);
+        assert!(out[99] < 0.05 && out[70] == 1.0, "{} {}", out[99], out[70]);
+        assert_eq!(out[100], 0.0);
+        // Bleeding: plays 20 past the end, fading.
+        let bleed = render(0, 20, true, 100);
+        assert!(bleed[105] > 0.0 && bleed[105] < 1.0);
+        assert_eq!(bleed[120], 0.0);
+        // Fade in: rises from 0.
+        let fin = render(10, 0, false, 100);
+        assert!(fin[0] < 0.01 && fin[5] > 0.3 && fin[12] == 1.0);
     }
 }

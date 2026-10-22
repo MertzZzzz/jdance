@@ -16,6 +16,7 @@ mod mixer;
 pub mod name_presets;
 mod playlist;
 mod plugin;
+pub mod sample_processing;
 
 pub use audio::{
     AudioAsset, AudioClip, DEFAULT_TIMEBASE, EDGE_FADE_SECONDS, MAX_START_FRAMES, content_hash,
@@ -582,6 +583,41 @@ pub struct SamplerSettings {
     /// Sustain level `0.0..=1.0`.
     pub sustain: f32,
     pub release_ms: f32,
+    /// Spec 0.2.5 §4: fades against clicks at the region's edges.
+    #[serde(default)]
+    pub declick: sample_processing::Declick,
+    /// Pitch and length of the sample data (PITCH, MUL, TIME, mode).
+    #[serde(default)]
+    pub stretch: sample_processing::Stretch,
+    /// Processing applied to the sample data in advance.
+    #[serde(default)]
+    pub precompute: sample_processing::Precompute,
+    /// Read from disk rather than memory; WAV only. Stored; the sample
+    /// is still held in memory in 0.2.5.
+    #[serde(default)]
+    pub keep_on_disk: bool,
+    /// Cut group of this channel: its notes cut channels whose `cut_by`
+    /// is the same number (0 = none).
+    #[serde(default)]
+    pub cut: u8,
+    #[serde(default)]
+    pub cut_by: u8,
+    /// Fine tuning in cents, `-100..=100`.
+    #[serde(default)]
+    pub fine_tune: f32,
+    /// The channel's PITCH acts on notes (proposed meaning, open
+    /// question 8).
+    #[serde(default = "yes")]
+    pub main_pitch: bool,
+    /// Note keys change the pitch; off, every note plays at the root.
+    #[serde(default = "yes")]
+    pub add_to_key: bool,
+    #[serde(default)]
+    pub levels: sample_processing::Levels,
+}
+
+fn yes() -> bool {
+    true
 }
 
 /// Longest envelope stage, ms.
@@ -602,6 +638,16 @@ impl Default for SamplerSettings {
             decay_ms: 120.0,
             sustain: 0.7,
             release_ms: 80.0,
+            declick: sample_processing::Declick::Off,
+            stretch: sample_processing::Stretch::default(),
+            precompute: sample_processing::Precompute::default(),
+            keep_on_disk: false,
+            cut: 0,
+            cut_by: 0,
+            fine_tune: 0.0,
+            main_pitch: true,
+            add_to_key: true,
+            levels: sample_processing::Levels::default(),
         }
     }
 }
@@ -630,7 +676,55 @@ impl SamplerSettings {
         if !(ms(self.attack_ms) && ms(self.decay_ms) && ms(self.release_ms) && unit(self.sustain)) {
             return Err("envelope value out of range".into());
         }
+        let s = &self.stretch;
+        if !((-24.0..=24.0).contains(&s.pitch) && (0.25..=4.0).contains(&s.mul)) {
+            return Err("stretch pitch or multiplier out of range".into());
+        }
+        if let sample_processing::TimeFit::Beats { beats } = s.time
+            && !(beats > 0.0 && beats <= 1024.0)
+        {
+            return Err("fitted length out of range".into());
+        }
+        let p = &self.precompute;
+        let half = |v: f32| (0.0..=0.5).contains(&v);
+        if !(unit(p.start)
+            && unit(p.length)
+            && half(p.fade_in)
+            && half(p.fade_out)
+            && half(p.crossfade)
+            && unit(p.trim))
+        {
+            return Err("sample processing value out of range".into());
+        }
+        if !(-100.0..=100.0).contains(&self.fine_tune) {
+            return Err("fine tune out of range".into());
+        }
+        let l = &self.levels;
+        if ![l.pan, l.vol, l.mod_x, l.mod_y]
+            .iter()
+            .all(|v| (-1.0..=1.0).contains(v))
+        {
+            return Err("level offset out of range".into());
+        }
         Ok(())
+    }
+
+    /// The processing of this sampler's data at `tempo_bpm`, `None` when
+    /// the file plays as it is. Keep on disk turns precomputed processing
+    /// off (spec 0.2.5 §4).
+    pub fn processing(&self, tempo_bpm: f64) -> Option<sample_processing::Processing> {
+        let precompute = if self.keep_on_disk {
+            sample_processing::Precompute::default()
+        } else {
+            self.precompute
+        };
+        (!precompute.is_identity() || !self.stretch.is_identity()).then_some(
+            sample_processing::Processing {
+                precompute,
+                stretch: self.stretch,
+                tempo_bpm,
+            },
+        )
     }
 }
 
@@ -686,6 +780,17 @@ impl Channel {
             source: ChannelSource::Plugin { plugin },
             ..Self::new_sampler(id, name)
         }
+    }
+
+    /// The sample this channel plays at `tempo_bpm`: the file, or the
+    /// file processed by its sampler settings under its own key (spec
+    /// 0.2.5 §4).
+    pub fn playback_sample(&self, tempo_bpm: f64) -> Option<SampleRef> {
+        let s = self.sample()?;
+        Some(sample_processing::processed_ref(
+            s,
+            self.sampler.processing(tempo_bpm).as_ref(),
+        ))
     }
 
     pub fn sample(&self) -> Option<&SampleRef> {

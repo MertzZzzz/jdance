@@ -1169,6 +1169,20 @@ fn trigger(
     let ch = snap.channels.get(e.channel)?;
     ch.sample.as_ref()?;
     let fade = release_len(snap.sample_rate);
+    // Cut groups (spec 0.2.5 §4): this note cuts the channels cut by the
+    // group of this channel.
+    if ch.cut > 0 {
+        for v in voices.iter_mut().filter(|v| {
+            v.inner.is_active()
+                && !v.inner.is_releasing()
+                && snap
+                    .channels
+                    .get(v.inner.slot)
+                    .is_some_and(|c| c.cut_by == ch.cut)
+        }) {
+            v.inner.release(fade);
+        }
+    }
     // Voice limits of the channel: mono cuts every voice, a polyphony
     // limit the oldest ones (short fades, no clicks).
     let mine =
@@ -1217,12 +1231,20 @@ fn trigger(
         playback.gate = Some(e.length.max(1));
     }
     let gain = e.velocity * s.gain;
+    // Add to key off: every note plays at the root; main pitch off: the
+    // channel's pitch does not apply (§4).
+    let key = if s.add_to_key { e.key } else { s.root_key };
+    let key = if s.main_pitch {
+        transpose(key, ch.pitch)
+    } else {
+        key
+    };
     v.inner.start_with(
         e.channel,
         *serial,
         gain,
         gain,
-        jdance_dsp::key_rate(transpose(e.key, ch.pitch), s.root_key),
+        jdance_dsp::key_rate(key, s.root_key) * s.fine,
         playback,
     );
     Some(index)
