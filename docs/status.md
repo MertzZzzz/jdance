@@ -428,3 +428,22 @@ XTEST (линейка Playlist, окно цвета). Открытые вопр�
 - §10: только VST3; нет группового добавления в избранное и
   перетаскивания эффекта на канал микшера; операторы AND/OR/NOT не
   поддерживаются (пробел — «и», минус — «не»).
+
+## Релиз 0.2.6 (исправления по отзыву)
+
+Проверки на ветке `0.2.6`: `cargo test --workspace` (446 тестов на
+Linux), clippy `-D warnings`, `cargo xtask check`. Интерфейс —
+headless-тесты egui и приложение под Xvfb (длинные имена, точка
+моно/стерео).
+
+| Пункт | Статус | Артефакт / комментарий |
+|---|---|---|
+| Клик по плагину в окне добавления добавляет его | PASS | `ui` тесты `filters_keep_the_window_and_a_click_loads_the_instrument`, `the_mixer_picker_puts_the_effect_into_its_track` |
+| Смена фильтра VST3 / Favorites не закрывает окно | PASS | тот же тест: четыре переключения фильтров, окно открыто |
+| Send to sampler для аудиоканала и аудиоклипа | PASS | `commands` тест `an_audio_channel_goes_into_a_new_sampler_in_one_step` |
+| Названия не выходят за границы | PASS | `widgets::fit_text`; Xvfb: Channel Rack, Project Browser, полосы микшера |
+| Моно/стерео — точка под фейдером | PASS | `ui` тест `the_strip_switches_mono_to_stereo_without_touching_monitoring`; Xvfb |
+| VST3 с моно- и многовыходными шинами | PASS | `plugin-vst3` тесты `a_multi_output_instrument_that_refuses_stereo_everywhere_opens`, `a_mono_effect_takes_the_mix_and_feeds_both_sides` (тестовые классы JD Test Drums, JD Test Mono); Addictive Drums не проверялся — плагина нет в среде |
+| Wet/Dry у каждого эффекта | PASS | `engine` тесты `wet_dry_mixes_the_effect_with_the_dry_signal`, `an_insert_at_zero_wet_renders_like_no_insert`; `commands` тест слияния; формат 16 с круговым тестом |
+| Stop останавливает любой звук, кроме мониторинга | PASS | `engine` тесты `stop_ends_the_preview`, `stop_does_not_interrupt_monitoring`, `stop_silences_an_instrument_tail_until_the_next_note`, `a_plugin_effect_is_heard_again_after_stop_and_play` |
+| Windows MSI 0.2.6 | — | сборка в workflow `Release` после слияния |
