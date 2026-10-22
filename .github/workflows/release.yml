@@ -83,7 +83,7 @@ jobs:
           if ($p.ExitCode -ne 0) { Get-Content install.log -Tail 50; throw "install failed: $($p.ExitCode)" }
           $dir = "$env:ProgramFiles\jdance"
           $exe = "$dir\jdance.exe"
-          foreach ($f in @($exe, "$dir\LICENSE.txt", "$dir\demo\demo.jdance", "$dir\demo\samples\kick.wav",
+          foreach ($f in @($exe, "$dir\LICENSE.txt", "$dir\ASIO-NOTICE.txt", "$dir\demo\demo.jdance", "$dir\demo\samples\kick.wav",
                            "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\jdance.lnk")) {
             if (-not (Test-Path $f)) { throw "missing after install: $f" }
           }

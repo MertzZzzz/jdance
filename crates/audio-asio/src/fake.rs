@@ -526,4 +526,25 @@ mod tests {
         assert_eq!(state.loads.load(Ordering::Relaxed), 50);
         assert!(b.input_devices().unwrap().is_empty(), "nothing active");
     }
+
+    /// ASIO-009/031: a driver that hangs in `init` fails the call after
+    /// 5 s instead of blocking the caller.
+    #[test]
+    fn a_hanging_driver_times_out() {
+        let b = AsioBackend::new(
+            Arc::new(|| vec![(dev(), "Hangs".into(), None)]),
+            Arc::new(|_id: &DeviceId| {
+                std::thread::sleep(std::time::Duration::from_secs(7));
+                Err(DriverError("never answered".into()))
+            }),
+        );
+        let t = Instant::now();
+        let e = b
+            .open_output(&dev(), &request(48_000), Box::new(Constant(0.0)))
+            .err()
+            .expect("timeout");
+        let waited = t.elapsed().as_secs_f64();
+        assert!((4.9..6.5).contains(&waited), "waited {waited} s");
+        assert!(e.to_string().contains("5 s"), "{e}");
+    }
 }

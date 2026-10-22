@@ -3,7 +3,7 @@
 <!--
   Windows installer (WiX Toolset 5). Built by .github/workflows/release.yml:
     wix build packaging/windows/jdance.wxs -arch x64 -ext WixToolset.UI.wixext
-      -d Version=0.2.1 -d BinDir=target/release -d DemoDir=<absolute>/assets/demo
+      -d Version=0.2.2 -d BinDir=target/release -d DemoDir=<absolute>/assets/demo
       -d LicenseRtf=License.rtf -o jdance.msi
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
@@ -44,6 +44,9 @@
       </Component>
       <Component Id="LicenseText">
         <File Id="LicenseTxt" Source="LICENSE" Name="LICENSE.txt" KeyPath="yes" />
+      </Component>
+      <Component Id="AsioNotice">
+        <File Id="AsioNoticeTxt" Source="packaging\windows\ASIO-NOTICE.txt" Name="ASIO-NOTICE.txt" KeyPath="yes" />
       </Component>
       <Component Id="FontLicense">
         <File Id="FontOfl" Source="crates\ui\assets\fonts\OFL.txt" Name="FONTS-OFL.txt" KeyPath="yes" />

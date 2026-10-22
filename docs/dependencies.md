@@ -19,7 +19,7 @@
 | vst3 | 0.3.0 | MIT OR Apache-2.0 | plugin-vst3, test-fx | bindings VST 3 SDK 3.8 (ADR-008) | — |
 | libloading | 0.8.9 | ISC | plugin-vst3 | загрузка модулей плагинов (`dlopen`/`LoadLibraryExW`) | — |
 | x11rb | 0.13.2 | MIT OR Apache-2.0 | plugin-vst3 (Linux) | окна редакторов плагинов на X11 (ADR-010) | X-сервер (XWayland под Wayland) |
-| windows-sys | 0.61.2 | MIT OR Apache-2.0 | plugin-vst3, app (Windows) | окна редакторов плагинов (Win32); консоль для CLI-команд GUI-приложения | — |
+| windows-sys | 0.61.2 | MIT OR Apache-2.0 | plugin-vst3, app, audio-asio (Windows) | окна редакторов плагинов (Win32); консоль для CLI-команд GUI-приложения; ASIO: COM (`CoCreateInstance`, STA), реестр `HKLM\SOFTWARE\ASIO`, цикл сообщений рабочего потока (ADR-006) | ASIO-драйвер, установленный пользователем |
 | objc2, objc2-app-kit, objc2-foundation | 0.6.5 / 0.3.2 | MIT | plugin-vst3 (macOS) | окна редакторов плагинов (NSWindow) | AppKit |
 | libc | 0.2.186 | MIT OR Apache-2.0 | plugin-vst3 (Linux) | `poll` для IRunLoop | — |
 | mp3lame-encoder (+ mp3lame-sys 0.1.11) | 0.2.5 | LGPL-3.0 (crates), LAME 3.100: LGPL-2.0-or-later | mp3 | MP3-кодирование для экспорта (спецификация 0.2.0 §12, план D9) | LAME собирается из исходников в crate: autotools (Linux, macOS), `cc` (Windows MSVC); линковка статическая |
@@ -29,6 +29,15 @@
 Проверено: Claude Code, 2026-10-20, по `cargo metadata`.
 
 ## Решения и ограничения
+
+- **ASIO (ADR-006, spec 0.2.2 ASIO-030).** Без crate `asio-sys` и без
+  файлов ASIO SDK: интерфейс драйвера и структуры переписаны в
+  `crates/audio-asio/src/abi.rs` и `com.rs` по заголовкам ASIO SDK
+  (Steinberg; GPLv3 — один из вариантов лицензии SDK) и сверены с
+  привязками asio-sys 0.4.0 (Apache-2.0). Уведомление —
+  `packaging/windows/ASIO-NOTICE.txt`, ставится MSI рядом с программой.
+  Версия SDK, с которой действует GPLv3, по первоисточнику не проверена
+  [VERIFY]; название «ASIO» — без логотипа.
 
 - **WAV (BLD-040).** `hound` не читает IEEE float 64-bit, поэтому
   в `persistence/src/audio_file.rs` есть небольшой собственный

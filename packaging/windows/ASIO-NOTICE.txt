@@ -1,0 +1,14 @@
+ASIO support in jdance
+
+jdance hosts third-party ASIO drivers through its own adapter
+(crates/audio-asio). The driver interface and data structures in that
+adapter were written from the ASIO SDK headers by Steinberg Media
+Technologies GmbH, which Steinberg offers under the GNU General Public
+License version 3 as one of the SDK's licence options, and were checked
+against the asio-sys 0.4.0 bindings (Apache-2.0). No ASIO SDK files are
+distributed with jdance.
+
+ASIO is a trademark and software of Steinberg Media Technologies GmbH.
+jdance is not affiliated with or endorsed by Steinberg.
+
+jdance itself is licensed under GPL-3.0-or-later; see LICENSE.txt.

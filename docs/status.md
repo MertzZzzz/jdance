@@ -2,7 +2,7 @@
 
 Статусы по разделу 0.2 Amendment 02. `PASS` только с артефактом:
 тест в репозитории, лог CI или acceptance-отчёт.
-Последнее обновление: 2026-10-21 (релиз 0.2.0).
+Последнее обновление: 2026-10-22 (релиз 0.2.2).
 
 ## Milestone 0
 
@@ -19,7 +19,7 @@
 | ADR-005 panic strategy | ACCEPTED | `docs/adr/005-panic-strategy.md` |
 | ADR-013 граф микшера, pan law | ACCEPTED | `docs/adr/013-mixer-graph.md` |
 | ADR-002 UI-стек | OPEN | UI spike BLD-020 не проведён: пороги производительности и встраивание окна VST3 не проверены |
-| ADR-006 ASIO через CPAL или свой адаптер | OPEN | |
+| ADR-006 ASIO через CPAL или свой адаптер | ACCEPTED (0.2.2) | `docs/adr/006-asio-adapter.md`: свой адаптер `crates/audio-asio` |
 | ADR-008 VST3 bindings | ACCEPTED | `docs/adr/008-vst3-bindings.md` (`vst3` 0.3.0, SDK 3.8) |
 | ADR-009 модель процессов плагинов | ACCEPTED | `docs/adr/009-plugin-process-model.md` |
 | ADR-010 окна редакторов плагинов | ACCEPTED | `docs/adr/010-plugin-windows.md` |
@@ -280,5 +280,38 @@
 | Правая кнопка удаляет ноты в Piano Roll | PASS (Xvfb) | быстрый проход не пропускает ноты: тест `widgets::tests::right_sweep_*` |
 | Правая кнопка удаляет точки в Automation Editor; меню формы сегмента | PASS (Xvfb) | |
 | Меню клипа: маркер ▾ и Shift + правый клик | PASS (Xvfb) | |
-| Windows MSI 0.2.1 | см. CI | workflow `Release` |
+| Windows MSI 0.2.1 | PASS | [релиз v0.2.1](https://github.com/MertzZzzz/jdance/releases/tag/v0.2.1) |
 
+## Релиз 0.2.2 (спецификация `docs/spec/spec-0.2.2.md`)
+
+Проверки на ветке `0.2.2`: `cargo test --workspace` (313 тестов + 15 в
+`audio-asio`), clippy `-D warnings` для Linux и для `audio-asio` под
+Windows (gnu; приложение целиком — в Windows CI), `cargo xtask check`.
+GUI — под Xvfb со скриншотами, звук — ALSA null.
+
+| Пункт | Статус | Артефакт / комментарий |
+|---|---|---|
+| Аудиоканалы в Channel Rack, инвариант «у клипа есть канал» (ACH-001…019) | PASS | `commands::audio_channels` тесты (каждый путь создания клипа, повторный файл → тот же канал), `domain` валидация |
+| Engine: клип звучит через канал, баланс канала (ACH-010…014) | PASS | `engine` тесты аудиоклипов; golden без изменений |
+| Миграция v12 → v13 (ACH-060…064) | PASS | `persistence` тесты: канал на пару (сэмпл, трек дорожки), имена «x → Track» |
+| Channel Rack: строка аудиоканала, фильтр, Ctrl+L, удаление с клипами, Make unique (ACH-020…036) | PASS (Xvfb) | drop из библиотеки → канал; повторный drop и Draw — тот же канал; Ctrl+L в выбранный трек; удаление канала вместе с клипами и undo |
+| Playlist и Project Browser без маршрута дорожки (ACH-040…044) | PASS (Xvfb) | меню клипа: Channel, Make unique, Mixer track; каналы под сэмплом в Project Browser |
+| Запись в аудиоканал, «To track» (REC-001…006) | PASS (ALSA null, Xvfb) | два дубля с «New track» → оба в треке 04 |
+| ASIO: сессия, форматы, буферы, сброс, сторожевой таймер (ASIO-031…037, 050) | PASS (тестовый драйвер) | `audio-asio` тесты (15): 50 циклов открыть/закрыть, reset request во время записи (вход останавливается), остановка callbacks, panic в render → тишина, все форматы ASIO-033 и отказ от неподдерживаемых, зависший драйвер (ответ через 5 с). Не покрыто тестами: `kAsioBufferSizeChange` отдельно от reset и позиция дубля с задержками (код в UI) |
+| ASIO: раскладка структур | PASS (тест размеров) | `abi` тесты; COM-код компилируется под Windows |
+| ASIO на реальном драйвере: перечисление, панель, воспроизведение, запись (ASIO-052) | NOT RUN | нет Windows-машины со звуком; FlexASIO/ASIO4ALL не проверялись |
+| Аппаратная приёмка Audient (ASIO-010, ASIO-053) | NOT RUN | нет устройства |
+| Настройки ASIO: имена каналов, буфер в мс, задержки (ASIO-022/023) | PASS (код), на драйвере NOT RUN | под Linux ASIO нет: окно проверено с ALSA |
+| Освобождение драйвера при потере фокуса (ASIO-025) | PASS (код), на драйвере NOT RUN | по умолчанию выключено |
+| Вычитание задержки драйвера из позиции дубля (ASIO-042) | PASS (код), на драйвере NOT RUN | сообщение «driver latency N frames compensated» |
+| Уведомление об ASIO SDK (ASIO-030) | PARTIAL | `ASIO-NOTICE.txt` в MSI; окна About в программе нет |
+| Windows MSI 0.2.2 | см. CI | workflow `Release` |
+
+Отступления от спецификации 0.2.2:
+
+- ASIO-051: отдельной feature `asio` нет — backend собирается всегда на
+  Windows; тесты сессии идут на всех трёх ОС.
+- ASIO-023: CPAL-backend'ы не отдают имён каналов; подписи остаются
+  «Input N» / «Outputs N / M», что совпадает с требуемым видом.
+- ASIO-040: при активном ASIO в списке входов записи только играющий
+  драйвер.
