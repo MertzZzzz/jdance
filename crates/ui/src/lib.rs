@@ -6,6 +6,7 @@
 
 mod automation;
 mod automation_editor;
+mod bindings;
 mod browser;
 mod channel_settings;
 mod color_picker;

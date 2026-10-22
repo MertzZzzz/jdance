@@ -158,6 +158,10 @@ pub(crate) struct PlaylistView {
     /// Zoom before Shift+4 went to the widest view.
     zoom_back: Option<f32>,
 
+    /// Times Ctrl+D showed that duplicating moved to Ctrl+B (spec 0.2.7
+    /// §3 item 6: at most three).
+    ctrl_d_hints: u8,
+
     /// Keep the playhead in view while playing (REC-017).
     pub follow: bool,
     /// The user scrolled or zoomed away; following waits until the
@@ -225,6 +229,7 @@ impl Default for PlaylistView {
             zoom_back: None,
             follow: true,
             follow_paused: false,
+            ctrl_d_hints: 0,
         }
     }
 }
@@ -662,20 +667,31 @@ impl PlaylistView {
         });
     }
 
-    /// Delete, Ctrl+D and tool keys, when no text field has focus.
+    /// Delete, Ctrl+B (duplicate), Ctrl+D (deselect) and tool keys, when
+    /// no text field has focus (spec 0.2.7 §3).
     fn shortcuts(&mut self, ui: &egui::Ui, project: &Project, out: &mut PlaylistOutput) {
         let ctx = ui.ctx().clone();
         if ctx.egui_wants_keyboard_input() {
             return;
         }
-        let (del, dup) = ctx.input_mut(|i| {
+        let (del, dup, deselect) = ctx.input_mut(|i| {
             let del = i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace);
-            let dup = i.consume_shortcut(&egui::KeyboardShortcut::new(
-                egui::Modifiers::COMMAND,
-                egui::Key::D,
-            ));
-            (del, dup)
+            let dup = i.consume_shortcut(&crate::bindings::DUPLICATE.shortcut());
+            let deselect = i.consume_shortcut(&crate::bindings::DESELECT.shortcut());
+            (del, dup, deselect)
         });
+        if deselect {
+            if !self.selection.is_empty() && self.ctrl_d_hints < 3 {
+                self.ctrl_d_hints += 1;
+                out.hint = Some(format!(
+                    "{} clears the selection; duplicate is {}",
+                    crate::bindings::DESELECT.label(),
+                    crate::bindings::DUPLICATE.label()
+                ));
+            }
+            self.selection.clear();
+            return;
+        }
         let key = |k| ctx.input(|i| i.key_pressed(k) && i.modifiers.is_none());
         for (k, t) in [
             (egui::Key::P, Tool::Draw),
@@ -1809,7 +1825,10 @@ impl PlaylistView {
             out.edits.push(Edit::Batch(edits));
             ui.close();
         }
-        if ui.button("Duplicate").clicked() {
+        if ui
+            .add(egui::Button::new("Duplicate").shortcut_text(crate::bindings::DUPLICATE.label()))
+            .clicked()
+        {
             out.actions.push(PlaylistAction::Duplicate(
                 self.selection.iter().copied().collect(),
             ));
@@ -2576,5 +2595,73 @@ mod zoom_tests {
             0,
         );
         assert_eq!(xs, [0.0]);
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+    use crate::test_ui::{Driver, StubHost};
+    use egui::{Event, Key, Modifiers};
+
+    fn ctrl(k: Key) -> Event {
+        Event::Key {
+            key: k,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::COMMAND,
+        }
+    }
+
+    /// The actions and hint after `key` with clip `0` of a one-clip
+    /// playlist selected, and whether the selection is left.
+    fn press(key: Key) -> (Vec<PlaylistAction>, Option<String>, bool) {
+        let mut p = Project::new();
+        p.playlist = jdance_domain::Playlist::with_lanes(1, || 0);
+        let pattern = p.patterns[0].id;
+        let lane = p.playlist.lanes[0].id;
+        let id = ClipId(p.ids.next());
+        p.playlist.clips.push(PatternClip {
+            id,
+            lane,
+            pattern,
+            start: 0,
+            offset: 0,
+            duration: u64::from(TICKS_PER_STEP) * 16,
+            looped: true,
+            muted: false,
+        });
+        let mut view = PlaylistView::default();
+        view.selection.insert(id);
+        let mut d = Driver::new();
+        let mut host = StubHost::default();
+        let (mut actions, mut hint) = (Vec::new(), None);
+        let mut ui = |ui: &mut egui::Ui| {
+            let out = view.show(ui, &p, None, TICKS_PER_STEP, pattern, &mut host, None);
+            actions.extend(out.actions);
+            hint = hint.take().or(out.hint);
+        };
+        d.frame(vec![], &mut ui);
+        d.frame(vec![ctrl(key)], &mut ui);
+        let left = !view.selection.is_empty();
+        (actions, hint, left)
+    }
+
+    #[test]
+    fn ctrl_b_duplicates_and_ctrl_d_only_deselects() {
+        let (actions, _, left) = press(Key::B);
+        assert!(
+            matches!(actions.as_slice(), [PlaylistAction::Duplicate(ids)] if ids.len() == 1),
+            "{actions:?}"
+        );
+        assert!(left);
+        let (actions, hint, left) = press(Key::D);
+        assert!(actions.is_empty(), "no copies: {actions:?}");
+        assert!(!left, "deselected");
+        assert!(
+            hint.is_some_and(|h| h.contains("duplicate")),
+            "the move is pointed out"
+        );
     }
 }
