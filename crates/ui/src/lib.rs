@@ -4258,7 +4258,6 @@ mod preset_tests {
             d.frame(e, &mut ui);
         }
         d.frame(vec![], &mut ui);
-        drop(ui);
         app
     }
 
