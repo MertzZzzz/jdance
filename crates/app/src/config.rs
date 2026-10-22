@@ -102,14 +102,18 @@ impl Default for RecordingConfig {
     }
 }
 
-/// Unit tests point the configuration directory here.
 #[cfg(test)]
-pub static TEST_DIR: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+thread_local! {
+    /// Unit tests point the configuration directory here. Per thread, so
+    /// tests running in parallel never see each other's directory.
+    pub static TEST_DIR: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
 
 /// `JDANCE_CONFIG_DIR` overrides the platform location (used by tests/CI).
 pub fn config_dir() -> Option<PathBuf> {
     #[cfg(test)]
-    if let Some(dir) = TEST_DIR.lock().ok().and_then(|d| d.clone()) {
+    if let Some(dir) = TEST_DIR.with_borrow(Clone::clone) {
         return Some(dir);
     }
     if let Some(dir) = std::env::var_os("JDANCE_CONFIG_DIR") {

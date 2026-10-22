@@ -558,7 +558,7 @@ mod tests {
     fn plugin_that_crashed_last_run_is_held_back_until_retried() {
         let dir = tempfile::tempdir().unwrap();
         // The only test in this crate that touches the config directory.
-        *config::TEST_DIR.lock().unwrap() = Some(dir.path().to_path_buf());
+        config::TEST_DIR.set(Some(dir.path().to_path_buf()));
         let bundle = jdance_test_support::test_plugin_bundle(jdance_plugin_vst3::bundle_binary);
         let descriptors = jdance_plugin_vst3::scan_in_process(bundle).unwrap();
         let gain = descriptors
@@ -619,7 +619,7 @@ mod tests {
         assert!(host.controller(id).is_some());
         assert!(!host.held_back(id));
         assert!(!marker.exists(), "marker removed after a successful load");
-        *config::TEST_DIR.lock().unwrap() = None;
+        config::TEST_DIR.set(None);
     }
 }
 
