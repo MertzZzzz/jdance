@@ -37,12 +37,16 @@ fn release_len(sample_rate: u32) -> u32 {
     (sample_rate / 200).max(1)
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Voice {
     inner: SamplerVoice,
     channel: ChannelId,
     /// Key of a held live note (released by its note-off).
     live: Option<u8>,
+    /// The sample this voice started with, kept when its channel got
+    /// another one: the voice plays it to its end (spec 0.2.5 §3, no
+    /// click); it goes to the garbage ring when the voice is done.
+    held: Option<Arc<jdance_dsp::SampleBuffer>>,
 }
 
 impl Default for Voice {
@@ -51,6 +55,7 @@ impl Default for Voice {
             inner: SamplerVoice::default(),
             channel: ChannelId(0),
             live: None,
+            held: None,
         }
     }
 }
@@ -226,6 +231,7 @@ impl EngineProcessor {
         let started = Instant::now();
         let frames = left.len().min(right.len());
         self.drain_commands();
+        self.release_held_samples();
 
         let mut done = 0;
         while done < frames {
@@ -567,9 +573,12 @@ impl EngineProcessor {
                 .enumerate()
                 .find(|(_, c)| c.id == v.channel);
             match (found, old_sample) {
-                (Some((i, c)), Some(old))
-                    if c.sample.as_ref().is_some_and(|s| Arc::ptr_eq(s, old)) =>
-                {
+                (Some((i, c)), Some(old)) => {
+                    // Another sample: this voice keeps playing the one it
+                    // started with (an Arc clone, no allocation).
+                    if v.held.is_none() && !c.sample.as_ref().is_some_and(|s| Arc::ptr_eq(s, old)) {
+                        v.held = Some(Arc::clone(old));
+                    }
                     v.inner.slot = i;
                     if c.muted {
                         v.inner.release(release);
@@ -581,6 +590,20 @@ impl EngineProcessor {
         if let Some(old) = self.snapshot.replace(new) {
             // Space was checked by the caller.
             let _ = self.garbage.push(Garbage::Snapshot(old));
+        }
+    }
+
+    /// Samples kept by voices that have ended go to the garbage ring
+    /// (spec 0.2.5 §3); with the ring full they wait for the next block.
+    fn release_held_samples(&mut self) {
+        for v in self.voices.iter_mut() {
+            if !v.inner.is_active()
+                && v.held.is_some()
+                && self.garbage.slots() > 0
+                && let Some(s) = v.held.take()
+            {
+                let _ = self.garbage.push(Garbage::Sample(s));
+            }
         }
     }
 
@@ -1117,7 +1140,11 @@ fn render_voices(
     }
     for v in voices.iter_mut().filter(|v| v.inner.is_active()) {
         let slot = v.inner.slot;
-        match snap.channels.get(slot).and_then(|c| c.sample.as_deref()) {
+        let sample = v
+            .held
+            .as_deref()
+            .or_else(|| snap.channels.get(slot).and_then(|c| c.sample.as_deref()));
+        match sample {
             Some(sample) => {
                 let (l, r) = channels.get_mut(slot, to);
                 v.inner.render_add(sample, &mut l[from..], &mut r[from..]);
@@ -1163,16 +1190,21 @@ fn trigger(
             held -= 1;
         }
     }
-    let index = match voices.iter().position(|v| !v.inner.is_active()) {
+    // A voice still holding a replaced sample is not reused: its sample
+    // must leave through the garbage ring, not be freed here.
+    let index = match voices
+        .iter()
+        .position(|v| !v.inner.is_active() && v.held.is_none())
+    {
         Some(i) => i,
         None => {
             feedback.note_steal();
             voices
                 .iter()
                 .enumerate()
+                .filter(|(_, v)| v.held.is_none())
                 .min_by_key(|(_, v)| v.inner.started_at)
-                .map(|(i, _)| i)
-                .unwrap_or(0)
+                .map(|(i, _)| i)?
         }
     };
     *serial += 1;

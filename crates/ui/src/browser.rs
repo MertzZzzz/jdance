@@ -30,6 +30,9 @@ pub(crate) enum BrowserAction {
     UndoSteps(usize),
     /// Double-click: the Sample Editor (nothing is added).
     OpenFile(PathBuf),
+    /// Middle click: the file replaces the sample of the selected channel
+    /// (spec 0.2.5 §3).
+    ReplaceSample(PathBuf),
     AddInstrument(PluginDescriptor),
 }
 
@@ -409,7 +412,7 @@ impl BrowserView {
         }
         let resp = resp.on_hover_text(if supported {
             format!(
-                "{}\nClick: select and preview · double-click: Sample Editor\nDrag onto the Channel Rack (sampler) or the Playlist (audio clip)",
+                "{}\nClick: select and preview · double-click: Sample Editor · middle click: into the selected channel\nDrag onto the Channel Rack (sampler) or the Playlist (audio clip)",
                 e.path.display()
             )
         } else {
@@ -432,6 +435,10 @@ impl BrowserView {
         }
         if resp.double_clicked() && supported {
             out.push(BrowserAction::OpenFile(e.path.clone()));
+        }
+        // Middle click: into the selected channel; no preview (§3).
+        if resp.middle_clicked() && supported {
+            out.push(BrowserAction::ReplaceSample(e.path.clone()));
         }
     }
 

@@ -2516,6 +2516,9 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                     self.undo(now);
                 }
             }
+            A::ReplaceSample(path) => {
+                self.replace_selected_sample(&path, now);
+            }
             A::OpenFile(path) => {
                 self.sample_editor = Some(sample_editor::SampleEditor::new(
                     sample_editor::Target::File(path),
@@ -2907,6 +2910,39 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
         match result {
             Ok(()) => self.sync_needed = true,
             Err(e) => self.notify(Notice::error(e.to_string()), now),
+        }
+    }
+
+    /// Middle click in the Browser (spec 0.2.5 §3): the file replaces the
+    /// sample of the selected channel, one undo step; no new channels.
+    fn replace_selected_sample(&mut self, path: &Path, now: f64) {
+        let selected = self
+            .project
+            .channels
+            .iter()
+            .map(|c| c.id)
+            .find(|id| self.rack_view.selection.contains(id));
+        let Some(ch) = selected else {
+            self.notify(Notice::info("Select a channel"), now);
+            return;
+        };
+        if !path.is_file() {
+            self.notify(
+                Notice::error(format!("Cannot open {}", path.display())),
+                now,
+            );
+            return;
+        }
+        let sample = jdance_domain::SampleRef {
+            path: path.to_string_lossy().into_owned(),
+        };
+        match jdance_commands::sampler::replace_sample(&self.project, ch, sample) {
+            Ok(Some(edit)) => self.apply(edit, false, now),
+            Ok(None) => {}
+            Err(_) => self.notify(
+                Notice::info("The selected channel does not take samples"),
+                now,
+            ),
         }
     }
 
@@ -4293,5 +4329,34 @@ mod preset_tests {
         let app = create(vec![vec![key(Key::Escape)], vec![key(Key::Escape)]]);
         assert!(app.rename.is_none());
         assert_eq!(app.project.patterns.last().unwrap().name, "Pattern 2");
+    }
+}
+
+#[cfg(test)]
+mod replace_tests {
+    use super::*;
+    use crate::test_ui::{NoStore, StubHost};
+
+    #[test]
+    fn middle_click_replaces_the_selected_channel_sample_only() {
+        let mut p = Project::new();
+        let ch = ChannelId(p.ids.next());
+        p.channels
+            .push(jdance_domain::Channel::new_sampler(ch, "Kick"));
+        let mut app = JdanceApp::new(StubHost::default(), NoStore, p, None);
+        let file = std::env::temp_dir().join(format!("jdance-mmb-{}.wav", std::process::id()));
+        std::fs::write(&file, b"RIFF").unwrap();
+        let channels = app.project.channels.len();
+        // Nothing selected: nothing changes.
+        app.replace_selected_sample(&file, 0.0);
+        assert_eq!(app.history.undo_label(), None);
+        app.rack_view.selection = std::iter::once(ch).collect();
+        app.replace_selected_sample(&file, 0.0);
+        let c = app.project.channel(ch).unwrap();
+        assert_eq!(c.sample().unwrap().path, file.to_string_lossy());
+        assert_eq!(app.project.channels.len(), channels, "no new channel");
+        app.history.undo(&mut app.project).unwrap();
+        assert!(app.project.channel(ch).unwrap().sample().is_none());
+        let _ = std::fs::remove_file(&file);
     }
 }

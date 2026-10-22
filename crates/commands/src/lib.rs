@@ -11,6 +11,7 @@ pub mod naming;
 pub mod note_tools;
 pub mod notes;
 mod playlist;
+pub mod sampler;
 
 pub use mixer::{add_insert, add_send, add_track};
 pub use playlist::{
