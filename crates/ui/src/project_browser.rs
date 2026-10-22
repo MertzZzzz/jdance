@@ -308,19 +308,21 @@ fn item(ui: &mut egui::Ui, name: &str, count: &str, on: bool) -> egui::Response 
     } else if resp.hovered() {
         p.rect_filled(rect, 5.0, theme::RAISED);
     }
-    p.text(
-        rect.left_center() + vec2(8.0, 0.0),
-        egui::Align2::LEFT_CENTER,
-        name,
-        egui::FontId::proportional(12.5),
-        theme::TEXT,
-    );
-    p.text(
+    let count = p.text(
         rect.right_center() - vec2(8.0, 0.0),
         egui::Align2::RIGHT_CENTER,
         count,
         theme::mono(11.0),
         theme::MUTED,
     );
-    resp
+    crate::widgets::fit_text(
+        p,
+        rect.left_center() + vec2(8.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        name,
+        egui::FontId::proportional(12.5),
+        theme::TEXT,
+        count.left() - 6.0 - (rect.left() + 8.0),
+    );
+    resp.on_hover_text(name)
 }

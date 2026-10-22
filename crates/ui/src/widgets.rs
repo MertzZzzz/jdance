@@ -5,6 +5,37 @@ use crate::theme;
 use egui::{Color32, PointerButton, Pos2, Response, Sense, Stroke, Ui, pos2, vec2};
 use std::ops::RangeInclusive;
 
+/// `text` on one line no wider than `max_width`, cut with "…" when it
+/// does not fit.
+pub(crate) fn fit_galley(
+    painter: &egui::Painter,
+    text: impl Into<String>,
+    font: egui::FontId,
+    color: Color32,
+    max_width: f32,
+) -> std::sync::Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::simple_singleline(text.into(), font, color);
+    job.wrap = egui::text::TextWrapping::truncate_at_width(max_width.max(0.0));
+    painter.layout_job(job)
+}
+
+/// [`egui::Painter::text`] that stays within `max_width`: a long text is
+/// cut with "…" instead of running over its neighbours.
+pub(crate) fn fit_text(
+    painter: &egui::Painter,
+    pos: Pos2,
+    anchor: egui::Align2,
+    text: impl Into<String>,
+    font: egui::FontId,
+    color: Color32,
+    max_width: f32,
+) -> egui::Rect {
+    let galley = fit_galley(painter, text, font, color, max_width);
+    let rect = anchor.anchor_size(pos, galley.size());
+    painter.galley(rect.min, galley, color);
+    rect
+}
+
 /// Pixels of vertical drag for the whole range (Shift: 4× finer).
 const KNOB_DRAG_PX: f32 = 160.0;
 

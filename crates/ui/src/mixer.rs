@@ -190,7 +190,8 @@ fn input_choices(
 }
 
 /// The input row of a strip (spec 0.2.4 INP-010…015): the monitoring
-/// button and the mono/stereo switch, or "—" to choose an input.
+/// button, or "—" to choose an input. The mono/stereo switch is the dot
+/// under the fader ([`stereo_dot`]).
 fn strip_input(
     ui: &mut egui::Ui,
     t: &MixerTrack,
@@ -211,7 +212,7 @@ fn strip_input(
         }
         input_choices(ui, t, count, names, out);
     };
-    let Some(input) = t.input else {
+    if t.input.is_none() {
         let width = ui.available_width().clamp(20.0, 120.0);
         let r = ui
             .add_sized(
@@ -226,43 +227,80 @@ fn strip_input(
             )
             .show(|ui| menu(ui, out));
         return;
+    }
+    let r = ui
+        .allocate_ui(vec2(ui.available_width(), 18.0), |ui| {
+            monitor_toggle(ui, t, view, out)
+        })
+        .inner;
+    if let Some(r) = r {
+        r.context_menu(|ui| menu(ui, out));
+    }
+}
+
+/// The mono/stereo switch of a strip's input (INP-011): a dot under the
+/// fader, filled for stereo, a ring for mono. The row is kept on every
+/// strip so the rows below line up.
+fn stereo_dot(
+    ui: &mut egui::Ui,
+    t: &MixerTrack,
+    live: Option<&(u16, Vec<String>)>,
+    width: f32,
+    out: &mut MixerOutput,
+) {
+    let (row, _) = ui.allocate_exact_size(vec2(width, 12.0), Sense::hover());
+    let Some(input) = t.input.filter(|_| !t.is_master()) else {
+        return;
     };
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 2.0;
-        let w = (ui.available_width() - 22.0).max(20.0);
-        let r = ui
-            .allocate_ui(vec2(w, 18.0), |ui| monitor_toggle(ui, t, view, out))
-            .inner;
-        if let Some(r) = r {
-            r.context_menu(|ui| menu(ui, out));
-        }
-        let next = input.toggled(count).filter(|_| live.is_some());
-        let r = ui
-            .add_enabled(
-                next.is_some(),
-                egui::Button::new(
-                    RichText::new(if input.is_stereo() { "S" } else { "M" }).size(9.5),
-                )
-                .min_size(vec2(20.0, 18.0)),
-            )
-            .on_hover_text(if input.is_stereo() {
-                "Stereo input. Click: mono (left channel)"
-            } else {
-                "Mono input. Click: stereo pair"
-            })
-            .on_disabled_hover_text(if live.is_none() {
-                "No input device is open (Options › Recording)"
-            } else {
-                "The input device has one channel: no stereo"
-            });
-        if r.clicked()
-            && let Some(next) = next
-        {
-            // One undo step; monitoring stays as it is (INP-011).
-            out.edits
-                .push((Edit::SetTrackInput(t.id, Some(next)), false));
-        }
+    let count = live.map_or(0, |(c, _)| *c);
+    let next = input.toggled(count).filter(|_| live.is_some());
+    let r = egui::Rect::from_center_size(row.center(), vec2(12.0, 12.0));
+    let resp = ui.interact(
+        r,
+        egui::Id::unique(("stereo_dot", t.id.0)),
+        if next.is_some() {
+            Sense::click()
+        } else {
+            Sense::hover()
+        },
+    );
+    let stereo = input.is_stereo();
+    resp.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::Role::Button,
+            next.is_some(),
+            if stereo { "Stereo input" } else { "Mono input" },
+        )
     });
+    let color = if next.is_none() {
+        crate::theme::MUTED.gamma_multiply(0.6)
+    } else if resp.hovered() {
+        crate::theme::TEXT
+    } else {
+        crate::theme::MUTED
+    };
+    let p = ui.painter();
+    if stereo {
+        p.circle_filled(r.center(), 3.5, color);
+    } else {
+        p.circle_stroke(r.center(), 3.0, Stroke::new(1.2, color));
+    }
+    let tip = match (stereo, &next, live) {
+        (_, _, None) => {
+            if stereo { "Stereo input" } else { "Mono input" }.to_owned()
+                + "\nNo input device is open (Options › Recording)"
+        }
+        (true, Some(_), _) => "Stereo input\nClick: mono (left channel)".to_owned(),
+        (false, Some(_), _) => "Mono input\nClick: stereo pair".to_owned(),
+        (_, None, _) => "Mono input\nThe input device has one channel: no stereo".to_owned(),
+    };
+    if resp.on_hover_text(tip).clicked()
+        && let Some(next) = next
+    {
+        // One undo step; monitoring stays as it is (INP-011).
+        out.edits
+            .push((Edit::SetTrackInput(t.id, Some(next)), false));
+    }
 }
 
 /// The feedback warning before the first monitoring (MON-002, MON-020).
@@ -496,10 +534,13 @@ fn strip(
                     CornerRadius::ZERO,
                     color,
                 );
-                let galley = p.layout_no_wrap(
+                // Rotated: the strip's height is the room for the name.
+                let galley = crate::widgets::fit_galley(
+                    p,
                     t.name.clone(),
                     egui::FontId::proportional(12.0),
                     theme::TEXT,
+                    r.height() - 10.0,
                 );
                 let text = egui::epaint::TextShape::new(
                     pos2(r.left() + 6.0, r.bottom() - 4.0),
@@ -617,6 +658,8 @@ fn strip(
                     );
                     out.end_gesture |= r.drag_stopped();
                 });
+                // 7. Mono/stereo input.
+                stereo_dot(ui, t, live, width, out);
                 if view.view != StripView::Compact {
                     ui.label(
                         RichText::new(format!("{}\n{:+.0}", db_label(t.volume), t.pan * 100.0))
@@ -1499,7 +1542,7 @@ mod input_tests {
         t.input = Some(TrackInput::Mono(0));
         t.monitor = true;
         m.tracks.push(t);
-        let edits = run(&m, &["M"]);
+        let edits = run(&m, &["Mono input"]);
         assert_eq!(
             edits,
             [(
@@ -1507,9 +1550,8 @@ mod input_tests {
                 false
             )]
         );
-        // Right click on the input ("1" on a compact strip, INP-015): the
-        // list of inputs (INP-013).
-        let edits = run(&m, &[">1", "(none)"]);
+        // Right click on the input (INP-015): the list of inputs (INP-013).
+        let edits = run(&m, &[">In 1", "(none)"]);
         assert_eq!(edits, [(Edit::SetTrackInput(TrackId(1), None), false)]);
     }
 

@@ -469,10 +469,11 @@ fn plugin_row(
         0.0,
         TextFormat::simple(FontId::proportional(11.0), theme::MUTED),
     );
+    job.wrap = egui::text::TextWrapping::truncate_at_width(rect.width() - 30.0);
     let galley = ui.fonts_mut(|f| f.layout_job(job));
     ui.painter()
         .galley(rect.min + vec2(24.0, 4.0), galley, Color32::WHITE);
-    row.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &d.plugin.name));
+    row.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &d.plugin.name));
     RowResponse {
         row: row.on_hover_text(&d.path),
         star: star_clicked,

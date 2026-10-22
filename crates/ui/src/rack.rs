@@ -521,14 +521,6 @@ impl RackView {
             },
             color,
         );
-        let galley_rect = rect.shrink2(vec2(10.0, 0.0));
-        painter.text(
-            pos2(galley_rect.left(), rect.center().y),
-            egui::Align2::LEFT_CENTER,
-            truncate(&ch.name, 15),
-            egui::FontId::proportional(13.0),
-            theme::TEXT,
-        );
         let kind_color = match status {
             Some(Some(SampleStatus::Failed(_))) => theme::ERROR,
             Some(None) => theme::WARN,
@@ -540,12 +532,25 @@ impl RackView {
             Some(Some(SampleStatus::Failed(_))) => "Missing",
             _ => kind,
         };
-        painter.text(
+        // The kind on the right, the name in the room left of it.
+        let kind_rect = crate::widgets::fit_text(
+            painter,
             pos2(rect.right() - 6.0, rect.center().y),
             egui::Align2::RIGHT_CENTER,
             kind_text,
             egui::FontId::proportional(10.5),
             kind_color,
+            rect.width() / 2.0,
+        );
+        let left = rect.left() + 10.0;
+        crate::widgets::fit_text(
+            painter,
+            pos2(left, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            &ch.name,
+            egui::FontId::proportional(13.0),
+            theme::TEXT,
+            kind_rect.left() - 6.0 - left,
         );
         let audio_file = ch.audio_asset().and_then(|a| project.asset(a));
         let hover = match (ch.instrument(), ch.sample(), &status) {
@@ -953,16 +958,6 @@ fn pan_text(pan: f32) -> String {
     }
 }
 
-fn truncate(s: &str, n: usize) -> String {
-    if s.chars().count() <= n {
-        s.to_owned()
-    } else {
-        let mut t: String = s.chars().take(n - 1).collect();
-        t.push('…');
-        t
-    }
-}
-
 fn stem(path: &Path) -> String {
     path.file_stem()
         .map_or_else(|| "Sample".into(), |s| s.to_string_lossy().into_owned())
@@ -1072,8 +1067,6 @@ mod tests {
         assert_eq!(pan_text(0.0), "C");
         assert_eq!(pan_text(-0.25), "L25");
         assert_eq!(pan_text(1.0), "R100");
-        assert_eq!(truncate("Kick", 15), "Kick");
-        assert_eq!(truncate("A very long channel name", 8), "A very …");
         let mut p = Project::new();
         p.mixer.tracks.push(jdance_domain::MixerTrack::new(
             jdance_domain::TrackId(7),

@@ -1439,12 +1439,14 @@ impl PlaylistView {
             );
             painter.rect_filled(r, 4.0, theme::TEAL.gamma_multiply(0.3));
             painter.rect_stroke(r, 4.0, Stroke::new(1.0, theme::TEAL), StrokeKind::Inside);
-            painter.text(
+            crate::widgets::fit_text(
+                &painter,
                 r.left_center() + vec2(5.0, 0.0),
                 Align2::LEFT_CENTER,
                 format!("{name} · {where_}"),
                 FontId::proportional(11.0),
                 theme::TEXT,
+                r.width() - 10.0,
             );
         }
 
@@ -1935,12 +1937,14 @@ fn live_take(painter: &egui::Painter, r: Rect, t: &LiveTake) {
             );
         }
     }
-    painter.text(
+    crate::widgets::fit_text(
+        painter,
         r.left_top() + vec2(4.0, 1.0),
         Align2::LEFT_TOP,
         format!("● {}", t.name),
         FontId::proportional(11.0),
         theme::TEXT,
+        r.width() - 8.0,
     );
 }
 

@@ -387,23 +387,30 @@ impl BrowserView {
             ui.painter().rect_filled(rect, 5.0, theme::RAISED);
         }
         let x = rect.left() + 8.0 + depth as f32 * 14.0;
-        ui.painter().text(
-            pos2(x, rect.center().y),
-            egui::Align2::LEFT_CENTER,
-            &e.name,
-            egui::FontId::proportional(12.5),
-            if supported { theme::TEXT } else { theme::MUTED },
-        );
         // Search results come from many folders: name the parent.
+        let mut right = rect.right() - 8.0;
         if show_folder && let Some(parent) = e.path.parent().and_then(Path::file_name) {
-            ui.painter().text(
+            right = crate::widgets::fit_text(
+                ui.painter(),
                 pos2(rect.right() - 8.0, rect.center().y),
                 egui::Align2::RIGHT_CENTER,
                 parent.to_string_lossy(),
                 egui::FontId::proportional(11.0),
                 theme::MUTED,
-            );
+                rect.width() / 3.0,
+            )
+            .left()
+                - 6.0;
         }
+        crate::widgets::fit_text(
+            ui.painter(),
+            pos2(x, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            &e.name,
+            egui::FontId::proportional(12.5),
+            if supported { theme::TEXT } else { theme::MUTED },
+            right - x,
+        );
         let resp = resp.on_hover_text(if supported {
             format!(
                 "{}\nClick: select and preview · double-click: Sample Editor · middle click: into the selected channel\nDrag onto the Channel Rack (sampler) or the Playlist (audio clip)",
@@ -611,22 +618,29 @@ fn disclosure_row(
     };
     ui.painter()
         .add(egui::Shape::convex_polygon(pts, theme::MUTED, Stroke::NONE));
-    ui.painter().text(
+    let mut right = rect.right() - 8.0;
+    if let Some(n) = count {
+        right = ui
+            .painter()
+            .text(
+                pos2(rect.right() - 8.0, rect.center().y),
+                egui::Align2::RIGHT_CENTER,
+                n.to_string(),
+                theme::mono(11.0),
+                theme::MUTED,
+            )
+            .left()
+            - 6.0;
+    }
+    crate::widgets::fit_text(
+        ui.painter(),
         pos2(x + 14.0, rect.center().y),
         egui::Align2::LEFT_CENTER,
         label,
         egui::FontId::proportional(12.5),
         theme::TEXT,
+        right - (x + 14.0),
     );
-    if let Some(n) = count {
-        ui.painter().text(
-            pos2(rect.right() - 8.0, rect.center().y),
-            egui::Align2::RIGHT_CENTER,
-            n.to_string(),
-            theme::mono(11.0),
-            theme::MUTED,
-        );
-    }
     resp
 }
 
@@ -636,15 +650,15 @@ fn item(ui: &mut egui::Ui, label: &str, depth: usize) -> egui::Response {
     if resp.hovered() {
         ui.painter().rect_filled(rect, 5.0, theme::RAISED);
     }
-    ui.painter().text(
-        pos2(
-            rect.left() + 8.0 + depth as f32 * 14.0 + 14.0,
-            rect.center().y,
-        ),
+    let x = rect.left() + 8.0 + depth as f32 * 14.0 + 14.0;
+    crate::widgets::fit_text(
+        ui.painter(),
+        pos2(x, rect.center().y),
         egui::Align2::LEFT_CENTER,
         label,
         egui::FontId::proportional(12.0),
         theme::TEXT,
+        rect.right() - 8.0 - x,
     );
     resp
 }
