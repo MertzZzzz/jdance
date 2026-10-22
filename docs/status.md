@@ -348,7 +348,7 @@ GUI — под Xvfb со скриншотами и вводом через XTEST
 | Пробел и глобальные клавиши во всех окнах; кнопка под фокусом не нажимается (KEY-001…003, 005) | PASS | `keys` тесты (повтор, текстовое поле, кнопка под фокусом) |
 | Пробел в окне плагина (KEY-004) | PASS (Linux Xvfb), Windows — сборка | `plugin-vst3/tests/editor.rs`: пробел через XTEST доходит до хоста; Windows-хук проверен компиляцией и clippy |
 | Входы и прослушивание на реальном устройстве, ASIO | NOT RUN | нет Windows-машины со звуком и интерфейса |
-| Windows MSI 0.2.3 | см. CI | workflow `Release` |
+| Windows MSI 0.2.3 | PASS | сборка, установка, проверка версии в workflow `Release`; https://github.com/MertzZzzz/jdance/releases/tag/v0.2.3 |
 
 Отступления от спецификации 0.2.3:
 
