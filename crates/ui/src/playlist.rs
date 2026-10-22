@@ -142,6 +142,25 @@ pub(crate) struct PlaylistView {
     pub armed: Option<LaneId>,
     /// The Song caret, drawn in song mode (spec 0.2.3 CUR-005).
     pub caret: Option<u64>,
+    /// The take being recorded, drawn as a growing clip (REC-014).
+    pub live: Option<LiveTake>,
+    /// Keep the playhead in view while playing (REC-017).
+    pub follow: bool,
+    /// The user scrolled or zoomed away; following waits until the
+    /// playhead is visible again.
+    follow_paused: bool,
+}
+
+/// The take being recorded (spec 0.2.3 REC-014). Not a project object.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct LiveTake {
+    /// Lane of the take; `None` = the new-lane row under the lanes.
+    pub lane: Option<LaneId>,
+    /// Caret position where the take starts, in ticks.
+    pub start: u64,
+    pub name: String,
+    /// The largest absolute sample per few hundred frames, oldest first.
+    pub peaks: Vec<f32>,
 }
 
 impl Default for PlaylistView {
@@ -159,6 +178,9 @@ impl Default for PlaylistView {
             rmb: crate::widgets::RightSweep::default(),
             armed: None,
             caret: None,
+            live: None,
+            follow: true,
+            follow_paused: false,
         }
     }
 }
@@ -336,6 +358,38 @@ impl PlaylistView {
         self.zoom / WHOLE_NOTE as f32
     }
 
+    /// Keeps the playhead at `x` in view: a page jump when it reaches the
+    /// right edge. Always while recording, else with View › Follow; manual
+    /// scrolling or zooming pauses it until the playhead shows again
+    /// (REC-017).
+    fn follow_playhead(&mut self, ui: &mut egui::Ui, x: Option<f32>) {
+        let Some(x) = x else {
+            self.follow_paused = false;
+            return;
+        };
+        if !self.follow && self.live.is_none() {
+            return;
+        }
+        let view = ui.clip_rect();
+        let user = ui.rect_contains_pointer(view)
+            && ui.input(|i| i.smooth_scroll_delta != egui::Vec2::ZERO || i.zoom_delta() != 1.0);
+        if user {
+            self.follow_paused = true;
+            return;
+        }
+        let visible = x >= view.left() && x <= view.right();
+        if self.follow_paused {
+            self.follow_paused = !visible;
+            return;
+        }
+        if x > view.right() - 4.0 || x < view.left() {
+            ui.scroll_to_rect(
+                Rect::from_min_size(pos2(x, view.top()), vec2(view.width(), 1.0)),
+                Some(egui::Align::Min),
+            );
+        }
+    }
+
     pub(crate) fn retain_existing(&mut self, project: &Project) {
         let pl = &project.playlist;
         self.selection.retain(|id| pl.has_clip(*id));
@@ -416,12 +470,17 @@ impl PlaylistView {
                 }
             }
             ui.separator();
-            ui.add(
-                egui::Slider::new(&mut self.zoom, 30.0..=480.0)
-                    .logarithmic(true)
-                    .show_value(false)
-                    .text("Zoom"),
-            );
+            if ui
+                .add(
+                    egui::Slider::new(&mut self.zoom, 30.0..=480.0)
+                        .logarithmic(true)
+                        .show_value(false)
+                        .text("Zoom"),
+                )
+                .changed()
+            {
+                self.follow_paused = true;
+            }
             if !self.selection.is_empty() {
                 ui.label(
                     RichText::new(format!("{} selected", self.selection.len())).color(theme::MUTED),
@@ -528,7 +587,8 @@ impl PlaylistView {
                 {
                     out.edits.push(Edit::SetLaneSolo(lane.id, s));
                 }
-                let armed = self.armed == Some(lane.id);
+                let armed = self.armed == Some(lane.id)
+                    || self.live.as_ref().is_some_and(|t| t.lane == Some(lane.id));
                 if arm_button(ui, armed)
                     .on_hover_text("Arm for recording: the next take goes on this lane")
                     .clicked()
@@ -566,7 +626,11 @@ impl PlaylistView {
         let grid = self.grid;
         let ppt = self.px_per_tick();
         let fpt = frames_per_tick(project.tempo_bpm, project.timebase_rate);
-        let end = project.arrangement_end_ticks();
+        // Room for the caret and a take recorded past the end.
+        let end = project
+            .arrangement_end_ticks()
+            .max(self.caret.unwrap_or(0))
+            .max(playhead.unwrap_or(0));
         let sig = project.time_signature;
         let bar_ticks = u64::from(sig.bar_ticks());
         let bars = (end / bar_ticks + 8).max(16);
@@ -1165,6 +1229,15 @@ impl PlaylistView {
                 theme::AMBER.gamma_multiply(0.35),
             );
         }
+        if let (Some(t), Some(pos)) = (&self.live, playhead) {
+            let row = t
+                .lane
+                .and_then(|l| pl.lanes.iter().position(|x| x.id == l))
+                .unwrap_or(n_lanes);
+            let r = row_rect(row, t.start as f64, pos.max(t.start) as f64);
+            live_take(&painter, r, t);
+        }
+        self.follow_playhead(ui, playhead.map(x_of));
         if let Some(c) = self.caret {
             // Caret: a triangle on the ruler and a dashed line (CUR-005).
             let x = x_of(c);
@@ -1494,6 +1567,61 @@ fn mute_edit(project: &Project, id: ClipId, muted: bool) -> Option<Edit> {
 }
 
 /// Record-arm toggle: a ring, filled when armed.
+/// Lane of a take starting at `start` (REC-012): the armed lane; else the
+/// first lane with no clip from `start` on; else `None`, a new lane.
+pub(crate) fn record_lane(project: &Project, armed: Option<LaneId>, start: u64) -> Option<LaneId> {
+    armed
+        .filter(|l| project.playlist.lane(*l).is_some())
+        .or_else(|| {
+            project
+                .playlist
+                .lanes
+                .iter()
+                .map(|l| l.id)
+                .find(|&l| !project.lane_busy(l, start, None, None))
+        })
+}
+
+/// The growing clip of the take being recorded (REC-014): the record
+/// color, its name and the waveform so far, spread over the clip.
+fn live_take(painter: &egui::Painter, r: Rect, t: &LiveTake) {
+    painter.rect_filled(r, 3.0, theme::RED.gamma_multiply(0.35));
+    painter.rect_stroke(r, 3.0, Stroke::new(1.5, theme::RED), StrokeKind::Inside);
+    let wave = Rect::from_min_max(pos2(r.left(), r.top() + NAME_H), r.max);
+    let cols = wave.width().floor() as usize;
+    if cols > 0 && !t.peaks.is_empty() {
+        let mid = wave.center().y;
+        let half = wave.height() / 2.0 - 1.0;
+        let per = t.peaks.len() as f32 / cols as f32;
+        for c in 0..cols {
+            let a = (c as f32 * per) as usize;
+            let b = (((c + 1) as f32 * per) as usize)
+                .max(a + 1)
+                .min(t.peaks.len());
+            let Some(p) = t.peaks[a.min(t.peaks.len() - 1)..b]
+                .iter()
+                .copied()
+                .reduce(f32::max)
+            else {
+                continue;
+            };
+            let h = (p.min(1.0) * half).max(0.5);
+            let x = wave.left() + c as f32 + 0.5;
+            painter.line_segment(
+                [pos2(x, mid - h), pos2(x, mid + h)],
+                Stroke::new(1.0, theme::TEXT.gamma_multiply(0.8)),
+            );
+        }
+    }
+    painter.text(
+        r.left_top() + vec2(4.0, 1.0),
+        Align2::LEFT_TOP,
+        format!("● {}", t.name),
+        FontId::proportional(11.0),
+        theme::TEXT,
+    );
+}
+
 fn arm_button(ui: &mut egui::Ui, armed: bool) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::click());
     let c = rect.center();
@@ -1804,6 +1932,41 @@ fn draw_waveform(
 mod tests {
     use super::*;
     use egui::{Event, Modifiers, RawInput};
+
+    #[test]
+    fn a_take_goes_to_the_armed_lane_then_the_first_free_one() {
+        let mut p = Project::new();
+        let lanes: Vec<LaneId> = p.playlist.lanes.iter().map(|l| l.id).collect();
+        let pat = p.patterns[0].clone();
+        let bar = u64::from(p.time_signature.bar_ticks());
+        // Lane 0 has a clip at bar 4; lane 1 one at bar 0 only.
+        for (i, (lane, at)) in [(0, 4 * bar), (1, 0)].into_iter().enumerate() {
+            p.playlist.clips.push(PatternClip::repeating(
+                ClipId(900 + i as u64),
+                lanes[lane],
+                &pat,
+                at,
+                1,
+            ));
+        }
+        assert_eq!(record_lane(&p, Some(lanes[3]), 0), Some(lanes[3]));
+        // From bar 2: lane 0 still has a clip later on; lane 1 is free.
+        assert_eq!(record_lane(&p, None, 2 * bar), Some(lanes[1]));
+        assert_eq!(record_lane(&p, None, 0), Some(lanes[2]));
+        // A removed armed lane does not count.
+        assert_eq!(record_lane(&p, Some(LaneId(77_777)), 0), Some(lanes[2]));
+        // Every lane busy: a new lane.
+        for (i, l) in lanes.iter().enumerate() {
+            p.playlist.clips.push(PatternClip::repeating(
+                ClipId(950 + i as u64),
+                *l,
+                &pat,
+                8 * bar,
+                1,
+            ));
+        }
+        assert_eq!(record_lane(&p, None, 0), None);
+    }
 
     /// A drop checked for the wrong type first must still reach the
     /// right one (egui's own check drops a mismatched payload).

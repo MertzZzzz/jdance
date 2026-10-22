@@ -449,6 +449,11 @@ pub trait Host {
         Err("recording is not available".into())
     }
     fn stop_recording(&mut self) {}
+    /// Waveform of the running take since the last call: the largest
+    /// absolute sample per few hundred frames (REC-014).
+    fn take_recording_peaks(&mut self) -> Vec<f32> {
+        Vec::new()
+    }
     /// The finished take, once its file is complete.
     fn take_recording(&mut self) -> Option<Result<FinishedTake, String>> {
         None

@@ -137,8 +137,14 @@ pub struct JdanceApp<H: Host, S: ProjectStore> {
     recording_panel: recording::RecordingPanel,
     /// Window focus last frame (ASIO-025).
     focused: Option<bool>,
-    /// Lane and start tick of the take being recorded.
-    record_target: Option<(LaneId, u64)>,
+    /// Lane (`None` = a new lane) and start tick of the take being
+    /// recorded (REC-010/012).
+    record_target: Option<(Option<LaneId>, u64)>,
+    /// The take was stopped during its count-in: no message for it.
+    record_cancelled: bool,
+    /// New/Open/Quit asked while recording: runs once the take is in the
+    /// project (REC-019).
+    after_take: Option<Pending>,
     /// Record was pressed with the loop on: ask first.
     loop_prompt: bool,
     recovery: Option<recording::RecoveryDialog>,
@@ -234,6 +240,8 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             recording_panel: recording::RecordingPanel::default(),
             focused: None,
             record_target: None,
+            record_cancelled: false,
+            after_take: None,
             loop_prompt: false,
             recovery: None,
             recovery_checked: None,
@@ -323,6 +331,13 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
 
     /// Runs `action` now, or asks first if there are unsaved changes.
     fn guarded(&mut self, action: Pending, ctx: &egui::Context, now: f64) {
+        if self.record_target.is_some() {
+            // Finish the take first; it then asks about saving (REC-019).
+            self.host.stop_recording();
+            self.host.stop();
+            self.after_take = Some(action);
+            return;
+        }
         if self.history.is_dirty() {
             self.pending = Some(action);
         } else {
@@ -701,6 +716,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
         if t.playing || t.count_in > 0 {
             // Space also ends a recording or its count-in (REC-018).
             if self.record_target.is_some() {
+                self.record_cancelled = t.count_in > 0;
                 self.host.stop_recording();
             }
             self.host.stop();
@@ -777,6 +793,18 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 ui.toggle_value(&mut self.show_playlist, "Playlist");
                 ui.toggle_value(&mut self.show_mixer, "Mixer");
                 ui.toggle_value(&mut self.show_project_browser, "Project Browser");
+                ui.separator();
+                let mut follow = !self.layout.no_follow;
+                if ui
+                    .checkbox(&mut follow, "Follow playhead")
+                    .on_hover_text(
+                        "Scroll the Playlist along while playing (always while recording)",
+                    )
+                    .changed()
+                {
+                    self.layout.no_follow = !follow;
+                    self.layout.changed = true;
+                }
                 ui.separator();
                 ui.menu_button("Own windows", |ui| {
                     for p in dock::Panel::ALL {
@@ -879,6 +907,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 .clicked()
             {
                 if self.record_target.is_some() {
+                    self.record_cancelled = transport.count_in > 0;
                     self.host.stop_recording();
                 }
                 if playing || transport.count_in > 0 {
@@ -897,6 +926,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 .clicked()
             {
                 if recording || counting || self.record_target.is_some() {
+                    self.record_cancelled = counting;
                     self.host.stop_recording();
                     self.host.stop();
                 } else {
@@ -2217,13 +2247,6 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
     /// Record pressed: needs an armed lane and an open input; the loop
     /// is turned off first, after asking (spec 0.2.0 §7).
     fn begin_recording(&mut self, now: f64) {
-        if self.playlist_view.armed.is_none() {
-            self.notify(
-                Notice::info("Arm a Playlist lane for recording: the ring next to its name"),
-                now,
-            );
-            return;
-        }
         if let RecordingState::NoInput(why) = self.host.recording_state() {
             self.show_recording = true;
             self.notify(Notice::warning(why), now);
@@ -2237,10 +2260,10 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
     }
 
     fn start_recording(&mut self, now: f64) {
-        let Some(lane) = self.playlist_view.armed else {
-            return;
-        };
         let start = self.caret;
+        // REC-012: the armed lane; else the first one free from the caret
+        // on; else a new lane, created with the take.
+        let lane = playlist::record_lane(&self.project, self.playlist_view.armed, start);
         let n = self
             .project
             .assets
@@ -2255,6 +2278,13 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
         {
             Ok(()) => {
                 self.record_target = Some((lane, start));
+                self.record_cancelled = false;
+                self.playlist_view.live = Some(playlist::LiveTake {
+                    lane,
+                    start,
+                    name: format!("Recording {n}"),
+                    peaks: Vec::new(),
+                });
                 if self.sync_needed {
                     // The engine must have the current project (loop off).
                     self.sync_needed = false;
@@ -2344,10 +2374,17 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             return;
         };
         let target = self.record_target.take();
+        self.playlist_view.live = None;
+        // Releases the transport hold if the take ended on its own.
+        self.host.stop_recording();
         let take = match result {
             Ok(t) => t,
             Err(e) => {
-                self.notify(Notice::error(format!("Recording failed: {e}")), now);
+                if std::mem::take(&mut self.record_cancelled) {
+                    self.notify(Notice::info("Recording cancelled"), now);
+                } else {
+                    self.notify(Notice::error(format!("Recording failed: {e}")), now);
+                }
                 return;
             }
         };
@@ -2379,6 +2416,23 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             + (f64::from(offset_ms) / 1000.0 * f64::from(p.timebase_rate)).round() as i64
             - (latency * f64::from(p.timebase_rate)).round() as i64;
         let mut edits = vec![Edit::AddAsset(asset.clone())];
+        // REC-012: no free lane at the start: a new one, in the same undo
+        // step as the take.
+        let lane = match lane {
+            Some(l) if p.playlist.lane(l).is_some() => l,
+            _ => {
+                let n = p
+                    .playlist
+                    .lanes
+                    .iter()
+                    .filter(|l| l.name.starts_with("Recording"))
+                    .count()
+                    + 1;
+                let (id, add) = jdance_commands::new_lane_edit(p, format!("Recording {n}"));
+                edits.push(add);
+                id
+            }
+        };
         let channel = audio_channels::take_channel(p, asset.id, &input, &mut edits);
         let cid = ClipId(p.ids.next());
         let mut clip = audio_channels::audio_clip(cid, lane, channel, &asset, at.max(0) as u64);
@@ -2680,7 +2734,12 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
 
     fn handle_close_request(&mut self, ctx: &egui::Context) {
         if ctx.input(|i| i.viewport().close_requested()) && !self.allow_close {
-            if self.history.is_dirty() {
+            if self.record_target.is_some() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.host.stop_recording();
+                self.host.stop();
+                self.after_take = Some(Pending::Quit);
+            } else if self.history.is_dirty() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 self.pending = Some(Pending::Quit);
             } else {
@@ -2966,6 +3025,7 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
                         .position_ticks
                         .filter(|_| self.song_mode && transport.playing);
                     self.playlist_view.caret = self.song_mode.then_some(self.caret);
+                    self.playlist_view.follow = !self.layout.no_follow;
                     let dir = self.path.as_deref().and_then(Path::parent);
                     ui.horizontal_top(|ui| {
                         if self.show_project_browser && browser_docked {
@@ -3051,7 +3111,15 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
                 self.apply(edit, false, now);
             }
         }
+        if let Some(t) = &mut self.playlist_view.live {
+            t.peaks.extend(self.host.take_recording_peaks());
+        }
         self.finish_recording(now);
+        if self.record_target.is_none()
+            && let Some(action) = self.after_take.take()
+        {
+            self.guarded(action, &ctx, now);
+        }
         self.loop_prompt_dialog(&ctx, now);
         self.check_recovery(&ctx, now);
         if self.show_library {

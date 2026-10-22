@@ -80,6 +80,8 @@ pub(crate) enum WindowEvent {
 #[derive(Debug, Default)]
 pub(crate) struct Layout {
     undocked: BTreeMap<Panel, Placement>,
+    /// View › Follow playhead turned off (spec 0.2.3 REC-017).
+    pub no_follow: bool,
     /// Set when the layout should be saved.
     pub changed: bool,
 }
@@ -107,9 +109,11 @@ impl Layout {
         self.changed = true;
     }
 
-    /// One line per undocked panel: `key x y w h` (`- -` for no position).
+    /// One line per undocked panel: `key x y w h` (`- -` for no position),
+    /// and `follow off` when the Playlist does not follow the playhead.
     pub fn to_text(&self) -> String {
-        self.undocked
+        let mut text: String = self
+            .undocked
             .iter()
             .map(|(p, pl)| {
                 let pos = pl
@@ -117,14 +121,23 @@ impl Layout {
                     .map_or_else(|| "- -".to_owned(), |q| format!("{:.0} {:.0}", q.x, q.y));
                 format!("{} {pos} {:.0} {:.0}\n", p.key(), pl.size.x, pl.size.y)
             })
-            .collect()
+            .collect();
+        if self.no_follow {
+            text.push_str("follow off\n");
+        }
+        text
     }
 
     /// Reads [`Self::to_text`]; unknown or damaged lines are skipped.
     pub fn from_text(text: &str) -> Self {
         let mut undocked = BTreeMap::new();
+        let mut no_follow = false;
         for line in text.lines() {
             let f: Vec<&str> = line.split_whitespace().collect();
+            if f[..] == ["follow", "off"] {
+                no_follow = true;
+                continue;
+            }
             let [key, x, y, w, h] = f[..] else { continue };
             let Some(p) = Panel::ALL.into_iter().find(|p| p.key() == key) else {
                 continue;
@@ -147,6 +160,7 @@ impl Layout {
         }
         Self {
             undocked,
+            no_follow,
             changed: false,
         }
     }
@@ -298,6 +312,10 @@ mod tests {
         assert!(damaged.is_undocked(Panel::PianoRoll));
         l.reset();
         assert!(!l.is_undocked(Panel::Mixer) && l.changed);
+        // Follow playhead (REC-017) rides along.
+        l.no_follow = true;
+        assert!(Layout::from_text(&l.to_text()).no_follow);
+        assert!(!Layout::from_text("").no_follow);
     }
 
     #[test]

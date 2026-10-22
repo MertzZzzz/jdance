@@ -27,6 +27,11 @@ pub const RING_SECONDS: u32 = 20;
 /// Monitor ring length in samples (stereo pairs); more is dropped so the
 /// monitor stays short.
 const MONITOR_SAMPLES: usize = 8_192;
+/// Frames per waveform peak sent to the UI while recording (REC-016).
+pub const PEAK_FRAMES: usize = 256;
+/// Peak queue length; the UI drains it every frame, more is dropped (only
+/// the display loses detail).
+const PEAK_QUEUE: usize = 16_384;
 /// Unfinished takes end with this after `.wav`.
 pub const PART_SUFFIX: &str = ".wav.part";
 const HEADER: u64 = 44;
@@ -60,6 +65,11 @@ pub struct Capture {
     shared: Arc<Shared>,
     rec: Producer<f32>,
     mon: Producer<f32>,
+    /// Waveform of the take for the Playlist: the largest absolute value
+    /// per [`PEAK_FRAMES`] frames (REC-014/016).
+    peaks: Producer<f32>,
+    peak_acc: f32,
+    peak_n: usize,
 }
 
 impl CaptureCallback for Capture {
@@ -83,6 +93,13 @@ impl CaptureCallback for Capture {
                 for i in 0..n {
                     let _ = self.rec.push(left[i]);
                     let _ = self.rec.push(right[i]);
+                    self.peak_acc = self.peak_acc.max(left[i].abs()).max(right[i].abs());
+                    self.peak_n += 1;
+                    if self.peak_n == PEAK_FRAMES {
+                        let _ = self.peaks.push(self.peak_acc);
+                        self.peak_acc = 0.0;
+                        self.peak_n = 0;
+                    }
                 }
                 self.shared.captured.fetch_add(n as u64, Relaxed);
             }
@@ -99,12 +116,35 @@ impl CaptureCallback for Capture {
     }
 }
 
-/// The capture callback, the recording ring's reader and the monitor
-/// ring's reader for an input at `rate`.
-pub fn capture(shared: Arc<Shared>, rate: u32) -> (Capture, Consumer<f32>, Consumer<f32>) {
-    let (rec, rec_out) = RingBuffer::new(2 * (rate * RING_SECONDS) as usize);
-    let (mon, mon_out) = RingBuffer::new(MONITOR_SAMPLES);
-    (Capture { shared, rec, mon }, rec_out, mon_out)
+/// Readers of a capture: the recording ring, the monitor ring and the
+/// take's waveform peaks.
+pub struct CaptureOutputs {
+    pub ring: Consumer<f32>,
+    pub monitor: Consumer<f32>,
+    pub peaks: Consumer<f32>,
+}
+
+/// The capture callback and its readers for an input at `rate`.
+pub fn capture(shared: Arc<Shared>, rate: u32) -> (Capture, CaptureOutputs) {
+    let (rec, ring) = RingBuffer::new(2 * (rate * RING_SECONDS) as usize);
+    let (mon, monitor) = RingBuffer::new(MONITOR_SAMPLES);
+    let (peaks, peaks_out) = RingBuffer::new(PEAK_QUEUE);
+    let cap = Capture {
+        shared,
+        rec,
+        mon,
+        peaks,
+        peak_acc: 0.0,
+        peak_n: 0,
+    };
+    (
+        cap,
+        CaptureOutputs {
+            ring,
+            monitor,
+            peaks: peaks_out,
+        },
+    )
 }
 
 /// Output-side monitor: adds the input to the rendered block. A new ring
@@ -427,10 +467,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn takes_send_waveform_peaks_while_recording() {
+        let shared = Arc::new(Shared::default());
+        let (mut cap, mut out) = capture(Arc::clone(&shared), 48_000);
+        cap.capture(&[0.9; 512], &[0.9; 512]);
+        assert_eq!(out.peaks.slots(), 0, "only while recording");
+        shared.recording.store(true, Relaxed);
+        let left: Vec<f32> = (0..1000)
+            .map(|i| if i == 300 { -0.8 } else { 0.1 })
+            .collect();
+        cap.capture(&left, &[0.2; 1000]);
+        let peaks: Vec<f32> = std::iter::from_fn(|| out.peaks.pop().ok()).collect();
+        assert_eq!(peaks, [0.2, 0.8, 0.2], "per 256 frames; the rest waits");
+    }
+
+    #[test]
     fn an_armed_take_waits_for_the_transport_and_can_be_cancelled() {
         let dir = tempfile::tempdir().unwrap();
         let shared = Arc::new(Shared::default());
-        let (mut cap, ring, _mon) = capture(Arc::clone(&shared), 48_000);
+        let (mut cap, out) = capture(Arc::clone(&shared), 48_000);
+        let ring = out.ring;
         let part = dir.path().join(format!("Armed{PART_SUFFIX}"));
         shared.armed.store(true, Relaxed);
         let session = Session::start(part, 2, 48_000, ring, Arc::clone(&shared))
@@ -451,7 +507,8 @@ mod tests {
     fn take_is_written_finished_and_readable() {
         let dir = tempfile::tempdir().unwrap();
         let shared = Arc::new(Shared::default());
-        let (mut cap, ring, _mon) = capture(Arc::clone(&shared), 48_000);
+        let (mut cap, out) = capture(Arc::clone(&shared), 48_000);
+        let ring = out.ring;
         let part = dir.path().join(format!("Take{PART_SUFFIX}"));
         let session = Session::start(part.clone(), 2, 48_000, ring, Arc::clone(&shared))
             .map_err(|e| e.1)
@@ -482,7 +539,7 @@ mod tests {
     #[test]
     fn overflow_stops_the_take_and_keeps_what_was_written() {
         let shared = Arc::new(Shared::default());
-        let (mut cap, _ring, _mon) = capture(Arc::clone(&shared), 100);
+        let (mut cap, _out) = capture(Arc::clone(&shared), 100);
         shared.recording.store(true, Relaxed);
         // 20 s at 100 Hz fit; the next block does not (nobody reads).
         cap.capture(&[0.1; 2000], &[0.1; 2000]);
@@ -521,7 +578,8 @@ mod tests {
     fn monitor_adds_the_input_and_hands_old_rings_back() {
         let shared = Arc::new(Shared::default());
         shared.monitor.store(true, Relaxed);
-        let (mut cap, _ring, mon) = capture(Arc::clone(&shared), 48_000);
+        let (mut cap, out) = capture(Arc::clone(&shared), 48_000);
+        let mon = out.monitor;
         let (mut mix, mut ctl) = monitor_mix();
         ctl.send(mon);
         cap.capture(&[0.5; 4], &[0.25; 4]);
@@ -529,7 +587,8 @@ mod tests {
         mix.add(&mut l, &mut r);
         assert_eq!(&l[..5], &[1.5, 1.5, 1.5, 1.5, 1.0]);
         assert_eq!(r[0], 0.25);
-        let (_c2, _r2, mon2) = capture(Arc::clone(&shared), 48_000);
+        let (_c2, out2) = capture(Arc::clone(&shared), 48_000);
+        let mon2 = out2.monitor;
         ctl.send(mon2);
         mix.add(&mut l, &mut r);
         ctl.collect();

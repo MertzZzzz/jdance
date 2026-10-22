@@ -107,6 +107,8 @@ struct Recorder {
     round_trip: u32,
     monitor_on: bool,
     project_dir: Option<PathBuf>,
+    /// Waveform peaks of the running take (REC-016).
+    peaks: Option<rtrb::Consumer<f32>>,
 }
 
 impl Default for Recorder {
@@ -122,6 +124,7 @@ impl Default for Recorder {
             round_trip: 0,
             monitor_on: false,
             project_dir: None,
+            peaks: None,
         }
     }
 }
@@ -329,7 +332,12 @@ impl AudioHost {
             return;
         };
         let rate = active.engine.sample_rate();
-        let (capture, ring, mon) = recording::capture(Arc::clone(&rec.shared), rate);
+        let (capture, outputs) = recording::capture(Arc::clone(&rec.shared), rate);
+        let recording::CaptureOutputs {
+            ring,
+            monitor: mon,
+            peaks,
+        } = outputs;
         let request = jdance_audio_api::InputRequest {
             sample_rate: rate,
             channels: cfg.channels,
@@ -339,6 +347,7 @@ impl AudioHost {
                 rec.round_trip = stream.info().round_trip.unwrap_or(0);
                 rec.input = Some(stream);
                 rec.ring = Some(ring);
+                rec.peaks = Some(peaks);
                 if let Some(m) = &mut rec.monitor {
                     m.send(mon);
                 }
@@ -370,6 +379,7 @@ impl AudioHost {
             && let StreamState::Failed(e) = input.state()
         {
             rec.shared.recording.store(false, Relaxed);
+            rec.shared.armed.store(false, Relaxed);
             rec.problem = Some(format!("The input stopped: {e}"));
             rec.input = None;
             self.notices
@@ -969,6 +979,12 @@ impl Host for AudioHost {
             .expect("unbounded");
         rec.shared.overflow.store(false, Relaxed);
         rec.shared.captured.store(0, Relaxed);
+        // Peaks of an earlier take.
+        if let Some(q) = &mut rec.peaks
+            && let Ok(c) = q.read_chunk(q.slots())
+        {
+            c.commit_all();
+        }
         // Armed before the writer starts, so it waits for the transport.
         rec.shared.armed.store(true, Relaxed);
         match Session::start(part, channels, rate, ring, Arc::clone(&rec.shared)) {
@@ -1031,6 +1047,21 @@ impl Host for AudioHost {
 
     fn take_recording(&mut self) -> Option<Result<FinishedTake, String>> {
         self.recorder.finished.take()
+    }
+
+    fn take_recording_peaks(&mut self) -> Vec<f32> {
+        let Some(q) = &mut self.recorder.peaks else {
+            return Vec::new();
+        };
+        let n = q.slots();
+        q.read_chunk(n)
+            .map(|c| {
+                let (a, b) = c.as_slices();
+                let v = [a, b].concat();
+                c.commit_all();
+                v
+            })
+            .unwrap_or_default()
     }
 
     fn unfinished_recordings(&mut self, project_dir: Option<&Path>) -> Vec<PathBuf> {
