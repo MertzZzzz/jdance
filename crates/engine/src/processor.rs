@@ -535,6 +535,10 @@ impl EngineProcessor {
         let transport = Transport {
             playing: *playing && !*stopping,
             tempo_bpm: snap.tempo_bpm,
+            time_sig: (
+                snap.time_signature.numerator,
+                snap.time_signature.denominator,
+            ),
             project_time_samples: *pos as i64,
             project_time_quarters: quarters(*pos),
             cycle: snap.loop_range.map(|(a, b)| (quarters(a), quarters(b))),

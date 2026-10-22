@@ -15,7 +15,8 @@
 //! `#{key, label, kind: "int"|"float"|"bool"|"choice", min, max, init,
 //! choices}`) and `run(ctx)`. `ctx` holds `notes` (every note of the row:
 //! `#{id, start, length, key, velocity, selected}`, velocity 1..=127),
-//! `scope` (the notes to work on), `ppq`, `pattern_len`, `grid`,
+//! `scope` (the notes to work on), `ppq`, `beats_per_bar`, `beat_ticks`,
+//! `pattern_len`, `grid`,
 //! `range_start`, `range_end` and `params`. `run` returns `#{notes: [..]}`
 //! (the scope's replacement; `mode: "range"` replaces the notes starting
 //! in the range instead, `mode: "append"` keeps everything) or
@@ -278,7 +279,8 @@ impl Script {
         // The built-in arpeggiator, shared with Tools > Arpeggiate.
         let snapshot: Vec<jdance_domain::Note> = input.notes.to_vec();
         let selected: Vec<usize> = input.selected.to_vec();
-        let (len, grid, range) = (input.pattern_len, input.grid, input.range);
+        let (len, grid, range, signature) =
+            (input.pattern_len, input.grid, input.range, input.signature);
         let seed = run.seed;
         e.register_fn(
             "arpeggiate",
@@ -308,6 +310,7 @@ impl Script {
                     pattern_len: len,
                     grid,
                     range,
+                    signature,
                 };
                 let o = nt::arpeggiate(&inp, &s)
                     .map_err(|e| -> Box<rhai::EvalAltResult> { e.into() })?;
@@ -384,6 +387,15 @@ fn context(script: &Script, run: &ScriptRun, input: &Input) -> Dynamic {
     m.insert("notes".into(), Dynamic::from_array(notes));
     m.insert("scope".into(), Dynamic::from_array(scope));
     m.insert("ppq".into(), Dynamic::from(i64::from(jdance_domain::PPQ)));
+    // The project signature (spec 0.2.3 SIG-003).
+    m.insert(
+        "beats_per_bar".into(),
+        Dynamic::from(i64::from(input.signature.numerator)),
+    );
+    m.insert(
+        "beat_ticks".into(),
+        Dynamic::from(i64::from(input.signature.beat_ticks())),
+    );
     m.insert(
         "pattern_len".into(),
         Dynamic::from(i64::from(input.pattern_len)),

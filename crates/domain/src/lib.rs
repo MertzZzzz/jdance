@@ -10,6 +10,7 @@ mod automation;
 mod effects;
 mod export;
 mod ids;
+mod meter;
 mod mixer;
 mod playlist;
 mod plugin;
@@ -34,6 +35,7 @@ pub use ids::{
     AssetId, AutomationId, ChannelId, ClipId, IdAllocator, InsertId, LaneId, PatternId, SendId,
     TrackId,
 };
+pub use meter::{COMMON_SIGNATURES, DENOMINATORS, MAX_NUMERATOR, TimeSignature, WHOLE_NOTE};
 pub use mixer::{
     Insert, MAX_INSERTS_PER_TRACK, MAX_SEND_LEVEL, MAX_SENDS_PER_TRACK, MAX_TRACKS, Mixer,
     MixerTrack, RoutingError, Send, Sidechain, Tap,
@@ -52,7 +54,7 @@ pub const PPQ: u32 = 960;
 pub const TICKS_PER_STEP: u32 = PPQ / 4;
 /// Default pattern length in steps (one 4/4 bar of sixteenths).
 pub const DEFAULT_PATTERN_STEPS: u32 = 16;
-/// Pattern length limit in steps (16 bars).
+/// Pattern length limit in steps (16 bars of 4/4).
 pub const MAX_PATTERN_STEPS: u32 = 256;
 /// Upper bound for notes in one piano-roll row.
 pub const MAX_NOTES_PER_ROW: usize = 10_000;
@@ -71,6 +73,9 @@ pub const MAX_CHANNELS: usize = 256;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Project {
     pub tempo_bpm: f64,
+    /// One signature for the whole project (spec 0.2.3 SIG-001).
+    #[serde(default)]
+    pub time_signature: TimeSignature,
     pub channels: Vec<Channel>,
     pub patterns: Vec<Pattern>,
     pub mixer: Mixer,
@@ -124,6 +129,7 @@ impl Project {
         let playlist = Playlist::with_lanes(DEFAULT_LANES, || ids.next());
         Self {
             tempo_bpm: 130.0,
+            time_signature: TimeSignature::COMMON,
             channels: Vec::new(),
             patterns: vec![pattern],
             mixer: Mixer::default(),
@@ -339,6 +345,7 @@ impl Project {
 
     /// Checks patterns and the playlist (references, ranges, IDs).
     pub fn validate_arrangement(&self) -> Result<(), String> {
+        self.time_signature.validate()?;
         if self.patterns.is_empty() {
             return Err("a project needs at least one pattern".into());
         }

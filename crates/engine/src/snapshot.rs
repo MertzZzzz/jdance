@@ -52,6 +52,7 @@ pub struct PlaybackSnapshot {
     /// Some edge needed more than [`MAX_PDC_SAMPLES`] of compensation.
     pub pdc_clamped: bool,
     pub tempo_bpm: f64,
+    pub time_signature: jdance_domain::TimeSignature,
     /// Master safety limiter stage; `None` when disabled.
     pub limiter: Option<SafetyLimiter>,
     /// Automation lanes (song mode only, ADR-014).
@@ -764,6 +765,7 @@ pub fn compile_full(
         latency,
         pdc_clamped: pdc.clamped,
         tempo_bpm: project.tempo_bpm,
+        time_signature: project.time_signature,
         limiter: mixer.limiter.enabled.then(|| {
             SafetyLimiter::new(
                 mixer.limiter.ceiling_db,

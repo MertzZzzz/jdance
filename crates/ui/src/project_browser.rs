@@ -250,7 +250,7 @@ impl ProjectBrowser {
                         let resp = item(ui, &a.name, &count, source == Some(src));
                         let resp = resp.on_hover_text(format!(
                             "{target} · {} bars · used by {uses} clip(s)\nClick: place with Draw/Paint · drag into the Playlist · double-click: Automation Editor",
-                            a.length.div_ceil(3840)
+                            a.length.div_ceil(u64::from(project.time_signature.bar_ticks()))
                         ));
                         resp.dnd_set_drag_payload(ProjectItem(src));
                         if resp.clicked() {

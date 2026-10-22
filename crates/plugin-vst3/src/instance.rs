@@ -537,11 +537,11 @@ impl Vst3Processor {
         let quarters_per_sample = t.tempo_bpm / 60.0 / self.sample_rate;
         c.sampleRate = self.sample_rate;
         c.tempo = t.tempo_bpm;
-        c.timeSigNumerator = 4;
-        c.timeSigDenominator = 4;
+        c.timeSigNumerator = i32::from(t.time_sig.0);
+        c.timeSigDenominator = i32::from(t.time_sig.1);
         c.projectTimeSamples = t.project_time_samples + offset as i64;
         c.projectTimeMusic = t.project_time_quarters + offset as f64 * quarters_per_sample;
-        c.barPositionMusic = (c.projectTimeMusic / 4.0).floor() * 4.0;
+        c.barPositionMusic = t.bar_start_quarters(c.projectTimeMusic);
         state |= kBarPositionValid;
         if let Some((a, b)) = t.cycle {
             state |= kCycleActive | kCycleValid;

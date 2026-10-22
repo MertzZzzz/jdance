@@ -73,6 +73,7 @@ pub struct ScriptJob {
     pub pattern_len: u32,
     pub grid: u32,
     pub range: Option<Range>,
+    pub signature: jdance_domain::TimeSignature,
 }
 
 impl ScriptJob {
@@ -83,6 +84,7 @@ impl ScriptJob {
             pattern_len: input.pattern_len,
             grid: input.grid,
             range: input.range,
+            signature: input.signature,
         }
     }
 }

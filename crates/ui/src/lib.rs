@@ -111,7 +111,7 @@ pub struct JdanceApp<H: Host, S: ProjectStore> {
     /// Position shown as time instead of bars.
     time_display: bool,
     /// Grid for the Playlist and the Piano Roll (ticks; 0 = off).
-    snap: u32,
+    snap: toolbar::Snap,
     tap: Option<toolbar::TapTempo>,
     themed: bool,
     /// Pattern edited in the rack and used for new clips.
@@ -208,7 +208,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             browser_view: browser::BrowserView::new(),
             show_plugins: false,
             time_display: false,
-            snap: jdance_domain::TICKS_PER_STEP,
+            snap: toolbar::Snap::Step,
             tap: None,
             themed: false,
             current_pattern,
@@ -789,6 +789,21 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                     self.show_recording = true;
                     ui.close();
                 }
+                // The same choices as the transport field (SIG-010).
+                ui.menu_button("Time signature", |ui| {
+                    let current = self.project.time_signature;
+                    for sig in jdance_domain::COMMON_SIGNATURES {
+                        if ui
+                            .selectable_label(sig == current, sig.to_string())
+                            .clicked()
+                            && sig != current
+                        {
+                            self.apply(Edit::SetTimeSignature(sig), false, now);
+                            ui.close();
+                        }
+                    }
+                    ui.weak("Other: the field next to the tempo");
+                });
             });
             let name = self.path.as_ref().and_then(|p| p.file_name()).map_or_else(
                 || "Untitled".to_owned(),
@@ -859,7 +874,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             let text = if self.time_display {
                 toolbar::time_text(ticks, self.project.tempo_bpm)
             } else {
-                toolbar::bars_text(ticks)
+                toolbar::bars_text(ticks, self.project.time_signature)
             };
             if ui
                 .add(
@@ -892,16 +907,19 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             if ui.button("Tap").on_hover_text("Tap Tempo").clicked() {
                 self.tap.get_or_insert_with(toolbar::TapTempo::default);
             }
+            if let Some(sig) = toolbar::signature_field(ui, self.project.time_signature) {
+                self.apply(Edit::SetTimeSignature(sig), false, now);
+            }
             ui.separator();
             self.pattern_controls(ui, now);
             ui.separator();
             ui.label(egui::RichText::new("Snap").color(theme::MUTED));
             egui::ComboBox::from_id_salt("snap")
                 .width(90.0)
-                .selected_text(toolbar::snap_name(self.snap))
+                .selected_text(self.snap.name())
                 .show_ui(ui, |ui| {
-                    for (v, name) in toolbar::SNAPS {
-                        ui.selectable_value(&mut self.snap, v, name);
+                    for v in toolbar::SNAPS {
+                        ui.selectable_value(&mut self.snap, v, v.name());
                     }
                 })
                 .response
@@ -1412,7 +1430,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 lfo_dialog::LfoTarget::New(target) => {
                     let id = jdance_domain::AutomationId(p.ids.next());
                     let name = automation::source_name(p, &target, &mut self.host);
-                    let bar = 4 * u64::from(jdance_domain::PPQ);
+                    let bar = u64::from(p.time_signature.bar_ticks());
                     (
                         id,
                         jdance_domain::AutomationLane {
@@ -1455,7 +1473,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             e.show(
                 ctx,
                 &self.project,
-                u64::from(self.snap.max(1)),
+                u64::from(self.snap.ticks(self.project.time_signature).max(1)),
                 &mut self.host,
                 &mut out,
                 &mut self.layout,
@@ -1949,7 +1967,8 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             .on_hover_text("Loop the region set with Shift+drag on the playlist ruler (default: whole arrangement)")
             .changed()
         {
-            let end = self.project.arrangement_end_ticks().max(3_840);
+            let bar = u64::from(self.project.time_signature.bar_ticks());
+            let end = self.project.arrangement_end_ticks().max(bar);
             let range = self.project.playlist.loop_range.or(Some((0, end)));
             self.apply(Edit::SetLoop { range, enabled: looping }, false, now);
         }
@@ -2870,7 +2889,7 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
                                 ui,
                                 &self.project,
                                 playhead,
-                                self.snap,
+                                self.snap.ticks(self.project.time_signature),
                                 self.current_pattern,
                                 &mut self.host,
                                 dir,

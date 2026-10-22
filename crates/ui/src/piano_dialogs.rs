@@ -94,6 +94,7 @@ impl Dialog {
         ctx: &egui::Context,
         notes: &[Note],
         selected: &[usize],
+        sig: jdance_domain::TimeSignature,
     ) -> DialogOutput {
         let mut out = DialogOutput::default();
         let count = if selected.is_empty() {
@@ -180,7 +181,7 @@ impl Dialog {
                             apply = Some(notes::fit_to_scale(notes, selected, *scale));
                         }
                         Self::Properties(p) => {
-                            props_ui(ui, p);
+                            props_ui(ui, p, sig);
                             let idx: Vec<usize> = if selected.is_empty() {
                                 (0..notes.len()).collect()
                             } else {
@@ -244,14 +245,14 @@ fn opt_field<T: Copy>(
     ui.end_row();
 }
 
-fn props_ui(ui: &mut egui::Ui, p: &mut Props) {
+fn props_ui(ui: &mut egui::Ui, p: &mut Props, sig: jdance_domain::TimeSignature) {
     opt_field(ui, "Start", &mut p.start, 0, |ui, v| {
         ui.add(
             egui::DragValue::new(v)
                 .range(0..=MAX_PATTERN_STEPS * TICKS_PER_STEP)
-                .custom_formatter(|t, _| bars_text(t as u64)),
+                .custom_formatter(|t, _| bars_text(t as u64, sig)),
         )
-        .on_hover_text("Bar:beat:tick (960 ticks per beat); drag or type ticks")
+        .on_hover_text("Bar:beat:tick (960 ticks per quarter note); drag or type ticks")
     });
     opt_field(ui, "Length", &mut p.length, TICKS_PER_STEP, |ui, v| {
         ui.add(

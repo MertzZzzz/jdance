@@ -1449,6 +1449,7 @@ impl Host for AudioHost {
                     pattern_len: job.pattern_len,
                     grid: job.grid,
                     range: job.range,
+                    signature: job.signature,
                 };
                 let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     script.run(&run, &input, flag)

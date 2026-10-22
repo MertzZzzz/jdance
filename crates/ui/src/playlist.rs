@@ -33,7 +33,8 @@ use egui::{
 use jdance_commands::{Edge, Edit, audio_clip_edge, pattern_clip_edge};
 use jdance_domain::{
     AssetId, AudioAsset, AudioClip, AutomationClip, AutomationId, ChannelId, ClipId, LaneId,
-    PatternClip, PatternId, Project, SampleRef, TICKS_PER_STEP, frames_per_tick,
+    PatternClip, PatternId, Project, SampleRef, TICKS_PER_STEP, TimeSignature, WHOLE_NOTE,
+    frames_per_tick,
 };
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -42,7 +43,6 @@ const ROW_H: f32 = 32.0;
 const RULER_H: f32 = 20.0;
 const HEADER_W: f32 = 212.0;
 const EDGE_PX: f32 = 6.0;
-const BAR_TICKS: u64 = 3_840;
 const NAME_H: f32 = 13.0;
 const MARKER_W: f32 = 12.0;
 
@@ -327,8 +327,10 @@ fn source_name(project: &Project, source: Source) -> Option<String> {
 }
 
 impl PlaylistView {
+    /// `zoom` is pixels per whole note, so a signature change keeps the
+    /// view's scale.
     fn px_per_tick(&self) -> f32 {
-        self.zoom / BAR_TICKS as f32
+        self.zoom / WHOLE_NOTE as f32
     }
 
     pub(crate) fn retain_existing(&mut self, project: &Project) {
@@ -562,8 +564,10 @@ impl PlaylistView {
         let ppt = self.px_per_tick();
         let fpt = frames_per_tick(project.tempo_bpm, project.timebase_rate);
         let end = project.arrangement_end_ticks();
-        let bars = (end / BAR_TICKS + 8).max(16);
-        let width = bars as f32 * self.zoom;
+        let sig = project.time_signature;
+        let bar_ticks = u64::from(sig.bar_ticks());
+        let bars = (end / bar_ticks + 8).max(16);
+        let width = bars as f32 * bar_ticks as f32 * ppt;
         let n_lanes = pl.lanes.len();
         // One extra row below the lanes: dropping there adds a lane.
         let lanes_bottom = RULER_H + (n_lanes + 1) as f32 * ROW_H;
@@ -608,7 +612,7 @@ impl PlaylistView {
         };
         let in_lanes = |p: Pos2| p.y >= origin.y + RULER_H && p.y < origin.y + lanes_bottom;
 
-        self.background(&painter, rect, bars, n_lanes, lanes_bottom);
+        self.background(&painter, rect, sig, bars, n_lanes, lanes_bottom);
         if let Some((a, b)) = pl.loop_range {
             let fill = if pl.loop_enabled {
                 theme::AMBER.gamma_multiply(0.6)
@@ -639,7 +643,7 @@ impl PlaylistView {
             && let Some(p) = press.or(response.interact_pointer_pos())
         {
             let kind = if p.y < origin.y + RULER_H {
-                shift.then(|| DragKind::Loop(snap(tick_at(p.x), BAR_TICKS).max(0) as u64))
+                shift.then(|| DragKind::Loop(snap(tick_at(p.x), bar_ticks).max(0) as u64))
             } else if ctrl {
                 Some(DragKind::Frame { add: shift })
             } else {
@@ -836,7 +840,7 @@ impl PlaylistView {
                 }
                 DragKind::Loop(a) => {
                     if let Some(p) = pointer {
-                        let b = snap(tick_at(p.x), BAR_TICKS).max(0) as u64;
+                        let b = snap(tick_at(p.x), bar_ticks).max(0) as u64;
                         let (lo, hi) = (a.min(b), a.max(b));
                         if hi > lo {
                             out.edits.push(Edit::SetLoop {
@@ -1128,8 +1132,8 @@ impl PlaylistView {
         if let Some((p, name)) = drop_ghost {
             let (lane, start) = drop_at(p);
             let where_ = match lane {
-                Some(_) => bars_text(start),
-                None => format!("{} · new lane", bars_text(start)),
+                Some(_) => bars_text(start, sig),
+                None => format!("{} · new lane", bars_text(start, sig)),
             };
             let row = lane_at(p.y).unwrap_or(n_lanes);
             let r = Rect::from_min_size(
@@ -1148,7 +1152,7 @@ impl PlaylistView {
         }
 
         if let (Some(DragKind::Loop(a)), Some(p)) = (drag_kind, pointer) {
-            let b = snap(tick_at(p.x), BAR_TICKS).max(0) as u64;
+            let b = snap(tick_at(p.x), bar_ticks).max(0) as u64;
             painter.rect_filled(
                 Rect::from_min_max(
                     pos2(x_of(a.min(b)), origin.y),
@@ -1185,19 +1189,22 @@ impl PlaylistView {
         &self,
         painter: &egui::Painter,
         rect: Rect,
+        sig: TimeSignature,
         bars: u64,
         n_lanes: usize,
         lanes_bottom: f32,
     ) {
         let origin = rect.min;
+        let ppt = self.px_per_tick();
+        let bar_px = sig.bar_ticks() as f32 * ppt;
         let bottom = origin.y + lanes_bottom;
         painter.rect_filled(rect, CornerRadius::ZERO, theme::BG);
         // Every other bar slightly lighter: bars read without lines.
         for b in (0..bars).filter(|b| b % 2 == 1) {
             painter.rect_filled(
                 Rect::from_min_max(
-                    pos2(origin.x + b as f32 * self.zoom, origin.y + RULER_H),
-                    pos2(origin.x + (b + 1) as f32 * self.zoom, bottom),
+                    pos2(origin.x + b as f32 * bar_px, origin.y + RULER_H),
+                    pos2(origin.x + (b + 1) as f32 * bar_px, bottom),
                 ),
                 CornerRadius::ZERO,
                 Color32::from_white_alpha(4),
@@ -1225,10 +1232,13 @@ impl PlaylistView {
             CornerRadius::ZERO,
             theme::PANEL,
         );
-        let beat_px = self.zoom / 4.0;
-        for b in 0..=bars * 4 {
+        let beat_px = sig.beat_ticks() as f32 * ppt;
+        let per_bar = u64::from(sig.numerator);
+        // Bar numbers at least 28 px apart (SIG-012).
+        let label_every = (28.0 / bar_px).ceil().max(1.0) as u64;
+        for b in 0..=bars * per_bar {
             let x = origin.x + b as f32 * beat_px;
-            let bar_line = b % 4 == 0;
+            let bar_line = b % per_bar == 0;
             if !bar_line && beat_px < 12.0 {
                 continue;
             }
@@ -1246,10 +1256,13 @@ impl PlaylistView {
                     [pos2(x, origin.y + 12.0), pos2(x, origin.y + RULER_H)],
                     Stroke::new(1.0, theme::LINE_STRONG),
                 );
+                if !(b / per_bar).is_multiple_of(label_every) {
+                    continue;
+                }
                 painter.text(
                     pos2(x + 3.0, origin.y + 2.0),
                     Align2::LEFT_TOP,
-                    format!("{}", b / 4 + 1),
+                    format!("{}", b / per_bar + 1),
                     theme::mono(11.0),
                     theme::MUTED,
                 );

@@ -74,16 +74,40 @@ pub struct ProcessSetupInfo {
 }
 
 /// Transport state for one block (PLG-034).
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Transport {
     pub playing: bool,
     pub tempo_bpm: f64,
+    /// Project time signature (spec 0.2.3 SIG-030).
+    pub time_sig: (u8, u8),
     /// Position of the block start on the timeline.
     pub project_time_samples: i64,
     /// The same position in quarter notes.
     pub project_time_quarters: f64,
     /// Loop range in quarter notes when cycling.
     pub cycle: Option<(f64, f64)>,
+}
+
+impl Default for Transport {
+    fn default() -> Self {
+        Self {
+            playing: false,
+            tempo_bpm: 120.0,
+            time_sig: (4, 4),
+            project_time_samples: 0,
+            project_time_quarters: 0.0,
+            cycle: None,
+        }
+    }
+}
+
+impl Transport {
+    /// Start of the bar holding `quarters`, in quarter notes.
+    pub fn bar_start_quarters(&self, quarters: f64) -> f64 {
+        let (n, d) = self.time_sig;
+        let bar = f64::from(n.max(1)) * 4.0 / f64::from(d.max(1));
+        (quarters / bar).floor() * bar
+    }
 }
 
 /// Saved plugin state blobs (PLG-070).
@@ -199,4 +223,20 @@ pub trait PluginController {
     /// Events since the last call: GUI edits, output parameter changes
     /// from the processor, restart requests.
     fn poll(&mut self) -> Vec<PluginEvent>;
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use super::Transport;
+
+    #[test]
+    fn bar_start_follows_the_signature() {
+        let mut t = Transport::default();
+        assert_eq!(t.bar_start_quarters(5.5), 4.0);
+        t.time_sig = (3, 4);
+        assert_eq!(t.bar_start_quarters(5.5), 3.0);
+        t.time_sig = (7, 8);
+        assert_eq!(t.bar_start_quarters(7.0), 7.0);
+        assert_eq!(t.bar_start_quarters(6.9), 3.5);
+    }
 }

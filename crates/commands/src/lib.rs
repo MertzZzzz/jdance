@@ -57,6 +57,8 @@ pub enum EditError {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Edit {
     SetTempo(f64),
+    /// Project time signature (spec 0.2.3 SIG-011).
+    SetTimeSignature(jdance_domain::TimeSignature),
     /// Mixer track for the channels of recorded takes (REC-003).
     SetRecordTo(jdance_domain::RecordTo),
     SetStep {
@@ -252,6 +254,7 @@ impl Edit {
     pub fn label(&self) -> &'static str {
         match self {
             Edit::SetTempo(_) => "Change tempo",
+            Edit::SetTimeSignature(_) => "Change time signature",
             Edit::SetRecordTo(_) => "Change recording track",
             Edit::SetStep { .. } => "Edit step",
             Edit::SetNotes { .. } => "Edit notes",
@@ -363,6 +366,11 @@ impl Edit {
                 }
                 let old = std::mem::replace(&mut p.tempo_bpm, *bpm);
                 Ok(Edit::SetTempo(old))
+            }
+            Edit::SetTimeSignature(sig) => {
+                sig.validate().map_err(EditError::Arrangement)?;
+                let old = std::mem::replace(&mut p.time_signature, *sig);
+                Ok(Edit::SetTimeSignature(old))
             }
             Edit::SetStep {
                 pattern,
@@ -958,7 +966,7 @@ pub fn add_automation(
         return Err(EditError::Arrangement("automation target not found".into()));
     }
     let id = AutomationId(p.ids.next());
-    let bar = 4 * u64::from(jdance_domain::PPQ);
+    let bar = u64::from(p.time_signature.bar_ticks());
     let length = p.arrangement_end_ticks().div_ceil(bar).max(4) * bar;
     let (lane, add_lane) = new_lane_edit(p, name.clone());
     let clip = ClipId(p.ids.next());
@@ -1183,6 +1191,24 @@ mod tests {
         h.undo(&mut p).unwrap();
         assert_eq!(p.channel(ch).unwrap().volume, orig);
         assert!(!h.is_dirty());
+    }
+
+    #[test]
+    fn time_signature_is_one_undo_step_and_validated() {
+        let (mut p, mut h, ..) = setup();
+        let three = jdance_domain::TimeSignature::new(3, 4);
+        h.execute(&mut p, Edit::SetTimeSignature(three)).unwrap();
+        assert_eq!(p.time_signature, three);
+        // New patterns are one bar of the new signature (SIG-005).
+        let id = crate::playlist::add_pattern(&mut h, &mut p, "B").unwrap();
+        assert_eq!(p.pattern(id).unwrap().length_steps, 12);
+        h.undo(&mut p).unwrap();
+        h.undo(&mut p).unwrap();
+        assert!(p.time_signature.is_common());
+        let before = p.clone();
+        let bad = jdance_domain::TimeSignature::new(4, 5);
+        assert!(h.execute(&mut p, Edit::SetTimeSignature(bad)).is_err());
+        assert_eq!(p, before);
     }
 
     #[test]

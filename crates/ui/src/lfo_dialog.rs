@@ -157,7 +157,7 @@ impl LfoDialog {
                             ui.label("Resolution");
                             ui.add(
                                 egui::DragValue::new(&mut self.lfo.resolution)
-                                    .range(1..=3840)
+                                    .range(1..=jdance_domain::WHOLE_NOTE)
                                     .suffix(" ticks"),
                             );
                             ui.end_row();

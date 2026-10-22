@@ -14,7 +14,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 pub const FORMAT_TAG: &str = "jdance-project";
-pub const CURRENT_FORMAT_VERSION: u32 = 13;
+pub const CURRENT_FORMAT_VERSION: u32 = 14;
 pub const PROJECT_EXTENSION: &str = "jdance";
 
 /// Saves `project` to `path` atomically. Sample paths inside the project
@@ -204,6 +204,11 @@ fn migrate(version: u32, mut project: Value) -> Result<Value, PersistError> {
     if v == 12 {
         project = v12_to_v13(project)?;
         v = 13;
+    }
+    if v == 13 {
+        // v14 (0.2.3) added the time signature (absent = 4/4) and mixer
+        // track inputs (absent = none).
+        v = 14;
     }
     match v {
         CURRENT_FORMAT_VERSION => Ok(project),
@@ -763,6 +768,34 @@ mod tests {
     }
 
     #[test]
+    fn v13_projects_are_in_four_four_and_signatures_round_trip() {
+        let p = sample_project("a.wav");
+        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 13, "project": p});
+        v["project"]
+            .as_object_mut()
+            .unwrap()
+            .remove("time_signature");
+        let loaded = parse_project(v.to_string().as_bytes()).unwrap();
+        assert_eq!(loaded.time_signature, jdance_domain::TimeSignature::COMMON);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sig.jdance");
+        let mut p = sample_project("a.wav");
+        p.time_signature = jdance_domain::TimeSignature::new(7, 8);
+        save_project(&path, &p).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"format_version\": 14"), "{text}");
+        assert_eq!(
+            load_project(&path).unwrap().time_signature,
+            p.time_signature
+        );
+
+        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 14, "project": p});
+        v["project"]["time_signature"]["denominator"] = serde_json::json!(3);
+        assert!(parse_project(v.to_string().as_bytes()).is_err(), "SIG-001");
+    }
+
+    #[test]
     fn rejects_newer_and_foreign_files() {
         let newer = br#"{"format":"jdance-project","format_version":99,"project":{}}"#;
         assert!(matches!(
@@ -915,7 +948,7 @@ mod tests {
         all.dedup();
         assert_eq!(all.len(), p.channels.len() + clips.len());
         assert_eq!(parse_project(&bytes).unwrap(), p, "deterministic");
-        // It saves and loads as v13.
+        // It saves and loads in the current format.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("m.jdance");
         save_project(&path, &p).unwrap();

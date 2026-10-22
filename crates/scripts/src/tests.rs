@@ -20,6 +20,7 @@ fn input<'a>(notes: &'a [Note], selected: &'a [usize]) -> Input<'a> {
         pattern_len: 3840,
         grid: 240,
         range: None,
+        signature: jdance_domain::TimeSignature::COMMON,
     }
 }
 

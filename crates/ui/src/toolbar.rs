@@ -3,17 +3,13 @@
 //! presets and the Tap Tempo window (§20).
 
 use crate::theme;
-use jdance_domain::{MAX_TEMPO_BPM, MIN_TEMPO_BPM, PPQ, TICKS_PER_STEP};
+use jdance_domain::{MAX_TEMPO_BPM, MIN_TEMPO_BPM, PPQ, TICKS_PER_STEP, TimeSignature};
 
-/// Ticks per 4/4 bar.
-pub(crate) const BAR_TICKS: u64 = PPQ as u64 * 4;
-
-/// `BBB:B:TTT` (bar, beat, tick within the beat), 1-based bar and beat.
-pub(crate) fn bars_text(ticks: u64) -> String {
-    let bar = ticks / BAR_TICKS + 1;
-    let beat = ticks % BAR_TICKS / u64::from(PPQ) + 1;
-    let tick = ticks % u64::from(PPQ);
-    format!("{bar:03}:{beat}:{tick:03}")
+/// `BBB:B:TTT` (bar, beat, tick within the beat), 1-based bar and beat, in
+/// the project signature (SIG-003).
+pub(crate) fn bars_text(ticks: u64, sig: TimeSignature) -> String {
+    let (bar, beat, tick) = sig.split(ticks);
+    format!("{:03}:{}:{tick:03}", bar + 1, beat + 1)
 }
 
 /// `M:SS.mmm` at `bpm`.
@@ -23,22 +19,112 @@ pub(crate) fn time_text(ticks: u64, bpm: f64) -> String {
     format!("{}:{:02}.{:03}", ms / 60_000, ms / 1000 % 60, ms % 1000)
 }
 
-/// Snap grid choices shared by the Playlist and the Piano Roll (ticks;
-/// 0 = off).
-pub(crate) const SNAPS: [(u32, &str); 6] = [
-    (TICKS_PER_STEP * 16, "Bar"),
-    (TICKS_PER_STEP * 4, "Beat"),
-    (TICKS_PER_STEP, "1/4 beat"),
-    (TICKS_PER_STEP / 2, "1/8 beat"),
-    (TICKS_PER_STEP / 4, "1/16 beat"),
-    (0, "Off"),
+/// Snap grid choices shared by the Playlist and the Piano Roll. Bar and
+/// beat follow the project signature, so the choice is kept, not its ticks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Snap {
+    Bar,
+    Beat,
+    Step,
+    HalfStep,
+    QuarterStep,
+    Off,
+}
+
+pub(crate) const SNAPS: [Snap; 6] = [
+    Snap::Bar,
+    Snap::Beat,
+    Snap::Step,
+    Snap::HalfStep,
+    Snap::QuarterStep,
+    Snap::Off,
 ];
 
-pub(crate) fn snap_name(snap: u32) -> &'static str {
+impl Snap {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Snap::Bar => "Bar",
+            Snap::Beat => "Beat",
+            Snap::Step => "Step",
+            Snap::HalfStep => "1/2 step",
+            Snap::QuarterStep => "1/4 step",
+            Snap::Off => "Off",
+        }
+    }
+
+    /// Grid in ticks; 0 = off.
+    pub(crate) fn ticks(self, sig: TimeSignature) -> u32 {
+        match self {
+            Snap::Bar => sig.bar_ticks(),
+            Snap::Beat => sig.beat_ticks(),
+            Snap::Step => TICKS_PER_STEP,
+            Snap::HalfStep => TICKS_PER_STEP / 2,
+            Snap::QuarterStep => TICKS_PER_STEP / 4,
+            Snap::Off => 0,
+        }
+    }
+}
+
+/// Name of a grid given in ticks; "Custom" when no choice matches.
+pub(crate) fn snap_name(ticks: u32, sig: TimeSignature) -> &'static str {
     SNAPS
         .iter()
-        .find(|(s, _)| *s == snap)
-        .map_or("Custom", |(_, n)| n)
+        .find(|s| s.ticks(sig) == ticks)
+        .map_or("Custom", |s| s.name())
+}
+
+/// The time signature field of the transport panel (SIG-010): shows
+/// "4/4"; a click opens numerator, denominator and common choices. Returns
+/// a new signature when one is chosen.
+pub(crate) fn signature_field(ui: &mut egui::Ui, sig: TimeSignature) -> Option<TimeSignature> {
+    let mut chosen = None;
+    let button = ui
+        .add(
+            egui::Button::new(egui::RichText::new(sig.to_string()).font(theme::mono(14.0)))
+                .fill(theme::FIELD)
+                .min_size(egui::vec2(44.0, 24.0)),
+        )
+        .on_hover_text("Time signature of the project");
+    egui::Popup::from_toggle_button_response(&button)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| {
+            ui.set_min_width(170.0);
+            ui.horizontal(|ui| {
+                let mut n = sig.numerator;
+                if ui
+                    .add(egui::DragValue::new(&mut n).range(1..=jdance_domain::MAX_NUMERATOR))
+                    .on_hover_text("Beats per bar")
+                    .changed()
+                {
+                    chosen = Some(TimeSignature::new(n, sig.denominator));
+                }
+                ui.label("/");
+                egui::ComboBox::from_id_salt("sig_denominator")
+                    .width(44.0)
+                    .selected_text(sig.denominator.to_string())
+                    .show_ui(ui, |ui| {
+                        for d in jdance_domain::DENOMINATORS {
+                            if ui
+                                .selectable_label(d == sig.denominator, d.to_string())
+                                .clicked()
+                            {
+                                chosen = Some(TimeSignature::new(sig.numerator, d));
+                            }
+                        }
+                    })
+                    .response
+                    .on_hover_text("Note value of a beat");
+            });
+            ui.separator();
+            ui.horizontal_wrapped(|ui| {
+                for c in jdance_domain::COMMON_SIGNATURES {
+                    if ui.selectable_label(c == sig, c.to_string()).clicked() {
+                        chosen = Some(c);
+                    }
+                }
+            });
+        });
+    chosen.filter(|c| *c != sig)
 }
 
 /// Taps older than this start a new measurement.
@@ -138,10 +224,25 @@ mod tests {
 
     #[test]
     fn positions() {
-        assert_eq!(bars_text(0), "001:1:000");
-        assert_eq!(bars_text(2 * BAR_TICKS + u64::from(PPQ) + 5), "003:2:005");
+        let common = TimeSignature::COMMON;
+        let bar = u64::from(common.bar_ticks());
+        assert_eq!(bars_text(0, common), "001:1:000");
+        assert_eq!(bars_text(2 * bar + u64::from(PPQ) + 5, common), "003:2:005");
+        // 6/8: a beat is an eighth.
+        let six = TimeSignature::new(6, 8);
+        assert_eq!(bars_text(u64::from(6 * PPQ / 2) + 480, six), "002:2:000");
         assert_eq!(time_text(u64::from(PPQ) * 2, 120.0), "0:01.000");
         assert_eq!(time_text(u64::from(PPQ) * 250, 120.0), "2:05.000");
+    }
+
+    #[test]
+    fn snaps_follow_the_signature() {
+        let three = TimeSignature::new(3, 4);
+        assert_eq!(Snap::Bar.ticks(three), 3 * PPQ);
+        assert_eq!(Snap::Beat.ticks(TimeSignature::new(7, 8)), PPQ / 2);
+        assert_eq!(snap_name(3 * PPQ, three), "Bar");
+        assert_eq!(snap_name(4 * PPQ, three), "Custom");
+        assert_eq!(snap_name(TICKS_PER_STEP, three), "Step");
     }
 
     #[test]

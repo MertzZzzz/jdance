@@ -13,7 +13,7 @@
 
 use crate::icons::{self, Glyph};
 use crate::piano_dialogs::{Dialog, Props};
-use crate::toolbar::{SNAPS, bars_text, snap_name};
+use crate::toolbar::{SNAPS, Snap, bars_text, snap_name};
 use crate::{Host, theme};
 use egui::{
     Color32, CornerRadius, Event, FontId, Key, PointerButton, Pos2, Rect, RichText, Sense, Stroke,
@@ -23,6 +23,7 @@ use jdance_commands::Edit;
 use jdance_commands::notes::{self, Scale, ScaleMode};
 use jdance_domain::{
     ChannelId, ChannelSource, MAX_NOTES_PER_ROW, Note, Pattern, PatternId, Project, TICKS_PER_STEP,
+    TimeSignature,
 };
 
 const KEYS: u8 = 128;
@@ -119,6 +120,8 @@ pub(crate) struct PianoRoll {
     key_h: f32,
     /// Snap in ticks (0 = off).
     snap: u32,
+    /// The project signature, refreshed on every frame (SIG-003).
+    sig: TimeSignature,
     /// Length of new notes in ticks (the last one placed or resized).
     new_len: u32,
     tool: Tool,
@@ -158,7 +161,7 @@ pub(crate) struct PianoOutput {
     pub end_gesture: bool,
     pub close: bool,
     pub select_pattern: Option<PatternId>,
-    pub snap: Option<u32>,
+    pub snap: Option<Snap>,
     /// Tools > LFO: automation points for a range of the pattern.
     pub lfo: Option<jdance_commands::note_tools::Range>,
     /// Tools > Scripts.
@@ -177,8 +180,7 @@ pub(crate) fn key_name(key: u8) -> String {
     format!("{}{}", NAMES[usize::from(key % 12)], key / 12)
 }
 
-fn length_text(ticks: u32) -> String {
-    let beat = notes::BEAT;
+fn length_text(ticks: u32, beat: u32) -> String {
     if ticks.is_multiple_of(beat) {
         format!("{} beat(s)", ticks / beat)
     } else if beat.is_multiple_of(ticks) {
@@ -244,6 +246,7 @@ impl PianoRoll {
             zoom: 28.0,
             key_h: 14.0,
             snap: TICKS_PER_STEP,
+            sig: TimeSignature::COMMON,
             new_len: TICKS_PER_STEP,
             tool: Tool::Draw,
             selection: Vec::new(),
@@ -333,6 +336,7 @@ impl PianoRoll {
             pattern_len: pattern.length_ticks() as u32,
             grid: self.last_grid,
             range,
+            signature: self.sig,
         }
     }
 
@@ -416,17 +420,18 @@ impl PianoRoll {
             }
             ui.separator();
             ui.label(RichText::new("SNAP").size(11.0).color(theme::MUTED));
-            let mut snap = self.snap;
             egui::ComboBox::from_id_salt("piano_snap")
-                .selected_text(snap_name(snap))
+                .selected_text(snap_name(self.snap, self.sig))
                 .show_ui(ui, |ui| {
-                    for (v, name) in SNAPS {
-                        ui.selectable_value(&mut snap, v, name);
+                    for v in SNAPS {
+                        if ui
+                            .selectable_label(v.ticks(self.sig) == self.snap, v.name())
+                            .clicked()
+                        {
+                            out.snap = Some(v);
+                        }
                     }
                 });
-            if snap != self.snap {
-                out.snap = Some(snap);
-            }
             ui.add(
                 egui::Slider::new(&mut self.zoom, 8.0..=96.0)
                     .show_value(false)
@@ -472,7 +477,7 @@ impl PianoRoll {
                     let tip = if quick {
                         format!(
                             "Applies at once on a {} grid",
-                            crate::toolbar::snap_name(self.last_grid)
+                            crate::toolbar::snap_name(self.last_grid, self.sig)
                         )
                     } else {
                         "Opens with a preview; Apply is one undo step".to_owned()
@@ -544,8 +549,10 @@ impl PianoRoll {
         pattern: &Pattern,
         host: &mut dyn Host,
         playhead_tick: Option<f32>,
-        snap: u32,
+        snap: Snap,
     ) -> PianoOutput {
+        self.sig = project.time_signature;
+        let snap = snap.ticks(self.sig);
         self.snap = snap;
         if snap > 0 {
             self.last_grid = snap;
@@ -579,7 +586,7 @@ impl PianoRoll {
             .max()
             .unwrap_or(0)
             .max(pattern_end)
-            + 16 * TICKS_PER_STEP;
+            + project.time_signature.bar_ticks();
         let grid_w = content_end as f32 * px_tick;
         let grid_h = f32::from(KEYS) * key_h + RULER_H;
 
@@ -637,9 +644,9 @@ impl PianoRoll {
             let last_step = ((clip.right() - grid.left()) / self.zoom).ceil() as u32;
             for s in first_step..=last_step.min(content_end / TICKS_PER_STEP) {
                 let x = x_of(s * TICKS_PER_STEP);
-                let (w, c) = if s % 16 == 0 {
+                let (w, c) = if s % self.sig.steps_per_bar() == 0 {
                     (1.5, theme::LINE_STRONG)
-                } else if s % 4 == 0 {
+                } else if s % self.sig.steps_per_beat() == 0 {
                     (1.0, theme::LINE_STRONG)
                 } else {
                     (1.0, Color32::from_rgb(0x22, 0x27, 0x2D))
@@ -762,8 +769,9 @@ impl PianoRoll {
             let ruler =
                 Rect::from_min_size(pos2(clip.left(), ruler_top), vec2(clip.width(), RULER_H));
             painter.rect_filled(ruler, CornerRadius::ZERO, theme::PANEL);
-            let bar = 16 * TICKS_PER_STEP;
-            for b in (first_step / 16)..=(last_step / 16) {
+            let bar = self.sig.bar_ticks();
+            let bar_steps = self.sig.steps_per_bar();
+            for b in (first_step / bar_steps)..=(last_step / bar_steps) {
                 let x = x_of(b * bar);
                 painter.line_segment(
                     [pos2(x, ruler_top + 12.0), pos2(x, ruler_top + RULER_H)],
@@ -817,13 +825,16 @@ impl PianoRoll {
             // Selection summary in the corner of the view.
             if !self.selection.is_empty() {
                 let p = Props::of(&self.selection);
-                let first = p.start.map(|s| bars_text(u64::from(s))).unwrap_or_default();
+                let first = p
+                    .start
+                    .map(|s| bars_text(u64::from(s), self.sig))
+                    .unwrap_or_default();
                 let len = self
                     .selection
                     .iter()
                     .map(|n| n.length)
                     .min()
-                    .map(length_text)
+                    .map(|l| length_text(l, self.sig.beat_ticks()))
                     .unwrap_or_default();
                 let key = p.key.map_or_else(|| "mixed".to_owned(), key_name);
                 let vel = p
@@ -1218,7 +1229,7 @@ impl PianoRoll {
         }
         if let Some(mut d) = self.dialog.take() {
             let idx = indices(&notes, &self.selection);
-            let r = d.show(ui.ctx(), &notes, &idx);
+            let r = d.show(ui.ctx(), &notes, &idx, self.sig);
             if let Some(h) = r.highlight {
                 self.scale = h;
             }
@@ -1421,7 +1432,7 @@ impl PianoRoll {
             return;
         }
         if dup && !sel.is_empty() {
-            let (new, added) = notes::duplicate(notes, &sel);
+            let (new, added) = notes::duplicate(notes, &sel, self.sig.beat_ticks());
             let select = added.iter().map(|&i| new[i]).collect();
             self.commit(out, pattern, new, select);
             return;
@@ -1497,10 +1508,11 @@ mod tests {
 
     #[test]
     fn lengths_read_in_beats() {
-        assert_eq!(length_text(960), "1 beat(s)");
-        assert_eq!(length_text(480), "1/2 beat");
-        assert_eq!(length_text(1200), "5 steps");
-        assert_eq!(length_text(700), "700 ticks");
+        assert_eq!(length_text(960, 960), "1 beat(s)");
+        assert_eq!(length_text(480, 960), "1/2 beat");
+        assert_eq!(length_text(1200, 960), "5 steps");
+        assert_eq!(length_text(700, 960), "700 ticks");
+        assert_eq!(length_text(960, 480), "2 beat(s)", "6/8 beat");
     }
 
     #[test]

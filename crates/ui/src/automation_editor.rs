@@ -14,10 +14,9 @@ use egui::{
 };
 use jdance_commands::Edit;
 use jdance_domain::{
-    AutoPoint, AutomationId, AutomationLane, Curve, MAX_AUTOMATION_TICKS, Project,
+    AutoPoint, AutomationId, AutomationLane, Curve, MAX_AUTOMATION_TICKS, Project, WHOLE_NOTE,
 };
 
-const BAR_TICKS: u64 = 3_840;
 const RULER_H: f32 = 18.0;
 const CANVAS_H: f32 = 200.0;
 /// Vertical padding of the envelope inside its row.
@@ -190,11 +189,12 @@ impl AutomationEditor {
                     .on_hover_text("The automated object was removed; the source has no effect");
             }
             ui.separator();
-            let mut bars = lane.length.div_ceil(BAR_TICKS).max(1);
+            let bar_ticks = u64::from(project.time_signature.bar_ticks());
+            let mut bars = lane.length.div_ceil(bar_ticks).max(1);
             let r = ui
                 .add(
                     egui::DragValue::new(&mut bars)
-                        .range(1..=MAX_AUTOMATION_TICKS / BAR_TICKS)
+                        .range(1..=MAX_AUTOMATION_TICKS / bar_ticks)
                         .suffix(" bars"),
                 )
                 .on_hover_text("Source length; clips show at most this range");
@@ -202,7 +202,7 @@ impl AutomationEditor {
                 out.gesture.push(Edit::SetAutomation {
                     id: lane.id,
                     lane: Some(AutomationLane {
-                        length: bars * BAR_TICKS,
+                        length: bars * bar_ticks,
                         ..lane.clone()
                     }),
                 });
@@ -227,9 +227,12 @@ impl AutomationEditor {
         grid: u64,
         out: &mut EditorOutput,
     ) {
-        let ppt = self.zoom / BAR_TICKS as f32;
-        let bars = lane.length.div_ceil(BAR_TICKS) + 1;
-        let width = (bars as f32 * self.zoom).max(ui.available_width());
+        // `zoom` is pixels per whole note (SIG-003).
+        let ppt = self.zoom / WHOLE_NOTE as f32;
+        let sig = project.time_signature;
+        let bar_ticks = u64::from(sig.bar_ticks());
+        let bars = lane.length.div_ceil(bar_ticks) + 1;
+        let width = (bars as f32 * bar_ticks as f32 * ppt).max(ui.available_width());
         let (rect, response) =
             ui.allocate_exact_size(vec2(width, RULER_H + CANVAS_H), Sense::click_and_drag());
         let painter = ui.painter_at(rect);
@@ -267,10 +270,11 @@ impl AutomationEditor {
             0.0,
             theme::PANEL,
         );
-        let beat_px = self.zoom / 4.0;
-        for b in 0..=bars * 4 {
+        let beat_px = sig.beat_ticks() as f32 * ppt;
+        let per_bar = u64::from(sig.numerator);
+        for b in 0..=bars * per_bar {
             let x = origin.x + b as f32 * beat_px;
-            let bar = b % 4 == 0;
+            let bar = b % per_bar == 0;
             if !bar && beat_px < 12.0 {
                 continue;
             }
@@ -283,7 +287,7 @@ impl AutomationEditor {
                 painter.text(
                     pos2(x + 3.0, origin.y + 2.0),
                     Align2::LEFT_TOP,
-                    format!("{}", b / 4 + 1),
+                    format!("{}", b / per_bar + 1),
                     theme::mono(11.0),
                     theme::MUTED,
                 );

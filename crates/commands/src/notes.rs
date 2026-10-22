@@ -6,8 +6,6 @@
 
 use jdance_domain::{MAX_PATTERN_STEPS, Note, TICKS_PER_STEP};
 
-/// Ticks per beat (960 PPQ).
-pub const BEAT: u32 = 4 * TICKS_PER_STEP;
 const LAST_START: u32 = MAX_PATTERN_STEPS * TICKS_PER_STEP;
 
 fn chosen(notes: &[Note], selected: &[usize]) -> Vec<usize> {
@@ -137,8 +135,9 @@ pub fn transpose(notes: &[Note], selected: &[usize], semitones: i32) -> Option<V
 }
 
 /// The selection repeated right after itself, shifted by its span rounded
-/// up to whole beats. Returns the new list and the indices of the copies.
-pub fn duplicate(notes: &[Note], selected: &[usize]) -> (Vec<Note>, Vec<usize>) {
+/// up to whole beats of `beat` ticks. Returns the new list and the indices
+/// of the copies.
+pub fn duplicate(notes: &[Note], selected: &[usize], beat: u32) -> (Vec<Note>, Vec<usize>) {
     let idx = chosen(notes, selected);
     let (Some(first), Some(last)) = (
         idx.iter().map(|&i| notes[i].start).min(),
@@ -146,7 +145,7 @@ pub fn duplicate(notes: &[Note], selected: &[usize]) -> (Vec<Note>, Vec<usize>) 
     ) else {
         return (notes.to_vec(), Vec::new());
     };
-    let span = (last - first).div_ceil(BEAT).max(1) * BEAT;
+    let span = (last - first).div_ceil(beat).max(1) * beat;
     paste(
         notes,
         &idx.iter().map(|&i| notes[i]).collect::<Vec<_>>(),
@@ -344,7 +343,7 @@ mod tests {
     #[test]
     fn duplicate_and_paste_keep_intervals() {
         let notes = [n(0, 240, 60), n(480, 240, 64), n(5000, 10, 70)];
-        let (d, added) = duplicate(&notes, &[0, 1]);
+        let (d, added) = duplicate(&notes, &[0, 1], jdance_domain::PPQ);
         assert_eq!(added, [3, 4]);
         assert_eq!((d[3].start, d[4].start), (960, 1440), "span 720 → one beat");
         let (p, added) = paste(&notes, &[notes[1], notes[2]], 100);

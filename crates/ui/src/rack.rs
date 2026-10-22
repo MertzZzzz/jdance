@@ -392,7 +392,8 @@ impl RackView {
         ui.horizontal(|ui| {
             ui.label(RichText::new("Channel Rack").font(theme::strong(14.0)));
             ui.label(RichText::new(&pattern.name).color(theme::MUTED));
-            let bars = f64::from(pattern.length_steps) / 16.0;
+            let bars =
+                f64::from(pattern.length_steps) / f64::from(project.time_signature.steps_per_bar());
             ui.label(
                 RichText::new(format!("{} steps · {bars} bar(s)", pattern.length_steps))
                     .color(theme::MUTED),

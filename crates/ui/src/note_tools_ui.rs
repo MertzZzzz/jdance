@@ -11,6 +11,7 @@ use jdance_commands::note_tools::{
     self as nt, ArpDirection, ArticulateMode, ChopMode, ClawMode, GenScale, Input, Insertion, Mode,
     Outcome, RandomMode, Range, Tool,
 };
+use jdance_domain::WHOLE_NOTE;
 
 const NAMES: [&str; 12] = [
     "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
@@ -18,7 +19,7 @@ const NAMES: [&str; 12] = [
 
 /// Grid choices in ticks, triplets included.
 const GRIDS: [(u32, &str); 10] = [
-    (3840, "1 bar"),
+    (WHOLE_NOTE, "1/1"),
     (1920, "1/2"),
     (960, "1/4 (beat)"),
     (640, "1/4 triplet"),
@@ -110,8 +111,8 @@ impl ToolDialog {
                     let r = self.range(input);
                     format!(
                         "Range {} – {}",
-                        bars_text(u64::from(r.start)),
-                        bars_text(u64::from(r.end))
+                        bars_text(u64::from(r.start), input.signature),
+                        bars_text(u64::from(r.end), input.signature)
                     )
                 } else if input.selected.is_empty() {
                     format!("All {scope} notes of this channel")
@@ -354,7 +355,7 @@ fn settings(
             }
             Tool::Glue(s) => {
                 ui.label("Gap tolerance");
-                ticks(ui, &mut s.gap, 3840);
+                ticks(ui, &mut s.gap, WHOLE_NOTE);
                 ui.end_row();
             }
             Tool::Flip(s) => {
@@ -427,7 +428,7 @@ fn settings(
                 ui.end_row();
                 ui.label("Window");
                 ui.horizontal(|ui| {
-                    ticks(ui, &mut s.window, 3840);
+                    ticks(ui, &mut s.window, WHOLE_NOTE);
                     ui.label(RichText::new("0 = any distance").size(11.0).color(theme::MUTED));
                 });
                 ui.end_row();
@@ -707,8 +708,8 @@ fn settings(
                         ui.end_row();
                         ui.label("Length");
                         ui.horizontal(|ui| {
-                            ticks(ui, &mut s.length_min, 3840);
-                            ticks(ui, &mut s.length_max, 3840);
+                            ticks(ui, &mut s.length_min, WHOLE_NOTE);
+                            ticks(ui, &mut s.length_max, WHOLE_NOTE);
                         });
                         ui.end_row();
                         ui.label("Velocity");
@@ -745,7 +746,7 @@ fn settings(
                 ui.end_row();
                 if s.mode == ClawMode::Shift {
                     ui.label("Shift");
-                    ui.add(egui::DragValue::new(&mut s.shift).range(-3840..=3840).suffix(" ticks"));
+                    ui.add(egui::DragValue::new(&mut s.shift).range(-(WHOLE_NOTE as i32)..=WHOLE_NOTE as i32).suffix(" ticks"));
                     ui.end_row();
                 }
             }

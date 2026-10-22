@@ -30,7 +30,7 @@ pub use lfo::*;
 pub use script::*;
 pub use transform::*;
 
-use jdance_domain::{Note, PPQ, assign_note_ids, sort_notes};
+use jdance_domain::{Note, PPQ, TimeSignature, assign_note_ids, sort_notes};
 
 /// Largest note list one tool may produce.
 pub const MAX_RESULT_NOTES: usize = 100_000;
@@ -38,8 +38,9 @@ pub const MAX_RESULT_NOTES: usize = 100_000;
 pub const RNG_VERSION: u32 = 1;
 /// Settings schema version of the tools in this module.
 pub const SETTINGS_VERSION: u32 = 1;
-pub const TICKS_PER_BEAT: u32 = PPQ;
-pub const TICKS_PER_BAR: u32 = 4 * PPQ;
+/// A 4/4 bar, for tests.
+#[cfg(test)]
+pub const TICKS_PER_BAR: u32 = TimeSignature::COMMON.bar_ticks();
 
 /// `[start, end)` in pattern ticks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +77,8 @@ pub struct Input<'a> {
     pub grid: u32,
     /// Selected time range for generators; `None` = the whole pattern.
     pub range: Option<Range>,
+    /// The project's time signature (spec 0.2.3 SIG-003).
+    pub signature: TimeSignature,
 }
 
 impl Input<'_> {
@@ -483,6 +486,7 @@ pub(crate) mod test_util {
             pattern_len: TICKS_PER_BAR,
             grid: PPQ / 4,
             range: None,
+            signature: TimeSignature::COMMON,
         }
     }
 

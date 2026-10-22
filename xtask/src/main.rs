@@ -88,7 +88,9 @@ const FORBIDDEN_EXTERNAL: &[(&str, &[&str])] = &[
 fn main() -> ExitCode {
     let cmd = std::env::args().nth(1);
     let result = match cmd.as_deref() {
-        Some("check") => check_deps().and_then(|()| check_spdx()),
+        Some("check") => check_deps()
+            .and_then(|()| check_spdx())
+            .and_then(|()| check_meter()),
         Some("gen-demo") => gen_demo(),
         _ => Err("usage: cargo xtask <check|gen-demo>".into()),
     };
@@ -234,6 +236,64 @@ fn check_spdx() -> Result<(), String> {
         Err(format!(
             "missing `{HEADER}` (LIC-001) in:\n{}",
             missing.join("\n")
+        ))
+    }
+}
+
+/// Bar lengths come from the project's time signature (spec 0.2.3
+/// SIG-003): outside the meter module, non-test code must not spell a 4/4
+/// bar.
+fn check_meter() -> Result<(), String> {
+    const PATTERNS: [&str; 6] = [
+        "3_840",
+        "3840",
+        "4 * PPQ",
+        "PPQ * 4",
+        "16 * TICKS_PER_STEP",
+        "TICKS_PER_STEP * 16",
+    ];
+    let allowed = root().join("crates/domain/src/meter.rs");
+    let mut found = Vec::new();
+    walk(&root().join("crates"), &mut |p| {
+        let in_src = p.components().any(|c| c.as_os_str() == "src");
+        if !in_src
+            || p.extension().is_none_or(|e| e != "rs")
+            || p == allowed
+            || p.file_name().is_some_and(|n| n == "tests.rs")
+        {
+            return;
+        }
+        let Ok(text) = std::fs::read_to_string(p) else {
+            return;
+        };
+        for (i, line) in text.lines().enumerate() {
+            // Test modules sit at the end of a file.
+            if line.trim_start().starts_with("#[cfg(test)]") {
+                break;
+            }
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            for pat in PATTERNS {
+                let hit = line.match_indices(pat).any(|(at, _)| {
+                    let before = line[..at].chars().next_back();
+                    let after = line[at + pat.len()..].chars().next();
+                    !before.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+                        && !after.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+                });
+                if hit {
+                    found.push(format!("{}:{}: {}", p.display(), i + 1, line.trim()));
+                }
+            }
+        }
+    });
+    if found.is_empty() {
+        println!("bar lengths: ok");
+        Ok(())
+    } else {
+        Err(format!(
+            "4/4 bar spelled outside crates/domain/src/meter.rs (SIG-003):\n{}",
+            found.join("\n")
         ))
     }
 }

@@ -391,13 +391,10 @@ pub fn add_pattern(
 ) -> Result<PatternId, EditError> {
     let id = PatternId(p.ids.next());
     let index = p.patterns.len();
-    history.execute(
-        p,
-        Edit::AddPattern {
-            pattern: Pattern::new(id, name),
-            index,
-        },
-    )?;
+    // One bar of the project signature (SIG-005).
+    let mut pattern = Pattern::new(id, name);
+    pattern.length_steps = p.time_signature.steps_per_bar();
+    history.execute(p, Edit::AddPattern { pattern, index })?;
     Ok(id)
 }
 

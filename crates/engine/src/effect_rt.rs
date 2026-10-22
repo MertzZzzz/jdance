@@ -345,6 +345,7 @@ mod tests {
     const T: Transport = Transport {
         playing: true,
         tempo_bpm: 120.0,
+        time_sig: (4, 4),
         project_time_samples: 0,
         project_time_quarters: 0.0,
         cycle: None,
