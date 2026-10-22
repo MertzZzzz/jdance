@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Audio clips and pattern clip windows in song playback (spec 0.2.0 §2,
 //! §4): position in project frames, source range, edge fades, seek into a
-//! clip, lane routing, overlap; pattern clip offset, duration and loop.
+//! clip, routing through the clip's audio channel (spec 0.2.2 ACH-010),
+//! overlap; pattern clip offset, duration and loop.
 
 use jdance_domain::{
     AssetId, AudioAsset, AudioClip, Channel, ChannelId, ChannelSource, ClipId, MixerTrack,
@@ -21,7 +22,8 @@ fn ramp(frames: usize) -> Arc<SampleBuffer> {
     Arc::new(SampleBuffer::from_interleaved(SR, 1, &data))
 }
 
-fn project_with_asset(frames: u64) -> (Project, AssetId) {
+/// A project with one asset and its audio channel; returns the channel.
+fn project_with_asset(frames: u64) -> (Project, ChannelId) {
     let mut p = Project::new();
     p.tempo_bpm = 120.0;
     let id = AssetId(p.ids.next());
@@ -35,14 +37,16 @@ fn project_with_asset(frames: u64) -> (Project, AssetId) {
         channels: 1,
         frames,
     });
-    (p, id)
+    let ch = ChannelId(p.ids.next());
+    p.channels.push(Channel::new_audio(ch, "ramp", id));
+    (p, ch)
 }
 
-fn clip(p: &mut Project, asset: AssetId, start: u64, range: (u64, u64)) -> AudioClip {
+fn clip(p: &mut Project, channel: ChannelId, start: u64, range: (u64, u64)) -> AudioClip {
     let c = AudioClip {
         id: ClipId(p.ids.next()),
         lane: p.playlist.lanes[0].id,
-        asset,
+        channel,
         start,
         source_in: range.0,
         source_out: range.1,
@@ -61,7 +65,8 @@ fn render(p: &Project, buf: &Arc<SampleBuffer>, frames: usize) -> Vec<f32> {
     let snap = compile_with(p, SR, PlayMode::Song, move |s| {
         (s.path == "ramp.wav").then(|| Arc::clone(&b))
     });
-    // Audio clips go straight into a bus: no channel pan law.
+    // An audio channel at unity volume and centered balance changes
+    // nothing (ACH-011).
     render_offline(snap, frames, || 512).left
 }
 
@@ -110,7 +115,7 @@ fn seek_into_a_clip_plays_the_matching_source_position() {
 }
 
 #[test]
-fn overlapping_clips_sum_and_lanes_route_audio_to_their_track() {
+fn overlapping_clips_sum_and_play_through_their_channel() {
     let buf = ramp(10_000);
     let (mut p, a) = project_with_asset(10_000);
     clip(&mut p, a, 0, (0, 4_000));
@@ -118,18 +123,41 @@ fn overlapping_clips_sum_and_lanes_route_audio_to_their_track() {
     let both = render(&p, &buf, 4_000);
     assert!((both[1_000] - 2.0 * frame(1_000)).abs() < 1e-6, "summed");
 
-    // Lane audio → a track at half volume → master.
+    // Channel → a track at half volume → master.
     let t = TrackId(p.ids.next());
     let mut track = MixerTrack::new(t, "Bus");
     track.volume = 0.5;
     p.mixer.tracks.push(track);
-    p.playlist.lanes[0].audio_track = t;
+    let ch = a;
+    p.channel_mut(ch).unwrap().track = t;
     let routed = render(&p, &buf, 4_000);
     assert!(
         (routed[1_000] - frame(1_000)).abs() < 1e-5,
         "{}",
         routed[1_000]
     );
+    p.channel_mut(ch).unwrap().track = TrackId::MASTER;
+
+    // Channel volume, balance and mute act on every instance.
+    p.channel_mut(ch).unwrap().volume = 0.25;
+    let quiet = render(&p, &buf, 4_000);
+    assert!((quiet[1_000] - 0.5 * frame(1_000)).abs() < 1e-6);
+    let c = p.channel_mut(ch).unwrap();
+    c.volume = 1.0;
+    c.pan = -1.0;
+    let b = Arc::clone(&buf);
+    let snap = compile_with(&p, SR, PlayMode::Song, move |_| Some(Arc::clone(&b)));
+    let out = render_offline(snap, 4_000, || 512);
+    assert!(
+        (out.left[1_000] - 2.0 * frame(1_000)).abs() < 1e-6,
+        "left keeps unity"
+    );
+    assert!(out.right.iter().all(|v| *v == 0.0), "balance hard left");
+    let c = p.channel_mut(ch).unwrap();
+    c.pan = 0.0;
+    c.muted = true;
+    assert!(render(&p, &buf, 4_000).iter().all(|v| *v == 0.0));
+    p.channel_mut(ch).unwrap().muted = false;
 
     // Lane mute silences its audio clips.
     p.playlist.lanes[0].muted = true;

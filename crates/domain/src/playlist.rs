@@ -9,7 +9,7 @@
 //!   repetitions is derived, never stored (spec 0.2.0 §4).
 //! - Clips may overlap freely; every admitted event plays.
 
-use crate::{AudioClip, AutomationId, ClipId, LaneId, Pattern, PatternId, TrackId};
+use crate::{AudioClip, AutomationId, ClipId, LaneId, Pattern, PatternId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -42,13 +42,6 @@ pub struct Lane {
     pub color: [u8; 3],
     pub muted: bool,
     pub solo: bool,
-    /// Mixer track for this lane's audio clips (default master).
-    #[serde(default = "master")]
-    pub audio_track: TrackId,
-}
-
-fn master() -> TrackId {
-    TrackId::MASTER
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,7 +140,6 @@ impl Playlist {
                     color: LANE_COLORS[i % LANE_COLORS.len()],
                     muted: false,
                     solo: false,
-                    audio_track: TrackId::MASTER,
                 })
                 .collect(),
             clips: Vec::new(),

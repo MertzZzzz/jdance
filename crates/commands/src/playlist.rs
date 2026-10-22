@@ -248,6 +248,12 @@ pub(crate) fn apply(edit: &Edit, p: &mut Project) -> Result<Edit, EditError> {
                     "the audio file is used by {used} clip(s)"
                 )));
             }
+            let channels = p.audio_channels_of(*id).count();
+            if channels > 0 {
+                return Err(arrangement_err(format!(
+                    "the audio file is used by {channels} audio channel(s)"
+                )));
+            }
             let i = p
                 .assets
                 .iter()
@@ -334,18 +340,6 @@ pub(crate) fn apply(edit: &Edit, p: &mut Project) -> Result<Edit, EditError> {
             }
             Ok(Edit::SetAudioClip(old))
         }
-        Edit::SetLaneAudioTrack(id, track) => {
-            if !p.mixer.has_track(*track) {
-                return Err(EditError::Routing(
-                    jdance_domain::RoutingError::UnknownTrack(*track),
-                ));
-            }
-            let l = lane_mut(p, *id)?;
-            Ok(Edit::SetLaneAudioTrack(
-                *id,
-                std::mem::replace(&mut l.audio_track, *track),
-            ))
-        }
         Edit::SetClipMuted(id, m) => {
             let c = clip_mut(p, *id)?;
             Ok(Edit::SetClipMuted(*id, std::mem::replace(&mut c.muted, *m)))
@@ -426,7 +420,6 @@ pub fn new_lane_edit(p: &mut Project, name: String) -> (LaneId, Edit) {
             color: LANE_COLORS[n % LANE_COLORS.len()],
             muted: false,
             solo: false,
-            audio_track: jdance_domain::TrackId::MASTER,
         },
         index: n,
     };
@@ -917,7 +910,7 @@ mod tests {
         );
     }
     #[test]
-    fn audio_assets_clips_and_lane_routing() {
+    fn audio_assets_clips_and_channel_routing() {
         let (mut p, mut h, _, lane) = setup();
         let asset = jdance_domain::AudioAsset {
             id: jdance_domain::AssetId(p.ids.next()),
@@ -930,10 +923,13 @@ mod tests {
             frames: 48_000,
         };
         h.execute(&mut p, Edit::AddAsset(asset.clone())).unwrap();
+        let (ch, add) =
+            crate::audio_channels::new_audio_channel(&mut p, "loop".into(), asset.id, 0);
+        h.execute(&mut p, add).unwrap();
         let clip = jdance_domain::AudioClip {
             id: ClipId(p.ids.next()),
             lane,
-            asset: asset.id,
+            channel: ch,
             start: 0,
             source_in: 0,
             source_out: 48_000,
@@ -959,17 +955,14 @@ mod tests {
             2080,
             "1 s at 130 BPM = 2080 ticks"
         );
-        // Lane audio routed to a track; removing the track falls back to
-        // the master, undo restores the route.
+        // The channel routed to a track; removing the track falls back to
+        // the master (ACH-051), undo restores the route.
         let t = crate::add_track(&mut h, &mut p, "Bus").unwrap();
-        h.execute(&mut p, Edit::SetLaneAudioTrack(lane, t)).unwrap();
+        h.execute(&mut p, Edit::SetChannelTrack(ch, t)).unwrap();
         h.execute(&mut p, Edit::RemoveTrack(t)).unwrap();
-        assert_eq!(
-            p.playlist.lane(lane).unwrap().audio_track,
-            jdance_domain::TrackId::MASTER
-        );
+        assert_eq!(p.channel(ch).unwrap().track, jdance_domain::TrackId::MASTER);
         h.undo(&mut p).unwrap();
-        assert_eq!(p.playlist.lane(lane).unwrap().audio_track, t);
+        assert_eq!(p.channel(ch).unwrap().track, t);
         while h.undo(&mut p).unwrap() {}
         assert!(p.assets.is_empty() && p.playlist.audio_clips.is_empty());
     }
@@ -1042,7 +1035,7 @@ mod tests {
         let c = AudioClip {
             id: ClipId(1),
             lane: LaneId(2),
-            asset: asset.id,
+            channel: jdance_domain::ChannelId(3),
             start: 48_000,
             source_in: 11_025,
             source_out: 33_075,
@@ -1068,7 +1061,7 @@ mod tests {
         assert_eq!(a.source_out, b.source_in, "one boundary");
         assert_eq!((a.source_in, b.source_out), (c.source_in, c.source_out));
         assert_eq!(b.start, a.start + a.length(&asset, 48_000));
-        assert_eq!((a.asset, b.asset), (c.asset, c.asset));
+        assert_eq!((a.channel, b.channel), (c.channel, c.channel));
         assert!(slice_audio_clip(&c, &asset, 48_000, c.start, ClipId(5)).is_none());
     }
 }

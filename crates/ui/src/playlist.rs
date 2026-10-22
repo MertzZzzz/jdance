@@ -32,8 +32,8 @@ use egui::{
 };
 use jdance_commands::{Edge, Edit, audio_clip_edge, pattern_clip_edge};
 use jdance_domain::{
-    AssetId, AudioAsset, AudioClip, AutomationClip, AutomationId, ClipId, LaneId, PatternClip,
-    PatternId, Project, SampleRef, TICKS_PER_STEP, TrackId, frames_per_tick,
+    AssetId, AudioAsset, AudioClip, AutomationClip, AutomationId, ChannelId, ClipId, LaneId,
+    PatternClip, PatternId, Project, SampleRef, TICKS_PER_STEP, frames_per_tick,
 };
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -90,6 +90,8 @@ impl Tool {
 pub(crate) enum Source {
     Pattern(PatternId),
     Asset(AssetId),
+    /// An audio channel: new clips are its instances (spec 0.2.2 ACH-043).
+    Channel(ChannelId),
     Automation(AutomationId),
 }
 
@@ -170,6 +172,10 @@ pub(crate) enum PlaylistAction {
     },
     Duplicate(Vec<ClipId>),
     MakeUnique(ClipId),
+    /// Audio clips of one channel move to a new channel (ACH-024/025).
+    MakeUniqueAudio(Vec<ClipId>),
+    /// Select (and reveal) a channel in the Channel Rack.
+    SelectChannel(ChannelId),
     AddLane,
     RenameLane(LaneId),
     Seek(u64),
@@ -303,6 +309,10 @@ fn source_len(project: &Project, source: Source) -> Option<f64> {
                 a.frames as f64 * f64::from(project.timebase_rate) / f64::from(a.sample_rate) / fpt,
             )
         }
+        Source::Channel(id) => {
+            let a = project.asset(project.channel(id)?.audio_asset()?)?.id;
+            source_len(project, Source::Asset(a))
+        }
         Source::Automation(id) => project.automation_lane(id).map(|l| l.length as f64),
     }
 }
@@ -311,6 +321,7 @@ fn source_name(project: &Project, source: Source) -> Option<String> {
     match source {
         Source::Pattern(id) => project.pattern(id).map(|p| p.name.clone()),
         Source::Asset(id) => project.asset(id).map(|a| a.name.clone()),
+        Source::Channel(id) => project.channel(id).map(|c| c.name.clone()),
         Source::Automation(id) => project.automation_lane(id).map(|l| l.name.clone()),
     }
 }
@@ -326,6 +337,7 @@ impl PlaylistView {
         let valid = match self.source {
             Some(Source::Pattern(id)) => project.pattern(id).is_some(),
             Some(Source::Asset(id)) => project.asset(id).is_some(),
+            Some(Source::Channel(id)) => project.channel(id).is_some_and(|c| c.is_audio()),
             Some(Source::Automation(id)) => project.automation_lane(id).is_some(),
             None => true,
         };
@@ -518,7 +530,6 @@ impl PlaylistView {
                 {
                     self.armed = if armed { None } else { Some(lane.id) };
                 }
-                route_box(ui, project, lane.id, lane.audio_track, out);
             }
             let (row, _) = ui.allocate_exact_size(vec2(HEADER_W, ROW_H), Sense::hover());
             let mut child = ui.new_child(
@@ -705,7 +716,7 @@ impl PlaylistView {
                     })
                 }
                 (Some(DragKind::Edge(id, e)), Item::Audio(c)) if id == c.id => {
-                    match project.asset(c.asset) {
+                    match project.clip_asset(&c) {
                         Some(a) => {
                             let at = (edge_tick as f64 * fpt).round() as i64;
                             Item::Audio(audio_clip_edge(&c, a, project.timebase_rate, e, at))
@@ -1072,13 +1083,26 @@ impl PlaylistView {
                     Item::Audio(c) => pl.admits_audio(c),
                     Item::Automation(c) => pl.admits_automation(c),
                 };
+            // Audio clips take their channel's color (ACH-041).
+            let fill = match &g.item {
+                Item::Audio(c) => project
+                    .channel_index(c.channel)
+                    .map(|i| {
+                        color(jdance_domain::color_or_default(
+                            project.channels[i].color,
+                            i,
+                        ))
+                    })
+                    .unwrap_or_else(|| color(lane.color)),
+                _ => color(lane.color),
+            };
             draw_clip(
                 ui,
                 &painter,
                 project,
                 &g,
                 r,
-                color(lane.color),
+                fill,
                 audible,
                 selected,
                 ppt,
@@ -1286,6 +1310,49 @@ impl PlaylistView {
                 ui.close();
             }
         }
+        if let Some(clip) = pl.audio_clip(id)
+            && let Some(ch) = project.channel(clip.channel)
+        {
+            let n = project.channel_clips(ch.id).count();
+            if ui
+                .button(format!("Channel: {}", ch.name))
+                .on_hover_text("Select it in the Channel Rack")
+                .clicked()
+            {
+                out.actions.push(PlaylistAction::SelectChannel(ch.id));
+                ui.close();
+            }
+            // Selected clips of the same channel go together (ACH-025).
+            let same: Vec<ClipId> =
+                std::iter::once(id)
+                    .chain(self.selection.iter().copied().filter(|s| {
+                        *s != id && pl.audio_clip(*s).is_some_and(|c| c.channel == ch.id)
+                    }))
+                    .collect();
+            if ui
+                .add_enabled(n > same.len(), egui::Button::new("Make unique"))
+                .on_hover_text("A new channel for these clips, with the same file and settings")
+                .clicked()
+            {
+                out.actions.push(PlaylistAction::MakeUniqueAudio(same));
+                ui.close();
+            }
+            ui.menu_button("Mixer track", |ui| {
+                ui.label(
+                    RichText::new(format!("Routes the channel: affects {n} clip(s)"))
+                        .size(11.0)
+                        .color(theme::MUTED),
+                );
+                for t in project.mixer.all_tracks() {
+                    let label =
+                        format!("{} · {}", crate::rack::track_number(project, t.id), t.name);
+                    if ui.selectable_label(t.id == ch.track, label).clicked() && t.id != ch.track {
+                        out.edits.push(Edit::SetChannelTrack(ch.id, t.id));
+                        ui.close();
+                    }
+                }
+            });
+        }
         if pl.audio_clip(id).is_some() {
             let automated = project
                 .lane_for(&jdance_domain::AutomationTarget::AudioClipGain(id))
@@ -1410,37 +1477,6 @@ fn arm_button(ui: &mut egui::Ui, armed: bool) -> egui::Response {
     resp
 }
 
-/// Mixer track box of a lane's audio clips (UI-VIS-036).
-fn route_box(
-    ui: &mut egui::Ui,
-    project: &Project,
-    lane: LaneId,
-    track: TrackId,
-    out: &mut PlaylistOutput,
-) {
-    let number = crate::rack::track_number(project, track);
-    let name = project
-        .mixer
-        .track(track)
-        .map_or_else(|| "?".to_owned(), |t| t.name.clone());
-    egui::ComboBox::from_id_salt(("lane_route", lane.0))
-        .width(34.0)
-        .selected_text(RichText::new(format!("{number:<2}")).font(theme::mono(11.0)))
-        .show_ui(ui, |ui| {
-            for t in project.mixer.all_tracks() {
-                let label = format!("{} · {}", crate::rack::track_number(project, t.id), t.name);
-                if ui.selectable_label(t.id == track, label).clicked() && t.id != track {
-                    out.edits.push(Edit::SetLaneAudioTrack(lane, t.id));
-                }
-            }
-        })
-        .response
-        .on_hover_text(format!(
-            "Audio clips on this lane play through mixer track {number} ({name}). \
-             Pattern clips use their channels' own routing."
-        ));
-}
-
 /// What of type `T` is dropped on `response` this frame. Unlike
 /// `Response::dnd_release_payload` it leaves a payload of another type in
 /// place (egui drops it on a type mismatch).
@@ -1504,9 +1540,12 @@ fn draw_clip(
             (pat.name.clone(), c.muted)
         }
         Item::Audio(c) => {
-            let Some(asset) = project.asset(c.asset) else {
+            let Some(asset) = project.clip_asset(c) else {
                 return;
             };
+            let name = project
+                .channel(c.channel)
+                .map_or_else(|| asset.name.clone(), |ch| ch.name.clone());
             let peaks = host.sample_peaks(
                 &SampleRef {
                     path: asset.path.clone(),
@@ -1525,7 +1564,7 @@ fn draw_clip(
                     );
                 }
             }
-            (asset.name.clone(), c.muted)
+            (name, c.muted)
         }
         Item::Automation(c) => {
             let Some(source) = project.automation_lane(c.source) else {

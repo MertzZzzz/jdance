@@ -7,7 +7,7 @@
 //! ([`crate::Project::timebase_rate`]): they keep their absolute time when
 //! the tempo changes, and nothing is time-stretched.
 
-use crate::{AssetId, ClipId, LaneId, MAX_VOLUME};
+use crate::{AssetId, ChannelId, ClipId, LaneId, MAX_VOLUME};
 use serde::{Deserialize, Serialize};
 
 /// Default project timebase in frames per second (D2).
@@ -55,7 +55,9 @@ impl AudioAsset {
 pub struct AudioClip {
     pub id: ClipId,
     pub lane: LaneId,
-    pub asset: AssetId,
+    /// The audio channel this clip is an instance of; the file is the
+    /// channel's (spec 0.2.2 ACH-002).
+    pub channel: ChannelId,
     /// Timeline start in project frames.
     pub start: u64,
     /// Source range `[source_in, source_out)` in frames of the asset.
@@ -139,7 +141,7 @@ mod tests {
         let c = AudioClip {
             id: ClipId(2),
             lane: LaneId(3),
-            asset: a.id,
+            channel: ChannelId(9),
             start: 1000,
             source_in: 0,
             source_out: 22_050,

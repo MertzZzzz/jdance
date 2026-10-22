@@ -85,7 +85,31 @@ pub struct Project {
     /// Imported audio files.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub assets: Vec<AudioAsset>,
+    /// Mixer track for the audio channels of recorded takes (spec 0.2.2
+    /// REC-003).
+    #[serde(default, skip_serializing_if = "RecordTo::is_master")]
+    pub record_to: RecordTo,
     pub ids: IdAllocator,
+}
+
+/// Where the channel of a recorded take plays (REC-003).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RecordTo {
+    #[default]
+    Master,
+    Track {
+        track: TrackId,
+    },
+    /// A new track named after the input; the setting then points at it,
+    /// so the next takes go there too.
+    NewTrack,
+}
+
+impl RecordTo {
+    pub fn is_master(&self) -> bool {
+        *self == Self::Master
+    }
 }
 
 fn default_timebase() -> u32 {
@@ -107,6 +131,7 @@ impl Project {
             automation: Vec::new(),
             timebase_rate: DEFAULT_TIMEBASE,
             assets: Vec::new(),
+            record_to: RecordTo::Master,
             ids,
         }
     }
@@ -115,10 +140,32 @@ impl Project {
         self.assets.iter().find(|a| a.id == id)
     }
 
+    /// The asset an audio clip plays: the one of its channel.
+    pub fn clip_asset(&self, clip: &AudioClip) -> Option<&AudioAsset> {
+        self.channel(clip.channel)?
+            .audio_asset()
+            .and_then(|a| self.asset(a))
+    }
+
+    /// Audio channels of `asset`, in Channel Rack order.
+    pub fn audio_channels_of(&self, asset: AssetId) -> impl Iterator<Item = &Channel> {
+        self.channels
+            .iter()
+            .filter(move |c| c.audio_asset() == Some(asset))
+    }
+
+    /// Playlist clips of channel `id` (its instances).
+    pub fn channel_clips(&self, id: ChannelId) -> impl Iterator<Item = &AudioClip> {
+        self.playlist
+            .audio_clips
+            .iter()
+            .filter(move |c| c.channel == id)
+    }
+
     /// `[start, end)` of an audio clip in (fractional) ticks at the
     /// current tempo.
     pub fn audio_clip_ticks(&self, clip: &AudioClip) -> Option<(f64, f64)> {
-        let asset = self.asset(clip.asset)?;
+        let asset = self.clip_asset(clip)?;
         let fpt = frames_per_tick(self.tempo_bpm, self.timebase_rate);
         let (a, b) = clip.interval(asset, self.timebase_rate);
         Some((a as f64 / fpt, b as f64 / fpt))
@@ -142,7 +189,10 @@ impl Project {
         self.playlist
             .audio_clips
             .iter()
-            .filter(|c| c.asset == asset)
+            .filter(|c| {
+                self.channel(c.channel)
+                    .is_some_and(|ch| ch.audio_asset() == Some(asset))
+            })
             .count()
     }
 
@@ -230,7 +280,6 @@ impl Project {
                 color: colors[self.playlist.lanes.len() % colors.len()],
                 muted: false,
                 solo: false,
-                audio_track: TrackId::MASTER,
             });
             let clip = ClipId(self.ids.next());
             self.playlist.automation_clips.push(AutomationClip {
@@ -330,8 +379,14 @@ impl Project {
             if self.playlist.lane(c.lane).is_none() {
                 return Err(format!("audio clip {} is on a missing lane", c.id.0));
             }
-            let asset = self
-                .asset(c.asset)
+            // ACH-015: every audio clip is an instance of an audio channel.
+            let channel = self
+                .channel(c.channel)
+                .filter(|ch| ch.is_audio())
+                .ok_or_else(|| format!("audio clip {} has no audio channel", c.id.0))?;
+            let asset = channel
+                .audio_asset()
+                .and_then(|a| self.asset(a))
                 .ok_or_else(|| format!("audio clip {} references a missing file", c.id.0))?;
             c.validate(asset)?;
         }
@@ -358,6 +413,28 @@ impl Project {
         if let Some(e) = self.automation_overlap() {
             return Err(e);
         }
+        // ACH-003: audio channels have a file and no steps or notes.
+        for ch in &self.channels {
+            let Some(asset) = ch.audio_asset() else {
+                continue;
+            };
+            if self.asset(asset).is_none() {
+                return Err(format!(
+                    "audio channel {:?} references a missing file",
+                    ch.name
+                ));
+            }
+            let used = self.patterns.iter().any(|p| {
+                p.row(ch.id)
+                    .is_some_and(|r| r.steps.iter().any(|s| s.on) || !r.notes.is_empty())
+            });
+            if used {
+                return Err(format!(
+                    "audio channel {:?} cannot have steps or notes",
+                    ch.name
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -369,10 +446,10 @@ impl Project {
                 return Err(RoutingError::UnknownTrack(c.track));
             }
         }
-        for l in &self.playlist.lanes {
-            if !self.mixer.has_track(l.audio_track) {
-                return Err(RoutingError::UnknownTrack(l.audio_track));
-            }
+        if let RecordTo::Track { track } = self.record_to
+            && !self.mixer.has_track(track)
+        {
+            return Err(RoutingError::UnknownTrack(track));
         }
         self.mixer.validate()
     }
@@ -548,6 +625,17 @@ impl Channel {
         }
     }
 
+    /// An audio channel: the Playlist clips of `asset` play through it
+    /// (spec 0.2.2 ACH-001). Unity volume and centered balance, so a clip
+    /// sounds as it did before channels existed.
+    pub fn new_audio(id: ChannelId, name: impl Into<String>, asset: AssetId) -> Self {
+        Self {
+            source: ChannelSource::Audio { asset },
+            volume: 1.0,
+            ..Self::new_sampler(id, name)
+        }
+    }
+
     /// A channel played by a plugin instrument (PLG-001).
     pub fn new_instrument(id: ChannelId, name: impl Into<String>, plugin: PluginSlot) -> Self {
         Self {
@@ -559,15 +647,27 @@ impl Channel {
     pub fn sample(&self) -> Option<&SampleRef> {
         match &self.source {
             ChannelSource::Sampler { sample } => sample.as_ref(),
-            ChannelSource::Plugin { .. } => None,
+            ChannelSource::Plugin { .. } | ChannelSource::Audio { .. } => None,
         }
     }
 
     pub fn instrument(&self) -> Option<&PluginSlot> {
         match &self.source {
             ChannelSource::Plugin { plugin } => Some(plugin),
-            ChannelSource::Sampler { .. } => None,
+            ChannelSource::Sampler { .. } | ChannelSource::Audio { .. } => None,
         }
+    }
+
+    /// The asset of an audio channel.
+    pub fn audio_asset(&self) -> Option<AssetId> {
+        match self.source {
+            ChannelSource::Audio { asset } => Some(asset),
+            ChannelSource::Sampler { .. } | ChannelSource::Plugin { .. } => None,
+        }
+    }
+
+    pub fn is_audio(&self) -> bool {
+        self.audio_asset().is_some()
     }
 }
 
@@ -580,6 +680,11 @@ pub enum ChannelSource {
     /// A VST3 instrument; notes come from steps and the piano roll.
     Plugin {
         plugin: PluginSlot,
+    },
+    /// The Playlist clips of one audio asset (spec 0.2.2 ACH-001); no
+    /// steps or notes.
+    Audio {
+        asset: AssetId,
     },
 }
 

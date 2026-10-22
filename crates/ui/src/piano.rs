@@ -387,6 +387,7 @@ impl PianoRoll {
                 let kind = match &c.source {
                     ChannelSource::Sampler { .. } => "Sampler",
                     ChannelSource::Plugin { .. } => "VST3",
+                    ChannelSource::Audio { .. } => "Audio",
                 };
                 format!("{} · {kind}", c.name)
             };
@@ -394,7 +395,8 @@ impl PianoRoll {
             egui::ComboBox::from_id_salt("piano_channel")
                 .selected_text(current)
                 .show_ui(ui, |ui| {
-                    for c in &project.channels {
+                    // Audio channels have no notes (ACH-003).
+                    for c in project.channels.iter().filter(|c| !c.is_audio()) {
                         if ui
                             .selectable_label(c.id == self.channel, label(c))
                             .clicked()

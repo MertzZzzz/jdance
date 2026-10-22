@@ -70,8 +70,9 @@ pub struct AudioClipRt {
     pub id: jdance_domain::ClipId,
     /// The asset converted to the engine rate.
     pub buffer: Arc<SampleBuffer>,
-    /// Index into [`PlaybackSnapshot::tracks`].
-    pub track: usize,
+    /// Index into [`PlaybackSnapshot::channels`]: the audio channel the
+    /// clip plays through (spec 0.2.2 ACH-010).
+    pub channel: usize,
     /// Timeline `[start, end)` in samples.
     pub start: u64,
     pub end: u64,
@@ -81,8 +82,6 @@ pub struct AudioClipRt {
     /// Fade lengths in samples (at least the anti-click fade).
     pub fade_in: u64,
     pub fade_out: u64,
-    /// Delay compensation: the clip sounds `delay` samples later.
-    pub delay: u64,
     /// Index into [`PlaybackSnapshot::automation`] for the clip gain.
     pub auto_gain: Option<usize>,
 }
@@ -94,7 +93,7 @@ impl AudioClipRt {
     /// ramped linearly between them, so it is block-size independent.
     pub fn render_add(&self, from: u64, l: &mut [f32], r: &mut [f32], automation: &[AutomationRt]) {
         let n = l.len() as u64;
-        let (start, end) = (self.start + self.delay, self.end + self.delay);
+        let (start, end) = (self.start, self.end);
         let (a, b) = (from.max(start), (from + n).min(end));
         if a >= b {
             return;
@@ -118,7 +117,7 @@ impl AudioClipRt {
             } else {
                 1.0
             };
-            let g = self.gain_at(t - self.delay, automation) * fin * fout;
+            let g = self.gain_at(t, automation) * fin * fout;
             let o = (t - from) as usize;
             l[o] += buf.left[i] * g;
             r[o] += buf.right[i] * g;
@@ -720,7 +719,13 @@ pub fn compile_full(
         .enumerate()
         .map(|(i, c)| {
             let track = track_of(c.track);
-            let (l, r) = pan_gains(c.pan);
+            // Audio channels carry stereo material: balance, unity at
+            // the center (ACH-011).
+            let (l, r) = if c.is_audio() {
+                balance_gains(c.pan)
+            } else {
+                pan_gains(c.pan)
+            };
             let g = if c.muted { 0.0 } else { c.volume };
             let instrument = instruments[i].take();
             let own = instrument.as_ref().map_or(0, |x| x.plugin.latency());
@@ -822,14 +827,8 @@ pub fn compile_full(
                     base += len as i64;
                 }
             }
-            let audio_end = compile_audio_clips(
-                project,
-                sample_rate,
-                &samples,
-                &track_of,
-                &in_lat,
-                &mut snapshot.audio_clips,
-            );
+            let audio_end =
+                compile_audio_clips(project, sample_rate, &samples, &mut snapshot.audio_clips);
             let end = to_sample(pl.arrangement_end()).max(audio_end);
             snapshot.end = end;
             snapshot.loop_len = end;
@@ -865,8 +864,6 @@ fn compile_audio_clips(
     project: &Project,
     sample_rate: u32,
     samples: &impl Fn(&SampleRef) -> Option<Arc<SampleBuffer>>,
-    track_of: &impl Fn(TrackId) -> usize,
-    in_lat: &[u32],
     out: &mut Vec<AudioClipRt>,
 ) -> u64 {
     let pl = &project.playlist;
@@ -874,8 +871,15 @@ fn compile_audio_clips(
     let sr = f64::from(sample_rate);
     let fade = (jdance_domain::EDGE_FADE_SECONDS * sr).round() as u64;
     let mut end = 0;
+    let channel_of = |id| {
+        project
+            .channels
+            .iter()
+            .take(MAX_CHANNELS)
+            .position(|c| c.id == id)
+    };
     for c in &pl.audio_clips {
-        let Some(asset) = project.asset(c.asset) else {
+        let Some(asset) = project.clip_asset(c) else {
             continue;
         };
         let to_dev = |frames: u64, rate: f64| (frames as f64 * sr / rate).round() as u64;
@@ -891,20 +895,20 @@ fn compile_audio_clips(
         .filter(|b| b.sample_rate == sample_rate) else {
             continue;
         };
-        let lane_track = pl.lane(c.lane).map_or(TrackId::MASTER, |l| l.audio_track);
-        let track = track_of(lane_track);
+        let Some(channel) = channel_of(c.channel) else {
+            continue;
+        };
         let bound = |f: u64| f.max(fade).min(len / 2);
         out.push(AudioClipRt {
             id: c.id,
             buffer,
-            track,
+            channel,
             start,
             end: start + len,
             source: to_dev(c.source_in, f64::from(asset.sample_rate.max(1))),
             gain: c.gain,
             fade_in: bound(to_dev(c.fade_in, tb)),
             fade_out: bound(to_dev(c.fade_out, tb)),
-            delay: u64::from(in_lat.get(track).copied().unwrap_or(0)),
             auto_gain: None,
         });
     }

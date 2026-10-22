@@ -14,7 +14,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 pub const FORMAT_TAG: &str = "jdance-project";
-pub const CURRENT_FORMAT_VERSION: u32 = 12;
+pub const CURRENT_FORMAT_VERSION: u32 = 13;
 pub const PROJECT_EXTENSION: &str = "jdance";
 
 /// Saves `project` to `path` atomically. Sample paths inside the project
@@ -195,8 +195,15 @@ fn migrate(version: u32, mut project: Value) -> Result<Value, PersistError> {
         v = 11;
     }
     if v == 11 {
+        // The audio shape changes independently of automation: convert it
+        // first, so the v12 step reads the current types.
+        project = v12_to_v13(project)?;
         project = v11_to_v12(project)?;
-        v = 12;
+        v = 13;
+    }
+    if v == 12 {
+        project = v12_to_v13(project)?;
+        v = 13;
     }
     match v {
         CURRENT_FORMAT_VERSION => Ok(project),
@@ -244,6 +251,128 @@ fn v10_to_v11(mut project: Value) -> Result<Value, PersistError> {
         obj.insert("duration".into(), (repeat * len).into());
         obj.insert("looped".into(), true.into());
     }
+    Ok(project)
+}
+
+/// v13 (0.2.2, spec ACH-061): audio clips become instances of audio
+/// channels. One channel per (file, mixer track of the clip's lane), in
+/// order of first appearance on the timeline, takes over the lane's route;
+/// lanes lose `audio_track`. Unity volume and centered balance keep the
+/// sound unchanged (ACH-063). Deterministic for a given file.
+fn v12_to_v13(mut project: Value) -> Result<Value, PersistError> {
+    use jdance_domain::{AssetId, Channel, ChannelId, TrackId};
+    let corrupt = |m: &str| PersistError::Corrupt(format!("v12 project: {m}"));
+    let u = |v: &Value, k: &str| v.get(k).and_then(Value::as_u64);
+    // Lane → mixer track of its audio clips (absent = master).
+    let mut lane_track = std::collections::BTreeMap::new();
+    if let Some(lanes) = project
+        .get_mut("playlist")
+        .and_then(|p| p.get_mut("lanes"))
+        .and_then(Value::as_array_mut)
+    {
+        for l in lanes {
+            let track = l
+                .as_object_mut()
+                .and_then(|o| o.remove("audio_track"))
+                .and_then(|t| t.as_u64())
+                .unwrap_or(TrackId::MASTER.0);
+            if let Some(id) = u(l, "id") {
+                lane_track.insert(id, track);
+            }
+        }
+    }
+    let asset_names: std::collections::BTreeMap<u64, String> = project
+        .get("assets")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|a| Some((u(a, "id")?, a.get("name")?.as_str()?.to_owned())))
+        .collect();
+    let track_names: std::collections::BTreeMap<u64, String> = project
+        .get("mixer")
+        .into_iter()
+        .flat_map(|m| {
+            m.get("master").into_iter().chain(
+                m.get("tracks")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten(),
+            )
+        })
+        .filter_map(|t| Some((u(t, "id")?, t.get("name")?.as_str()?.to_owned())))
+        .collect();
+    let Some(clips) = project
+        .get("playlist")
+        .and_then(|p| p.get("audio_clips"))
+        .and_then(Value::as_array)
+        .filter(|c| !c.is_empty())
+        .cloned()
+    else {
+        return Ok(project);
+    };
+    // (asset, track) pairs in timeline order of their first clip.
+    let mut order: Vec<(u64, u64, u64, usize)> = Vec::new(); // (start, id, asset, index)
+    let mut keys = Vec::with_capacity(clips.len());
+    for (i, c) in clips.iter().enumerate() {
+        let asset = u(c, "asset").ok_or_else(|| corrupt("audio clip without a file"))?;
+        let lane = u(c, "lane").ok_or_else(|| corrupt("audio clip without a lane"))?;
+        let track = lane_track.get(&lane).copied().unwrap_or(TrackId::MASTER.0);
+        keys.push((asset, track));
+        order.push((
+            u(c, "start").unwrap_or(0),
+            u(c, "id").unwrap_or(0),
+            asset,
+            i,
+        ));
+    }
+    order.sort_unstable();
+    let mut pairs: Vec<(u64, u64)> = Vec::new();
+    for (_, _, _, i) in &order {
+        if !pairs.contains(&keys[*i]) {
+            pairs.push(keys[*i]);
+        }
+    }
+    let mut next = project
+        .get("ids")
+        .and_then(|i| u(i, "next"))
+        .ok_or_else(|| corrupt("no ID allocator"))?;
+    let mut channels = Vec::with_capacity(pairs.len());
+    let mut channel_of = std::collections::BTreeMap::new();
+    for &(asset, track) in &pairs {
+        let base = asset_names
+            .get(&asset)
+            .cloned()
+            .unwrap_or_else(|| format!("Audio {asset}"));
+        let shared = pairs.iter().filter(|(a, _)| *a == asset).count() > 1;
+        let name = if shared {
+            let t = track_names.get(&track).map_or("?", String::as_str);
+            format!("{base} → {t}")
+        } else {
+            base
+        };
+        let id = ChannelId(next);
+        next += 1;
+        let mut ch = Channel::new_audio(id, name, AssetId(asset));
+        ch.track = TrackId(track);
+        channels.push(serde_json::to_value(&ch).map_err(|e| corrupt(&e.to_string()))?);
+        channel_of.insert((asset, track), id.0);
+    }
+    let list = project
+        .get_mut("channels")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| corrupt("no channels"))?;
+    list.extend(channels);
+    let clips = project
+        .get_mut("playlist")
+        .and_then(|p| p.get_mut("audio_clips"))
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| corrupt("no audio clips"))?;
+    for (c, key) in clips.iter_mut().zip(&keys) {
+        let obj = c.as_object_mut().ok_or_else(|| corrupt("audio clip"))?;
+        obj.remove("asset");
+        obj.insert("channel".into(), channel_of[key].into());
+    }
+    project["ids"]["next"] = next.into();
     Ok(project)
 }
 
@@ -711,6 +840,97 @@ mod tests {
             std::fs::read(&backup).unwrap(),
             serde_json::to_vec(&file).unwrap()
         );
+    }
+
+    /// A v12 file: two lanes routed to different tracks, one file on
+    /// both, another file on one (spec 0.2.2 ACH-061).
+    fn v12_audio_file() -> Value {
+        use jdance_domain::{AssetId, AudioAsset, MixerTrack, TrackId};
+        let mut p = Project::new();
+        let t = TrackId(p.ids.next());
+        p.mixer.tracks.push(MixerTrack::new(t, "Drums"));
+        let asset = |id: u64, name: &str| AudioAsset {
+            id: AssetId(id),
+            name: name.into(),
+            path: format!("assets/{name}.wav"),
+            hash: id,
+            size: 10,
+            sample_rate: 48_000,
+            channels: 2,
+            frames: 4_800,
+        };
+        let (a, b) = (p.ids.next(), p.ids.next());
+        p.assets = vec![asset(a, "loop"), asset(b, "hit")];
+        let (l1, l2) = (p.playlist.lanes[0].id.0, p.playlist.lanes[1].id.0);
+        let mut v = serde_json::to_value(&p).unwrap();
+        v["playlist"]["lanes"][0]["audio_track"] = t.0.into();
+        v["playlist"]["lanes"][1]["audio_track"] = 0.into();
+        let clip = |id: u64, lane: u64, asset: u64, start: u64| {
+            serde_json::json!({"id": id, "lane": lane, "asset": asset, "start": start,
+                "source_in": 0, "source_out": 4_800, "gain": 0.5, "muted": false})
+        };
+        let ids: Vec<u64> = (0..4).map(|_| p.ids.next()).collect();
+        v["playlist"]["audio_clips"] = serde_json::json!([
+            clip(ids[0], l2, a, 9_000),
+            clip(ids[1], l1, a, 0),
+            clip(ids[2], l1, b, 4_000),
+            clip(ids[3], l1, a, 20_000),
+        ]);
+        v["ids"]["next"] = p.ids.next().into();
+        serde_json::json!({"format": FORMAT_TAG, "format_version": 12, "project": v})
+    }
+
+    #[test]
+    fn v12_audio_clips_get_channels_with_the_lane_routes() {
+        let file = v12_audio_file();
+        let bytes = serde_json::to_vec(&file).unwrap();
+        let p = parse_project(&bytes).unwrap();
+        let names: Vec<(&str, u64)> = p
+            .channels
+            .iter()
+            .map(|c| (c.name.as_str(), c.track.0))
+            .collect();
+        let drums = p.mixer.tracks[0].id.0;
+        assert_eq!(
+            names,
+            [
+                ("loop → Drums", drums),
+                ("hit", drums),
+                ("loop → Master", 0)
+            ],
+            "timeline order of first appearance"
+        );
+        assert!(p.channels.iter().all(|c| c.volume == 1.0 && c.pan == 0.0));
+        let clips = &p.playlist.audio_clips;
+        let ch = |i: usize| p.channel(clips[i].channel).unwrap().name.clone();
+        assert_eq!(ch(0), "loop → Master");
+        assert_eq!(ch(1), "loop → Drums");
+        assert_eq!(ch(3), "loop → Drums", "same file and route share a channel");
+        assert_eq!(ch(2), "hit");
+        assert!(clips.iter().all(|c| c.gain == 0.5));
+        // New IDs do not collide with existing ones; the result is stable.
+        let mut all: Vec<u64> = p.channels.iter().map(|c| c.id.0).collect();
+        all.extend(clips.iter().map(|c| c.id.0));
+        all.sort_unstable();
+        all.dedup();
+        assert_eq!(all.len(), p.channels.len() + clips.len());
+        assert_eq!(parse_project(&bytes).unwrap(), p, "deterministic");
+        // It saves and loads as v13.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("m.jdance");
+        save_project(&path, &p).unwrap();
+        assert_eq!(load_project(&path).unwrap(), p);
+    }
+
+    #[test]
+    fn v13_rejects_clips_without_an_audio_channel() {
+        let file = v12_audio_file();
+        let mut p: Value = file["project"].clone();
+        p = migrate(12, p).unwrap();
+        p["playlist"]["audio_clips"][0]["channel"] = 999.into();
+        let bad = serde_json::json!({"format": FORMAT_TAG, "format_version": 13, "project": p});
+        let err = parse_project(&serde_json::to_vec(&bad).unwrap()).unwrap_err();
+        assert!(err.to_string().contains("no audio channel"), "{err}");
     }
 
     #[test]

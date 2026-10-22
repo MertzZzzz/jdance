@@ -5,7 +5,9 @@
 //! track, polyphony, mono), then for samplers Sample (file, waveform with
 //! start / end / loop markers, root key, gain, playback mode) and Envelope
 //! (ADSR), for plugin instruments Instrument (generic parameters and the
-//! native editor). Changing the mixer track only reroutes audio.
+//! native editor). Audio channels (spec 0.2.2 ACH-031) have only the
+//! Channel tab: level, pan, mixer track, the file and their clips.
+//! Changing the mixer track only reroutes audio.
 
 use crate::automation::AutomationRequest;
 use crate::{Host, SampleStatus, theme};
@@ -51,6 +53,9 @@ pub(crate) struct SettingsOutput {
     pub automation: Vec<AutomationRequest>,
     /// Open the Sample Selection Dialog for this channel.
     pub pick: Option<crate::library::PickFor>,
+    /// Audio channel: select its Playlist clips / open the Sample Editor.
+    pub select_clips: bool,
+    pub open_clip_editor: bool,
 }
 
 use crate::piano::key_name;
@@ -96,8 +101,10 @@ impl ChannelSettingsWindow {
         let ch = &project.channels[index];
         let color = theme::rgb(color_or_default(ch.color, index));
         let instrument = ch.instrument().is_some();
+        let audio = ch.is_audio();
         if instrument && matches!(self.tab, Tab::Sample | Tab::Envelope)
             || !instrument && self.tab == Tab::Instrument
+            || audio
         {
             self.tab = Tab::Channel;
         }
@@ -106,7 +113,13 @@ impl ChannelSettingsWindow {
             RichText::new(format!(
                 "{} · {}",
                 ch.name,
-                if instrument { "Instrument" } else { "Sampler" }
+                if instrument {
+                    "Instrument"
+                } else if audio {
+                    "Audio"
+                } else {
+                    "Sampler"
+                }
             ))
             .font(theme::strong(14.0)),
         )
@@ -120,6 +133,8 @@ impl ChannelSettingsWindow {
                 ui.painter().rect_filled(r, 3.0, color);
                 let tabs: &[(Tab, &str)] = if instrument {
                     &[(Tab::Channel, "Channel"), (Tab::Instrument, "Instrument")]
+                } else if audio {
+                    &[(Tab::Channel, "Channel")]
                 } else {
                     &[
                         (Tab::Channel, "Channel"),
@@ -221,6 +236,10 @@ impl ChannelSettingsWindow {
                 out.end_gesture |= r.drag_stopped() || r.lost_focus();
                 ui.end_row();
 
+                if ch.is_audio() {
+                    audio_rows(ui, project, ch, out);
+                    return;
+                }
                 let playback = |pitch: i32, polyphony: u16, mono: bool| Edit::SetChannelPlayback {
                     channel: id,
                     pitch,
@@ -289,6 +308,17 @@ impl ChannelSettingsWindow {
                 ui.end_row();
             });
         ui.add_space(10.0);
+        if ch.is_audio() {
+            ui.label(
+                RichText::new(
+                    "Every clip of this file in the Playlist plays through this channel: level, \
+                     pan and mixer track apply to all of them. Clip gain stays per clip.",
+                )
+                .size(12.0)
+                .color(theme::MUTED),
+            );
+            return;
+        }
         ui.label(
             RichText::new(
                 "These are the host's channel settings, saved with the project. Changing the \
@@ -713,6 +743,63 @@ fn db_text(v: f32) -> String {
     } else {
         format!("{:+.1} dB", 20.0 * v.log10())
     }
+}
+
+/// Mixer track, file and clips of an audio channel (ACH-031), inside the
+/// Channel tab grid.
+fn audio_rows(ui: &mut egui::Ui, project: &Project, ch: &Channel, out: &mut SettingsOutput) {
+    let id = ch.id;
+    ui.label("Mixer track");
+    egui::ComboBox::from_id_salt("settings_track")
+        .width(200.0)
+        .selected_text(track_label(project, ch.track))
+        .show_ui(ui, |ui| {
+            for t in project.mixer.all_tracks() {
+                if ui
+                    .selectable_label(t.id == ch.track, track_label(project, t.id))
+                    .clicked()
+                    && t.id != ch.track
+                {
+                    out.edits.push((Edit::SetChannelTrack(id, t.id), false));
+                }
+            }
+        });
+    ui.end_row();
+    ui.label("File");
+    match ch.audio_asset().and_then(|a| project.asset(a)) {
+        Some(a) => {
+            ui.label(format!(
+                "{}\n{:.2} s · {} Hz · {} channel(s)\n{}",
+                a.name,
+                a.seconds(),
+                a.sample_rate,
+                a.channels,
+                a.path
+            ));
+        }
+        None => {
+            ui.colored_label(theme::ERROR, "missing");
+        }
+    }
+    ui.end_row();
+    let clips = project.channel_clips(id).count();
+    ui.label("Clips");
+    ui.horizontal(|ui| {
+        ui.label(format!("{clips} in the Playlist"));
+        if ui
+            .add_enabled(clips > 0, egui::Button::new("Select them"))
+            .clicked()
+        {
+            out.select_clips = true;
+        }
+        if ui
+            .add_enabled(clips > 0, egui::Button::new("Sample Editor"))
+            .clicked()
+        {
+            out.open_clip_editor = true;
+        }
+    });
+    ui.end_row();
 }
 
 #[cfg(test)]

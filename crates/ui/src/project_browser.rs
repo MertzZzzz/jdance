@@ -186,6 +186,29 @@ impl ProjectBrowser {
                                 ui.close();
                             }
                         });
+                        // Its audio channels, each placing its own
+                        // instances (ACH-042).
+                        for ch in project.audio_channels_of(a.id) {
+                            let n = project.channel_clips(ch.id).count();
+                            let src = Source::Channel(ch.id);
+                            ui.horizontal(|ui| {
+                                ui.add_space(14.0);
+                                let resp = item(
+                                    ui,
+                                    &ch.name,
+                                    &format!("{n}"),
+                                    source == Some(src),
+                                )
+                                .on_hover_text(format!(
+                                    "Audio channel · {n} clip(s) · mixer track {}\nClick: place with Draw/Paint · drag into the Playlist",
+                                    crate::rack::track_number(project, ch.track)
+                                ));
+                                resp.dnd_set_drag_payload(ProjectItem(src));
+                                if resp.clicked() {
+                                    out.push(ProjectAction::Select(src));
+                                }
+                            });
+                        }
                     }
                     if ui
                         .button("+ Import…")

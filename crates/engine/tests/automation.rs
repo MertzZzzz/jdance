@@ -180,7 +180,7 @@ fn audio_clip_gain_is_automated() {
     let clip = jdance_domain::AudioClip {
         id: jdance_domain::ClipId(p.ids.next()),
         lane: p.playlist.lanes[0].id,
-        asset: asset.id,
+        channel: jdance_domain::ChannelId(p.ids.next()),
         start: 0,
         source_in: 0,
         source_out: 2 * BAR as u64,
@@ -189,6 +189,11 @@ fn audio_clip_gain_is_automated() {
         fade_in: 0,
         fade_out: 0,
     };
+    p.channels.push(jdance_domain::Channel::new_audio(
+        clip.channel,
+        "dc",
+        asset.id,
+    ));
     p.assets.push(asset);
     p.playlist.audio_clips.push(clip);
     lane(

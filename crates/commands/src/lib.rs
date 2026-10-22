@@ -5,6 +5,7 @@
 //! inverse and redo applies the inverse of the inverse. Dirty state is
 //! tracked by revision IDs so that undoing back to the saved state clears it.
 
+pub mod audio_channels;
 mod mixer;
 pub mod note_tools;
 pub mod notes;
@@ -56,6 +57,8 @@ pub enum EditError {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Edit {
     SetTempo(f64),
+    /// Mixer track for the channels of recorded takes (REC-003).
+    SetRecordTo(jdance_domain::RecordTo),
     SetStep {
         pattern: PatternId,
         channel: ChannelId,
@@ -193,8 +196,6 @@ pub enum Edit {
     SetAutomationClip(AutomationClip),
     /// Replaces an audio clip by ID (move, trim, gain, mute, fades).
     SetAudioClip(AudioClip),
-    /// Mixer track for a lane's audio clips.
-    SetLaneAudioTrack(LaneId, TrackId),
     SetClipMuted(ClipId, bool),
     /// Inserts `pattern` (a copy with a new ID) and points `clip` at it.
     MakeUnique {
@@ -214,8 +215,8 @@ pub enum Edit {
     RestoreMixer {
         mixer: Box<Mixer>,
         channel_tracks: Vec<(ChannelId, TrackId)>,
-        lane_tracks: Vec<(LaneId, TrackId)>,
         automation: Vec<AutomationLane>,
+        record_to: jdance_domain::RecordTo,
     },
     /// Adds (`lane: Some`, new id), replaces or removes (`None`) an
     /// automation source. Points are sorted on apply; a source used by
@@ -251,6 +252,7 @@ impl Edit {
     pub fn label(&self) -> &'static str {
         match self {
             Edit::SetTempo(_) => "Change tempo",
+            Edit::SetRecordTo(_) => "Change recording track",
             Edit::SetStep { .. } => "Edit step",
             Edit::SetNotes { .. } => "Edit notes",
             Edit::AddChannel { .. } => "Add channel",
@@ -309,7 +311,6 @@ impl Edit {
             Edit::AddAutomationClip(_) => "Add automation clip",
             Edit::RemoveAutomationClip(_) => "Delete automation clip",
             Edit::SetAutomationClip(_) => "Edit automation clip",
-            Edit::SetLaneAudioTrack(..) => "Route lane audio",
             Edit::SetClipMuted(..) => "Mute clip",
             Edit::MakeUnique { .. } => "Make unique",
             Edit::SetLoop { .. } => "Change loop",
@@ -348,6 +349,14 @@ impl Edit {
     /// left unchanged.
     pub fn apply(&self, p: &mut Project) -> Result<Edit, EditError> {
         match self {
+            Edit::SetRecordTo(to) => {
+                if let jdance_domain::RecordTo::Track { track } = to
+                    && !p.mixer.has_track(*track)
+                {
+                    return Err(EditError::Routing(RoutingError::UnknownTrack(*track)));
+                }
+                Ok(Edit::SetRecordTo(std::mem::replace(&mut p.record_to, *to)))
+            }
             Edit::SetTempo(bpm) => {
                 if !(MIN_TEMPO_BPM..=MAX_TEMPO_BPM).contains(bpm) {
                     return Err(EditError::OutOfRange(*bpm));
@@ -465,6 +474,19 @@ impl Edit {
                         channel.track,
                     )));
                 }
+                if let Some(asset) = channel.audio_asset() {
+                    if p.asset(asset).is_none() {
+                        return Err(EditError::Arrangement(format!(
+                            "audio channel {:?} references a missing file",
+                            channel.name
+                        )));
+                    }
+                    if !rows.is_empty() {
+                        return Err(EditError::Arrangement(
+                            "an audio channel has no steps or notes".into(),
+                        ));
+                    }
+                }
                 for (pid, _) in rows {
                     if p.pattern(*pid).is_none() {
                         return Err(EditError::NoSuchPattern(*pid));
@@ -482,6 +504,13 @@ impl Edit {
             }
             Edit::RemoveChannel(id) => {
                 let index = p.channel_index(*id).ok_or(EditError::NoSuchChannel(*id))?;
+                // ACH-015: the clips go first (one batch), never orphaned.
+                let clips = p.channel_clips(*id).count();
+                if clips > 0 {
+                    return Err(EditError::Arrangement(format!(
+                        "the channel still has {clips} clip(s) in the Playlist"
+                    )));
+                }
                 let channel = p.channels.remove(index);
                 let mut rows = Vec::new();
                 for pat in &mut p.patterns {
@@ -577,7 +606,7 @@ impl Edit {
                 let ch = p.channel_mut(*id).ok_or(EditError::NoSuchChannel(*id))?;
                 let jdance_domain::ChannelSource::Sampler { sample: slot } = &mut ch.source else {
                     return Err(EditError::Arrangement(
-                        "an instrument channel has no sample".into(),
+                        "only a sampler channel has a sample".into(),
                     ));
                 };
                 Ok(Edit::SetChannelSample(
@@ -634,7 +663,6 @@ impl Edit {
             | Edit::AddAutomationClip(_)
             | Edit::RemoveAutomationClip(_)
             | Edit::SetAutomationClip(_)
-            | Edit::SetLaneAudioTrack(..)
             | Edit::MakeUnique { .. }
             | Edit::SetLoop { .. }
             | Edit::RestoreArrangement { .. } => playlist::apply(self, p),

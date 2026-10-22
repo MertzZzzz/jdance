@@ -441,7 +441,7 @@ impl PluginHost {
             .iter_mut()
             .filter_map(|c| match &mut c.source {
                 ChannelSource::Plugin { plugin } => Some((PluginTarget::Channel(c.id), plugin)),
-                ChannelSource::Sampler { .. } => None,
+                ChannelSource::Sampler { .. } | ChannelSource::Audio { .. } => None,
             });
         for (target, slot) in inserts.chain(channels) {
             let Some(live) = self.live.get_mut(&target) else {

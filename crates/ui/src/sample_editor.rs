@@ -73,6 +73,14 @@ struct View {
 }
 
 impl SampleEditor {
+    /// The clip being edited, if the editor is open for one.
+    pub fn clip(&self) -> Option<ClipId> {
+        match self.target {
+            Target::Clip(id) => Some(id),
+            Target::Asset(_) | Target::File(_) => None,
+        }
+    }
+
     pub fn for_clip(c: &AudioClip) -> Self {
         Self::new(Target::Clip(c.id))
     }
@@ -92,7 +100,7 @@ impl SampleEditor {
         match &self.target {
             Target::Clip(id) => {
                 let clip = *project.playlist.audio_clip(*id)?;
-                let asset = project.asset(clip.asset)?.clone();
+                let asset = project.clip_asset(&clip)?.clone();
                 Some(View {
                     name: asset.name.clone(),
                     path: SampleRef {

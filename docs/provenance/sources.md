@@ -20,7 +20,7 @@
     `basics_shortcuts.htm`, `menu_view.htm`, `menu_patterns.htm`,
     `recording_audio.htm`
   (все — под `https://www.image-line.com/fl-studio-learning/fl-studio-online-manual/`).
-- Для `docs/spec/spec-0.3.0.md` (2026-10-22, тоже по выдержкам поисковой
+- Для `docs/spec/spec-0.2.2.md` (2026-10-22, тоже по выдержкам поисковой
   выдачи): `html/playlist_audioclip.htm`, `chansettings_sampler.htm`,
   `recording_audio.htm`, `envsettings_audio.htm`, `app_wiz3.htm`,
   `mixer_mixermenu.htm`; ответы на форуме Image-Line о маршруте записанных

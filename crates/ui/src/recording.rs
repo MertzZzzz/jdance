@@ -28,7 +28,14 @@ impl RecordingPanel {
     }
 
     /// Returns `false` when closed.
-    pub fn window(&mut self, ctx: &egui::Context, host: &mut dyn Host) -> bool {
+    /// `edits` receives project changes (the track for takes, REC-003).
+    pub fn window(
+        &mut self,
+        ctx: &egui::Context,
+        host: &mut dyn Host,
+        project: &jdance_domain::Project,
+        edits: &mut Vec<jdance_commands::Edit>,
+    ) -> bool {
         let mut open = true;
         let meter = self.update_meter(host);
         egui::Window::new("Recording")
@@ -96,6 +103,9 @@ impl RecordingPanel {
                         ui.end_row();
                         ui.label("Level");
                         input_meter(ui, meter, 260.0);
+                        ui.end_row();
+                        ui.label("To track");
+                        record_to_box(ui, project, edits);
                         ui.end_row();
                         ui.label("Offset");
                         ui.add(
@@ -296,4 +306,50 @@ impl RecoveryDialog {
         self.files.retain(|f| !out.iter().any(|(p, _)| p == f));
         out
     }
+}
+
+/// REC-003: the mixer track of the channels of new takes — the master, a
+/// track, or a new track named after the input.
+fn record_to_box(
+    ui: &mut egui::Ui,
+    project: &jdance_domain::Project,
+    edits: &mut Vec<jdance_commands::Edit>,
+) {
+    use jdance_domain::RecordTo;
+    let label = |to: RecordTo| match to {
+        RecordTo::Master => "Master".to_owned(),
+        RecordTo::NewTrack => "New track (named after the input)".to_owned(),
+        RecordTo::Track { track } => {
+            let name = project
+                .mixer
+                .track(track)
+                .map_or_else(|| "?".to_owned(), |t| t.name.clone());
+            format!("{} · {name}", crate::rack::track_number(project, track))
+        }
+    };
+    let current = project.record_to;
+    egui::ComboBox::from_id_salt("rec_to")
+        .width(260.0)
+        .selected_text(label(current))
+        .show_ui(ui, |ui| {
+            let options = std::iter::once(RecordTo::Master)
+                .chain(
+                    project
+                        .mixer
+                        .tracks
+                        .iter()
+                        .map(|t| RecordTo::Track { track: t.id }),
+                )
+                .chain(std::iter::once(RecordTo::NewTrack));
+            for to in options {
+                if ui.selectable_label(to == current, label(to)).clicked() && to != current {
+                    edits.push(jdance_commands::Edit::SetRecordTo(to));
+                }
+            }
+        })
+        .response
+        .on_hover_text(
+            "Each take becomes an audio channel in the Channel Rack; it plays through this \
+             mixer track",
+        );
 }

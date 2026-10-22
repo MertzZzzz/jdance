@@ -587,10 +587,11 @@ impl EngineProcessor {
                     cursor = offset;
                     trigger(snap, voices, voice_serial, feedback, &e);
                 }
-                // Audio clips of this segment, straight into their buses.
+                // Audio clips of this segment into their channels; the
+                // channel's volume, pan, mute and delay compensation follow.
                 let seg = (seg_end - p) as usize;
                 for c in &snap.audio_clips {
-                    let (l, r) = inputs.get_mut(c.track, done + seg);
+                    let (l, r) = channels.get_mut(c.channel, done + seg);
                     c.render_add(p, &mut l[done..], &mut r[done..], &snap.automation);
                 }
                 done += seg;

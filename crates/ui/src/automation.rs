@@ -161,7 +161,7 @@ pub(crate) fn label(
             "Clip gain".into(),
             p.playlist
                 .audio_clip(*c)
-                .and_then(|c| p.asset(c.asset))
+                .and_then(|c| p.clip_asset(c))
                 .map_or_else(|| "?".to_owned(), |a| a.name.clone()),
         ),
     }
