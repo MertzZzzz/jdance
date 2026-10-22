@@ -940,8 +940,12 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             ui.selectable_value(&mut self.song_mode, true, "Song")
                 .on_hover_text("Play the playlist arrangement");
             ui.separator();
-            // Position; during a count-in the beats left (MET-022).
-            let ticks = transport.position_ticks.unwrap_or(0);
+            // Position; stopped in song mode the caret; during a count-in
+            // the beats left (MET-022).
+            let ticks = match transport.position_ticks {
+                Some(p) if transport.playing || !self.song_mode => p,
+                _ => self.caret,
+            };
             let text = if counting {
                 format!("— {} —", transport.count_in)
             } else if self.time_display {
@@ -2305,7 +2309,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
         let mut m = self.host.metronome();
         let before = m;
         let r = ui
-            .toggle_value(&mut m.on, "♩")
+            .toggle_value(&mut m.on, "Metro")
             .on_hover_text("Metronome (Ctrl+M) · right-click: level");
         r.context_menu(|ui| metronome_settings_ui(ui, &mut m));
         ui.toggle_value(&mut m.count_in, "1·2·3·4")

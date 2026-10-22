@@ -104,14 +104,17 @@ fn monitor_toggle(ui: &mut egui::Ui, t: &MixerTrack, view: &mut MixerView, out: 
     let Some(input) = t.input.filter(|_| !t.is_master()) else {
         return;
     };
-    let mut on = t.monitor;
+    let width = ui.available_width().clamp(40.0, 120.0);
     let r = ui
-        .toggle_value(
-            &mut on,
-            RichText::new(format!("Mon · {}", input.short_label())).size(10.0),
+        .add_sized(
+            [width, 18.0],
+            egui::Button::selectable(t.monitor, RichText::new(input.short_label()).size(9.5)),
         )
-        .on_hover_text("Hear the input through this track (its effects, fader and sends)");
-    if r.changed() {
+        .on_hover_text(
+            "Input of this track. Click: hear it through the track (its effects, fader and sends)",
+        );
+    if r.clicked() {
+        let on = !t.monitor;
         if on && !view.monitor_warned {
             view.confirm_monitor = Some(t.id);
         } else {
@@ -400,10 +403,12 @@ fn strip(
                     );
                 }
             });
-            // Input and monitoring (INP-001, MON-001).
-            if t.input.is_some() {
-                ui.horizontal(|ui| monitor_toggle(ui, t, view, out));
-            }
+            // Input and monitoring (INP-001, MON-001); every strip keeps
+            // the row so the faders line up.
+            let (row, _) = ui.allocate_exact_size(vec2(width, 22.0), Sense::hover());
+            let mut cell =
+                ui.new_child(egui::UiBuilder::new().max_rect(row.shrink2(vec2(2.0, 2.0))));
+            monitor_toggle(&mut cell, t, view, out);
             // 4. Pan.
             ui.horizontal(|ui| {
                 ui.add_space((width - 26.0) / 2.0);
