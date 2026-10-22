@@ -198,3 +198,15 @@ impl crate::Host for StubHost {
         Vec::new()
     }
 }
+
+/// A project store that never loads.
+pub(crate) struct NoStore;
+
+impl crate::ProjectStore for NoStore {
+    fn load(&self, _: &std::path::Path) -> Result<jdance_domain::Project, String> {
+        Err("none".into())
+    }
+    fn save(&self, _: &std::path::Path, _: &jdance_domain::Project) -> Result<(), String> {
+        Ok(())
+    }
+}

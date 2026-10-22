@@ -9,7 +9,9 @@ use jdance_domain::{
     ClipId, ExportOptions, ExportRange, MAX_REPEAT, PatternClip, Playlist, Project, SampleRef,
 };
 use jdance_dsp::SampleBuffer;
-use jdance_engine::{OfflineRender, PlayMode, PluginRt, compile_full, render_offline_with};
+use jdance_engine::{
+    OfflineRender, PlayMode, PluginRt, compile_full, render_offline_with, tick_to_sample,
+};
 use jdance_persistence::{read_wav, resolve_sample_path, write_wav};
 use jdance_plugin_api::ProcessSetupInfo;
 use std::collections::HashMap;
@@ -64,8 +66,54 @@ fn export_project(project: &Project, range: ExportRange) -> Result<Project, Stri
             ));
             p.playlist = playlist;
         }
+        ExportRange::Selection { start, end } => {
+            if end <= start {
+                return Err("the selection is empty; nothing to export".into());
+            }
+            p.playlist.loop_enabled = false;
+            cut_at(&mut p, end);
+        }
     }
     Ok(p)
+}
+
+/// Frames of the anti-click fade where a selection render cuts an audio
+/// clip (EXP-005).
+const CUT_FADE_FRAMES: u64 = 64;
+
+/// Nothing sounds from tick `end` on (EXP-005): later clips go, clips
+/// across it end there. Notes cut by a clip end get their note-off there;
+/// audio clips end with a short fade.
+fn cut_at(p: &mut Project, end: u64) {
+    let pl = &mut p.playlist;
+    pl.clips.retain(|c| c.start < end);
+    for c in &mut pl.clips {
+        c.duration = c.duration.min(end - c.start);
+    }
+    pl.automation_clips.retain(|c| c.start < end);
+    for c in &mut pl.automation_clips {
+        c.duration = c.duration.min(end - c.start);
+    }
+    let fpt = jdance_domain::frames_per_tick(p.tempo_bpm, p.timebase_rate);
+    let end_frame = (end as f64 * fpt).round() as u64;
+    let timebase = p.timebase_rate;
+    let mut clips = std::mem::take(&mut p.playlist.audio_clips);
+    clips.retain(|c| c.start < end_frame);
+    for c in &mut clips {
+        let Some(asset) = p.clip_asset(c) else {
+            continue;
+        };
+        let len = c.length(asset, timebase);
+        if c.start + len <= end_frame {
+            continue;
+        }
+        let keep = end_frame - c.start;
+        let src = (keep as f64 * f64::from(asset.sample_rate) / f64::from(timebase.max(1))).round()
+            as u64;
+        c.source_out = (c.source_in + src.max(1)).min(c.source_out);
+        c.fade_out = c.fade_out.max(CUT_FADE_FRAMES.min(keep));
+    }
+    p.playlist.audio_clips = clips;
 }
 
 /// Estimated effect tail of the project, for the export dialog warning.
@@ -185,8 +233,17 @@ pub fn render_project_with(
     let tail_warning = options.tail_warning(snapshot.tail_seconds());
     let latency = snapshot.latency as usize;
     let tail = (f64::from(options.tail()) * f64::from(sample_rate)).round() as u64;
-    let frames =
-        usize::try_from(snapshot.end + tail).map_err(|_| "render is too long".to_owned())?;
+    // A selection renders from the song start and drops what comes before
+    // it, so it sounds as it does in the song (EXP-004/006).
+    let (skip, body_end) = match options.range {
+        ExportRange::Selection { start, end } => (
+            tick_to_sample(start, project.tempo_bpm, sample_rate),
+            tick_to_sample(end, project.tempo_bpm, sample_rate),
+        ),
+        _ => (0, snapshot.end),
+    };
+    let skip = usize::try_from(skip).map_err(|_| "render is too long".to_owned())?;
+    let frames = usize::try_from(body_end + tail).map_err(|_| "render is too long".to_owned())?;
     let total = (frames + latency).max(1);
     let mut audio = render_offline_with(
         snapshot,
@@ -197,8 +254,8 @@ pub fn render_project_with(
     .ok_or_else(|| CANCELLED.to_owned())?;
     // Instances are released after the render, controllers last.
     drop(controllers);
-    audio.left.drain(..latency);
-    audio.right.drain(..latency);
+    audio.left.drain(..latency + skip);
+    audio.right.drain(..latency + skip);
     Ok(RenderOutcome {
         audio,
         warnings,
@@ -868,5 +925,158 @@ mod tests {
             x.1 = v(0.2);
         }
         assert_eq!(blocks[3], want, "loop wrap jumps back at its exact offset");
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+    use jdance_domain::{
+        AssetId, AudioAsset, AudioClip, Channel, ChannelId, Effect, EffectKind, ExportFormat,
+        Insert, InsertId,
+    };
+    use jdance_persistence::WavExportFormat;
+    use jdance_test_support::{click, step_project};
+
+    const RATE: u32 = 48_000;
+    /// 120 BPM: 25 samples per tick.
+    const SPT: u64 = 25;
+
+    /// A click on every bar for 4 bars, optionally into a long reverb.
+    fn song(reverb: bool) -> (tempfile::TempDir, Project) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("samples")).unwrap();
+        let s = click(RATE, 4_000);
+        write_wav(
+            &dir.path().join("samples/0.wav"),
+            RATE,
+            &s.left,
+            &s.right,
+            WavExportFormat::Float32,
+        )
+        .unwrap();
+        let mut p = step_project(120.0, &[&[0]]);
+        p.channels[0].pan = 0.0;
+        let lane = p.playlist.lanes[0].id;
+        let clip = PatternClip::repeating(ClipId(p.ids.next()), lane, &p.patterns[0], 0, 4);
+        p.playlist.clips.push(clip);
+        if reverb {
+            p.mixer.master.inserts.push(Insert {
+                id: InsertId(p.ids.next()),
+                bypass: false,
+                effect: Effect::new(EffectKind::Reverb).with("decay", 6.0),
+                sidechain: None,
+            });
+        }
+        (dir, p)
+    }
+
+    fn opts(range: ExportRange) -> ExportOptions {
+        ExportOptions {
+            range,
+            tail_seconds: 1.0,
+            format: ExportFormat::Float32,
+            mp3: None,
+        }
+    }
+
+    #[test]
+    fn a_selection_is_the_same_part_of_the_song_render() {
+        // EXP-004/006: from bar 2 beat 2 to bar 4, with the reverb of the
+        // first click and the second bar's click still sounding.
+        let (dir, mut p) = song(true);
+        p.playlist.loop_range = Some((0, 3840));
+        p.playlist.loop_enabled = true;
+        let (a, b) = (3840 + 960, 3 * 3840);
+        let render = |range| {
+            render_project(&p, Some(dir.path()), RATE, &opts(range), None)
+                .unwrap()
+                .audio
+        };
+        let full = render(ExportRange::Song);
+        let sel = render(ExportRange::Selection { start: a, end: b });
+        let (sa, sb) = ((a * SPT) as usize, (b * SPT) as usize);
+        assert_eq!(
+            sel.left.len(),
+            sb - sa + RATE as usize,
+            "selection + 1 s tail"
+        );
+        for i in 0..sb - sa {
+            assert!(
+                (sel.left[i] - full.left[sa + i]).abs() < 1e-6
+                    && (sel.right[i] - full.right[sa + i]).abs() < 1e-6,
+                "sample {i}"
+            );
+        }
+        assert!(
+            sel.left[..100].iter().any(|v| v.abs() > 1e-6),
+            "the reverb from before"
+        );
+    }
+
+    #[test]
+    fn nothing_starts_after_the_selection_and_the_loop_is_ignored() {
+        let (dir, mut p) = song(false);
+        p.playlist.loop_range = Some((3840, 2 * 3840));
+        p.playlist.loop_enabled = true;
+        let range = ExportRange::Selection {
+            start: 3840,
+            end: 2 * 3840 + 960,
+        };
+        let sel = render_project(&p, Some(dir.path()), RATE, &opts(range), None)
+            .unwrap()
+            .audio;
+        let onsets: Vec<usize> = (0..sel.left.len())
+            .filter(|&i| sel.left[i] != 0.0 && (i == 0 || sel.left[i - 1] == 0.0))
+            .collect();
+        // Bar 2's click at 0 and bar 3's inside the selection; not bar 4's
+        // (after the end), and no loop back.
+        assert_eq!(onsets, [0, (3840 * SPT) as usize]);
+        let empty = ExportRange::Selection { start: 10, end: 10 };
+        assert!(render_project(&p, Some(dir.path()), RATE, &opts(empty), None).is_err());
+    }
+
+    #[test]
+    fn an_audio_clip_across_the_end_is_cut_with_a_fade() {
+        let mut p = Project::new();
+        let asset = AssetId(p.ids.next());
+        p.assets.push(AudioAsset {
+            id: asset,
+            name: "a".into(),
+            path: "a.wav".into(),
+            hash: 0,
+            size: 0,
+            sample_rate: p.timebase_rate,
+            channels: 1,
+            frames: 1_000_000,
+        });
+        let ch = ChannelId(p.ids.next());
+        p.channels.push(Channel::new_audio(ch, "a", asset));
+        let lane = p.playlist.lanes[0].id;
+        let clip = |id, start| AudioClip {
+            id: ClipId(id),
+            lane,
+            channel: ch,
+            start,
+            source_in: 100,
+            source_out: 1_000_000,
+            gain: 1.0,
+            muted: false,
+            fade_in: 0,
+            fade_out: 0,
+        };
+        let fpt = jdance_domain::frames_per_tick(p.tempo_bpm, p.timebase_rate);
+        let end = 3840;
+        let end_frame = (end as f64 * fpt).round() as u64;
+        p.playlist.audio_clips = vec![clip(1, 1000), clip(2, end_frame)];
+        cut_at(&mut p, end);
+        assert_eq!(
+            p.playlist.audio_clips.len(),
+            1,
+            "the clip from the end on goes"
+        );
+        let c = &p.playlist.audio_clips[0];
+        assert_eq!(c.source_out, 100 + end_frame - 1000);
+        assert_eq!(c.fade_out, CUT_FADE_FRAMES);
     }
 }

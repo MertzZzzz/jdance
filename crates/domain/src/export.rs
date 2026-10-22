@@ -16,6 +16,9 @@ pub enum ExportRange {
     Song,
     /// One pattern played `loops` times.
     Pattern { pattern: PatternId, loops: u32 },
+    /// The playlist time selection `[start, end)` in ticks, once, sounding
+    /// as it does in the song (spec 0.2.4 EXP-004).
+    Selection { start: u64, end: u64 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

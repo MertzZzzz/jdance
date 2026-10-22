@@ -70,6 +70,44 @@ pub trait ProjectStore {
     }
 }
 
+/// The kind of an export range, remembered for the session (EXP-002).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RangeKind {
+    Song,
+    Pattern,
+    Selection,
+}
+
+impl RangeKind {
+    fn of(range: ExportRange) -> Self {
+        match range {
+            ExportRange::Song => Self::Song,
+            ExportRange::Pattern { .. } => Self::Pattern,
+            ExportRange::Selection { .. } => Self::Selection,
+        }
+    }
+}
+
+/// "Bars 5:1 – 9:1 (4 bars, 0:08.000)" (EXP-003).
+fn selection_text(start: u64, end: u64, project: &Project) -> String {
+    let sig = project.time_signature;
+    let at = |t: u64| {
+        let (bar, beat, _) = sig.split(t);
+        format!("{}:{}", bar + 1, beat + 1)
+    };
+    let (bars, beats, _) = sig.split(end - start);
+    let mut length = format!("{bars} bar{}", if bars == 1 { "" } else { "s" });
+    if beats > 0 {
+        length += &format!(" {beats} beat{}", if beats == 1 { "" } else { "s" });
+    }
+    format!(
+        "Bars {} – {} ({length}, {})",
+        at(start),
+        at(end),
+        toolbar::time_text(end - start, project.tempo_bpm)
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RenameTarget {
     Channel(ChannelId),
@@ -182,6 +220,8 @@ pub struct JdanceApp<H: Host, S: ProjectStore> {
     sync_needed: bool,
     /// Open export dialog: options and the estimated effect tail.
     export_dialog: Option<(ExportOptions, f32)>,
+    /// Range chosen in the last export of the session (EXP-002).
+    export_range_kind: Option<RangeKind>,
     export_loops: u32,
     export_tail: f32,
     export_format: ExportFormat,
@@ -269,6 +309,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             allow_close: false,
             sync_needed: true,
             export_dialog: None,
+            export_range_kind: None,
             export_loops: 4,
             export_tail: DEFAULT_EXPORT_TAIL_SECONDS,
             export_format: ExportFormat::default(),
@@ -423,15 +464,31 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
         }
     }
 
-    fn open_export_dialog(&mut self) {
-        let range = if self.song_mode {
-            ExportRange::Song
-        } else {
-            ExportRange::Pattern {
+    /// The Playlist time selection, when it has a length.
+    fn selection(&self) -> Option<(u64, u64)> {
+        self.project.playlist.loop_range.filter(|(a, b)| b > a)
+    }
+
+    fn export_range(&self, kind: RangeKind) -> ExportRange {
+        match (kind, self.selection()) {
+            (RangeKind::Selection, Some((start, end))) => ExportRange::Selection { start, end },
+            (RangeKind::Pattern, _) => ExportRange::Pattern {
                 pattern: self.current_pattern,
                 loops: self.export_loops,
-            }
+            },
+            _ => ExportRange::Song,
+        }
+    }
+
+    /// The export dialog with `kind`, else the last range of the session,
+    /// else the current mode's (EXP-002).
+    fn open_export_dialog(&mut self, kind: Option<RangeKind>) {
+        let mode = if self.song_mode {
+            RangeKind::Song
+        } else {
+            RangeKind::Pattern
         };
+        let range = self.export_range(kind.or(self.export_range_kind).unwrap_or(mode));
         let options = ExportOptions {
             range,
             tail_seconds: self.export_tail,
@@ -447,6 +504,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             return;
         };
         let song_empty = self.project.arrangement_end_ticks() == 0;
+        let selection = self.selection();
         let mut choice = None;
         egui::Modal::new(egui::Id::unique("export")).show(ctx, |ui| {
             ui.heading("Export audio");
@@ -455,18 +513,31 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 .show(ui, |ui| {
                     ui.label("Range");
                     ui.horizontal(|ui| {
-                        let song = matches!(options.range, ExportRange::Song);
-                        if ui.selectable_label(song, "Song").clicked() {
-                            options.range = ExportRange::Song;
-                        }
-                        if ui.selectable_label(!song, "Pattern").clicked() {
-                            options.range = ExportRange::Pattern {
-                                pattern: self.current_pattern,
-                                loops: self.export_loops,
-                            };
+                        let kind = RangeKind::of(options.range);
+                        for (k, name) in [
+                            (RangeKind::Song, "Song"),
+                            (RangeKind::Pattern, "Pattern"),
+                            (RangeKind::Selection, "Selection"),
+                        ] {
+                            let enabled = k != RangeKind::Selection || selection.is_some();
+                            if ui
+                                .add_enabled(enabled, egui::Button::selectable(kind == k, name))
+                                .on_disabled_hover_text(
+                                    "Shift+drag on the Playlist ruler to select a range",
+                                )
+                                .clicked()
+                            {
+                                options.range = self.export_range(k);
+                            }
                         }
                     });
                     ui.end_row();
+                    if let ExportRange::Selection { start, end } = options.range {
+                        // EXP-003.
+                        ui.label("Selection");
+                        ui.label(selection_text(start, end, &self.project));
+                        ui.end_row();
+                    }
                     if let ExportRange::Pattern { pattern, loops } = &mut options.range {
                         let name = self
                             .project
@@ -555,6 +626,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
         if let ExportRange::Pattern { loops, .. } = options.range {
             self.export_loops = loops;
         }
+        self.export_range_kind = Some(RangeKind::of(options.range));
         self.export_tail = options.tail_seconds;
         self.export_format = options.format;
         self.export_mp3 = options.mp3;
@@ -571,14 +643,31 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
 
     fn export(&mut self, options: ExportOptions) {
         let ext = options.extension();
-        let (filter, name) = if options.mp3.is_some() {
-            ("MP3 audio", "render.mp3")
+        let filter = if options.mp3.is_some() {
+            "MP3 audio"
         } else {
-            ("WAV audio", "render.wav")
+            "WAV audio"
+        };
+        // "<project> (bars 5-9).wav" for a selection (EXP-008).
+        let name = match options.range {
+            ExportRange::Selection { start, end } => {
+                let sig = self.project.time_signature;
+                let stem = self
+                    .path
+                    .as_ref()
+                    .and_then(|p| p.file_stem())
+                    .map_or_else(|| "render".into(), |s| s.to_string_lossy().into_owned());
+                format!(
+                    "{stem} (bars {}-{}).{ext}",
+                    sig.split(start).0 + 1,
+                    sig.split(end).0 + 1
+                )
+            }
+            _ => format!("render.{ext}"),
         };
         let Some(mut out) = rfd::FileDialog::new()
             .add_filter(filter, &[ext])
-            .set_file_name(name)
+            .set_file_name(&name)
             .save_file()
         else {
             return;
@@ -870,7 +959,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 }
                 ui.separator();
                 if ui.button("Export audio…").clicked() {
-                    self.open_export_dialog();
+                    self.open_export_dialog(None);
                 }
                 ui.separator();
                 if ui.button("Quit").clicked() {
@@ -1321,7 +1410,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 Ok(())
             }
             A::RenderSelection => {
-                self.open_export_dialog();
+                self.open_export_dialog(Some(RangeKind::Selection));
                 Ok(())
             }
             A::Place {
@@ -3503,19 +3592,8 @@ pub(crate) fn metronome_settings_ui(ui: &mut egui::Ui, m: &mut MetronomeSettings
 #[cfg(test)]
 mod pattern_caret_tests {
     use super::*;
-    use crate::test_ui::StubHost;
+    use crate::test_ui::{NoStore, StubHost};
     use jdance_domain::{ClipId, PatternClip};
-
-    struct NoStore;
-
-    impl ProjectStore for NoStore {
-        fn load(&self, _: &Path) -> Result<Project, String> {
-            Err("none".into())
-        }
-        fn save(&self, _: &Path, _: &Project) -> Result<(), String> {
-            Ok(())
-        }
-    }
 
     /// A one-bar pattern in a two-bar looped clip from bar 5.
     fn app() -> JdanceApp<StubHost, NoStore> {
@@ -3588,5 +3666,36 @@ mod pattern_caret_tests {
         a.keep_pattern_caret();
         assert_eq!(a.pattern_caret, 0);
         assert_eq!(a.host.seeks.last(), Some(&0));
+    }
+}
+
+#[cfg(test)]
+mod export_tests {
+    use super::*;
+    use crate::test_ui::{NoStore, StubHost};
+
+    #[test]
+    fn the_selection_is_described_and_chosen_from_the_ruler_menu() {
+        let mut p = Project::new();
+        p.tempo_bpm = 120.0;
+        let bar = u64::from(p.time_signature.bar_ticks());
+        let beat = u64::from(p.time_signature.beat_ticks());
+        assert_eq!(
+            selection_text(4 * bar, 8 * bar + beat, &p),
+            "Bars 5:1 – 9:2 (4 bars 1 beat, 0:08.500)"
+        );
+        let mut a = JdanceApp::new(StubHost::default(), NoStore, p, None);
+        // No selection: Song.
+        a.open_export_dialog(Some(RangeKind::Selection));
+        assert_eq!(a.export_dialog.map(|d| d.0.range), Some(ExportRange::Song));
+        a.project.playlist.loop_range = Some((4 * bar, 8 * bar));
+        a.playlist_action(playlist::PlaylistAction::RenderSelection, 0.0);
+        assert_eq!(
+            a.export_dialog.map(|d| d.0.range),
+            Some(ExportRange::Selection {
+                start: 4 * bar,
+                end: 8 * bar
+            })
+        );
     }
 }
