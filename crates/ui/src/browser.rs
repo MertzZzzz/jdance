@@ -296,7 +296,6 @@ impl BrowserView {
             host,
             crate::plugin_list::Scope::All,
             320.0,
-            false,
         );
         if let Some(d) = picked.load {
             out.push(BrowserAction::LoadPlugin(d));

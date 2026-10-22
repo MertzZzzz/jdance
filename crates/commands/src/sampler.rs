@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Replacing the sample of a sampler channel (spec 0.2.5 §3).
+//! Replacing the sample of a sampler channel (spec 0.2.5 §3) and
+//! putting an audio channel's file into a new sampler.
 
 use crate::Edit;
 use jdance_domain::{ChannelId, Project, SampleRef, SamplerSettings};
@@ -60,6 +61,44 @@ pub fn replace_sample(
     }
     edits.push(Edit::SetChannelSample(ch, Some(sample)));
     Ok(Some(Edit::Batch(edits)))
+}
+
+/// A new sampler channel with the file of audio channel `ch`, right after
+/// it: same name, colour, volume, pan and mixer track. One undo step; the
+/// audio channel and its clips stay.
+pub fn sampler_from_audio(
+    history: &mut crate::History,
+    p: &mut Project,
+    ch: ChannelId,
+) -> Result<ChannelId, crate::EditError> {
+    let index = p
+        .channel_index(ch)
+        .ok_or(crate::EditError::NoSuchChannel(ch))?;
+    let c = p.channels[index].clone();
+    let path = c
+        .audio_asset()
+        .and_then(|a| p.asset(a))
+        .map(|a| a.path.clone())
+        .ok_or(crate::EditError::NoSuchChannel(ch))?;
+    let id = ChannelId(p.ids.next());
+    let mut channel = jdance_domain::Channel::new_sampler(id, c.name);
+    channel.source = jdance_domain::ChannelSource::Sampler {
+        sample: Some(SampleRef { path }),
+    };
+    channel.color = c.color;
+    channel.volume = c.volume;
+    channel.pan = c.pan;
+    channel.track = c.track;
+    history.execute(
+        p,
+        Edit::AddChannel {
+            channel,
+            index: index + 1,
+            rows: Vec::new(),
+            automation: Vec::new(),
+        },
+    )?;
+    Ok(id)
 }
 
 #[cfg(test)]
@@ -130,5 +169,44 @@ mod tests {
             replace_sample(&p, ChannelId(999), SampleRef { path: "x".into() }),
             Err(ReplaceRefusal::NoChannel)
         );
+    }
+
+    #[test]
+    fn an_audio_channel_goes_into_a_new_sampler_in_one_step() {
+        let mut p = Project::new();
+        let mut h = History::default();
+        let track = crate::add_track(&mut h, &mut p, "Vox").unwrap();
+        let asset = jdance_domain::AudioAsset {
+            id: jdance_domain::AssetId(p.ids.next()),
+            name: "vox".into(),
+            path: "assets/vox.wav".into(),
+            hash: 1,
+            size: 10,
+            sample_rate: 48_000,
+            channels: 2,
+            frames: 48_000,
+        };
+        let a = ChannelId(p.ids.next());
+        let mut audio = Channel::new_audio(a, "Vox take", asset.id);
+        audio.track = track;
+        audio.color = Some([1, 2, 3]);
+        audio.volume = 0.4;
+        p.assets.push(asset);
+        p.channels.push(audio);
+        let n = p.channels.len();
+        let s = sampler_from_audio(&mut h, &mut p, a).unwrap();
+        assert_eq!(p.channels.len(), n + 1);
+        assert_eq!(p.channel_index(s), Some(p.channel_index(a).unwrap() + 1));
+        let c = p.channel(s).unwrap();
+        assert_eq!(c.sample().map(|r| r.path.as_str()), Some("assets/vox.wav"));
+        assert_eq!(
+            (c.name.as_str(), c.color, c.volume, c.track),
+            ("Vox take", Some([1, 2, 3]), 0.4, track)
+        );
+        assert!(p.channel(a).is_some(), "the audio channel stays");
+        h.undo(&mut p).unwrap();
+        assert_eq!(p.channels.len(), n);
+        // A sampler is not an audio channel.
+        assert!(sampler_from_audio(&mut h, &mut p, ChannelId(999)).is_err());
     }
 }

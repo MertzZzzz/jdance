@@ -36,9 +36,9 @@ pub(crate) struct PluginList {
     pub selected: Option<usize>,
     /// Put the focus into the search field on the next frame.
     pub focus: bool,
-    /// Shown in a menu: no context menus on the rows (a popup inside a
-    /// popup closes both); the star still toggles favorites.
-    pub in_menu: bool,
+    /// A single click loads (the picker window); otherwise it highlights
+    /// and a double click loads (the Browser).
+    pub click_loads: bool,
 }
 
 #[derive(Debug, Default)]
@@ -265,13 +265,14 @@ impl PluginList {
                             }
                             if r.row.clicked() {
                                 self.selected = *result;
+                                if self.click_loads {
+                                    out.load = Some((*d).clone());
+                                }
                             }
                             if r.row.double_clicked() {
                                 out.load = Some((*d).clone());
                             }
-                            if self.in_menu {
-                                // Stars only.
-                            } else if result.is_none() && fav && !prefs.favorites_alphabetical {
+                            if result.is_none() && fav && !prefs.favorites_alphabetical {
                                 r.row.context_menu(|ui| {
                                     if ui.button("Move up").clicked() {
                                         moved = Some((PluginFavorite::of(d), true));
@@ -364,14 +365,13 @@ impl PluginList {
 
 impl PluginList {
     /// [`PluginList::show`] with the state kept in egui's memory under
-    /// `id`, for menus.
+    /// `id`.
     pub(crate) fn show_kept(
         ui: &mut egui::Ui,
         id: &str,
         host: &mut dyn Host,
         scope: Scope,
         max_height: f32,
-        menu: bool,
     ) -> ListOut {
         let key = egui::Id::unique(("plugin_list", id));
         let mut state: PluginList =
@@ -380,7 +380,6 @@ impl PluginList {
                     focus: true,
                     ..PluginList::default()
                 });
-        state.in_menu = menu;
         let out = state.show(ui, id, host, scope, max_height);
         ui.data_mut(|d| d.insert_temp(key, state));
         out
@@ -473,6 +472,7 @@ fn plugin_row(
     let galley = ui.fonts_mut(|f| f.layout_job(job));
     ui.painter()
         .galley(rect.min + vec2(24.0, 4.0), galley, Color32::WHITE);
+    row.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &d.plugin.name));
     RowResponse {
         row: row.on_hover_text(&d.path),
         star: star_clicked,

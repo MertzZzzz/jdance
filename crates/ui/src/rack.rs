@@ -47,6 +47,8 @@ pub(crate) struct RackOutput {
     pub open_piano: Option<ChannelId>,
     /// New instrument channels.
     pub new_instruments: Vec<PluginDescriptor>,
+    /// Open the plugin picker for instruments.
+    pub pick_instrument: bool,
     /// Toggle the instrument's editor window / parameter window.
     pub toggle_editor: Option<ChannelId>,
     pub show_params: Option<ChannelId>,
@@ -61,6 +63,8 @@ pub(crate) struct RackOutput {
     pub select_clips: Option<ChannelId>,
     /// Open the Sample Editor on the first clip of this audio channel.
     pub open_clip_editor: Option<ChannelId>,
+    /// The audio channel's file into a new sampler channel.
+    pub to_sampler: Option<ChannelId>,
     /// «Remove unused audio channels» (ACH-034).
     pub remove_unused: bool,
 }
@@ -164,7 +168,7 @@ impl RackView {
         let primary_down = ui.ctx().input(|i| i.pointer.primary_down());
         let mut dropped_on_row = false;
 
-        self.header(ui, project, pattern, host, &mut out);
+        self.header(ui, project, pattern, &mut out);
         egui::ScrollArea::both()
             .id_salt("rack")
             .max_height(ui.available_height())
@@ -386,7 +390,6 @@ impl RackView {
         ui: &mut egui::Ui,
         project: &Project,
         pattern: &Pattern,
-        host: &mut dyn Host,
         out: &mut RackOutput,
     ) {
         ui.horizontal(|ui| {
@@ -446,27 +449,10 @@ impl RackView {
                         out.pick = Some(crate::library::PickFor::NewChannel);
                         ui.close();
                     }
-                    ui.menu_button("Instrument (VST3)", |ui| {
-                        if host.plugin_instruments().is_empty() {
-                            ui.label("No VST3 instruments found. See Options → Plugins.");
-                            return;
-                        }
-                        ui.set_min_width(300.0);
-                        let picked = crate::plugin_list::PluginList::show_kept(
-                            ui,
-                            "rack_instruments",
-                            host,
-                            crate::plugin_list::Scope::Instruments,
-                            320.0,
-                            true,
-                        );
-                        if let Some(d) = picked.load {
-                            out.new_instruments.push(d);
-                            ui.close();
-                        } else if picked.close {
-                            ui.close();
-                        }
-                    });
+                    if ui.button("Instrument (VST3)…").clicked() {
+                        out.pick_instrument = true;
+                        ui.close();
+                    }
                 });
             });
         });
@@ -633,6 +619,14 @@ impl RackView {
                 }
                 if ui.button("Sample Editor").clicked() {
                     out.open_clip_editor = Some(ch.id);
+                    ui.close();
+                }
+                if ui
+                    .button("Send to sampler")
+                    .on_hover_text("A new sampler channel with this file; the clips stay")
+                    .clicked()
+                {
+                    out.to_sampler = Some(ch.id);
                     ui.close();
                 }
             } else if ui.button("Open Piano Roll").clicked() {

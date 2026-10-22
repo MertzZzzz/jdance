@@ -27,6 +27,8 @@ pub(crate) enum MixerAction {
     },
     AddEffect(TrackId, EffectKind),
     AddPlugin(TrackId, PluginDescriptor),
+    /// The plugin picker for an effect on this track.
+    PickPlugin(TrackId),
     Rename(TrackId),
     /// The colour window (spec 0.2.5 §6).
     Color(TrackId),
@@ -902,27 +904,10 @@ fn inspector(
                     }
                 }
                 ui.separator();
-                ui.menu_button("VST3", |ui| {
-                    if host.plugin_effects().is_empty() {
-                        ui.label("No plugins found. See Plugins.");
-                        return;
-                    }
-                    ui.set_min_width(300.0);
-                    let picked = crate::plugin_list::PluginList::show_kept(
-                        ui,
-                        "mixer_effects",
-                        host,
-                        crate::plugin_list::Scope::Effects,
-                        320.0,
-                        true,
-                    );
-                    if let Some(d) = picked.load {
-                        out.actions.push(MixerAction::AddPlugin(t.id, d));
-                        ui.close();
-                    } else if picked.close {
-                        ui.close();
-                    }
-                });
+                if ui.button("VST3…").clicked() {
+                    out.actions.push(MixerAction::PickPlugin(t.id));
+                    ui.close();
+                }
             },
         );
     }

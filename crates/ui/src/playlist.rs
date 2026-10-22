@@ -245,6 +245,8 @@ pub(crate) enum PlaylistAction {
     MakeUniqueAudio(Vec<ClipId>),
     /// Select (and reveal) a channel in the Channel Rack.
     SelectChannel(ChannelId),
+    /// The audio channel's file into a new sampler channel.
+    ToSampler(ChannelId),
     AddLane,
     RenameLane(LaneId),
     /// The colour window for a lane (spec 0.2.5 §6).
@@ -1755,6 +1757,14 @@ impl PlaylistView {
                 .clicked()
             {
                 out.actions.push(PlaylistAction::MakeUniqueAudio(same));
+                ui.close();
+            }
+            if ui
+                .button("Send to sampler")
+                .on_hover_text("A new sampler channel with this file; the clips stay")
+                .clicked()
+            {
+                out.actions.push(PlaylistAction::ToSampler(ch.id));
                 ui.close();
             }
             ui.menu_button("Mixer track", |ui| {

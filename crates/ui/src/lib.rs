@@ -133,6 +133,29 @@ struct ColorWindow {
     title: String,
 }
 
+/// The plugin picker window: which plugins, and the mixer track an
+/// effect goes into (`None`: the selected one).
+#[derive(Debug)]
+struct PluginPicker {
+    list: plugin_list::PluginList,
+    scope: plugin_list::Scope,
+    track: Option<TrackId>,
+}
+
+impl PluginPicker {
+    fn new(scope: plugin_list::Scope, track: Option<TrackId>) -> Self {
+        Self {
+            list: plugin_list::PluginList {
+                focus: true,
+                click_loads: true,
+                ..plugin_list::PluginList::default()
+            },
+            scope,
+            track,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct RenameDialog {
     target: RenameTarget,
@@ -180,8 +203,9 @@ pub struct JdanceApp<H: Host, S: ProjectStore> {
     presets: jdance_domain::name_presets::NamePresets,
     /// Options › Pattern name presets is open.
     show_presets: bool,
-    /// The plugin picker (F8, spec 0.2.5 §10 item 13).
-    plugin_picker: Option<plugin_list::PluginList>,
+    /// The plugin picker (F8, spec 0.2.5 §10 item 13), also opened by
+    /// the Channel Rack's and mixer's add buttons.
+    plugin_picker: Option<PluginPicker>,
     show_mixer: bool,
     show_rack: bool,
     show_playlist: bool,
@@ -792,10 +816,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
         {
             self.plugin_picker = match self.plugin_picker {
                 Some(_) => None,
-                None => Some(plugin_list::PluginList {
-                    focus: true,
-                    ..plugin_list::PluginList::default()
-                }),
+                None => Some(PluginPicker::new(plugin_list::Scope::All, None)),
             };
         }
         if k.redo {
@@ -1131,10 +1152,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                     ui.close();
                 }
                 if ui.button("Plugin picker (F8)").clicked() {
-                    self.plugin_picker = Some(plugin_list::PluginList {
-                        focus: true,
-                        ..plugin_list::PluginList::default()
-                    });
+                    self.plugin_picker = Some(PluginPicker::new(plugin_list::Scope::All, None));
                     ui.close();
                 }
                 if ui.button("Recording…").clicked() {
@@ -1493,6 +1511,10 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 self.rack_view.selection = std::iter::once(ch).collect();
                 self.show_rack = true;
                 self.new_channels.push(ch);
+                Ok(())
+            }
+            A::ToSampler(ch) => {
+                self.to_sampler(ch);
                 Ok(())
             }
             A::AddLane => add_lane(&mut self.history, &mut self.project).map(|_| ()),
@@ -2559,6 +2581,21 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
         }
     }
 
+    /// The file of audio channel `ch` into a new sampler channel,
+    /// selected in the Channel Rack.
+    fn to_sampler(&mut self, ch: ChannelId) {
+        match jdance_commands::sampler::sampler_from_audio(&mut self.history, &mut self.project, ch)
+        {
+            Ok(id) => {
+                self.sync_needed = true;
+                self.rack_view.selection = std::iter::once(id).collect();
+                self.show_rack = true;
+                self.new_channels.push(id);
+            }
+            Err(e) => self.notify(Notice::error(e.to_string()), 0.0),
+        }
+    }
+
     /// An instrument into a new channel, an effect into the selected
     /// mixer track (spec 0.2.5 §10 item 12).
     fn load_plugin(&mut self, d: jdance_plugin_api::PluginDescriptor, now: f64) {
@@ -2929,6 +2966,10 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 }),
             )
             .map(|_| ()),
+            mixer::MixerAction::PickPlugin(id) => {
+                self.plugin_picker = Some(PluginPicker::new(plugin_list::Scope::Effects, Some(id)));
+                Ok(())
+            }
             mixer::MixerAction::Rename(id) => {
                 self.start_rename(RenameTarget::Track(id));
                 Ok(())
@@ -3379,35 +3420,52 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
     /// The plugin picker (F8): instruments load into a new channel,
     /// effects into the selected mixer track (spec 0.2.5 §10).
     fn plugin_picker_window(&mut self, ctx: &egui::Context, now: f64) {
-        let Some(mut list) = self.plugin_picker.take() else {
+        let Some(mut picker) = self.plugin_picker.take() else {
             return;
         };
         let mut open = true;
         let mut picked = plugin_list::ListOut::default();
-        let track = self
+        let track = picker.track.unwrap_or(self.mixer_view.selected);
+        let track_name = self
             .project
             .mixer
-            .track(self.mixer_view.selected)
+            .track(track)
             .map_or_else(String::new, |t| t.name.clone());
-        egui::Window::new("Plugin picker")
+        let (title, hint) = match picker.scope {
+            plugin_list::Scope::All => (
+                "Plugin picker",
+                format!("Click: instruments into a new channel, effects into {track_name}"),
+            ),
+            plugin_list::Scope::Instruments => (
+                "Add instrument",
+                "Click: the instrument into a new channel".to_owned(),
+            ),
+            plugin_list::Scope::Effects => {
+                ("Add effect", format!("Click: the effect into {track_name}"))
+            }
+        };
+        egui::Window::new(title)
             .id(egui::Id::unique("plugin_picker"))
             .open(&mut open)
             .default_size([420.0, 480.0])
             .show(ctx, |ui| {
-                ui.label(
-                    egui::RichText::new(format!(
-                        "Enter or double click: instruments into a new channel, effects into {track}"
-                    ))
-                    .size(11.5)
-                    .color(theme::MUTED),
-                );
-                picked = list.show(ui, "picker", &mut self.host, plugin_list::Scope::All, 400.0);
+                ui.label(egui::RichText::new(hint).size(11.5).color(theme::MUTED));
+                picked = picker
+                    .list
+                    .show(ui, "picker", &mut self.host, picker.scope, 400.0);
             });
         if let Some(d) = picked.load {
-            self.load_plugin(d, now);
+            match d.kind {
+                jdance_plugin_api::PluginKind::Instrument => self.add_instrument(d, now),
+                jdance_plugin_api::PluginKind::Effect => {
+                    self.mixer_action(mixer::MixerAction::AddPlugin(track, d), now);
+                }
+            }
+            // Loaded: done, as a menu would be.
+            return;
         }
         if open && !picked.close {
-            self.plugin_picker = Some(list);
+            self.plugin_picker = Some(picker);
         }
     }
 
@@ -3945,6 +4003,9 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
         if !out.delete.is_empty() {
             self.delete_channels = Some(std::mem::take(&mut out.delete));
         }
+        if let Some(ch) = out.to_sampler.take() {
+            self.to_sampler(ch);
+        }
         if let Some(ch) = out.select_clips.take() {
             let ids: Vec<ClipId> = self.project.channel_clips(ch).map(|c| c.id).collect();
             self.playlist_view.select_only(&ids);
@@ -3991,6 +4052,9 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
         }
         for d in std::mem::take(&mut out.new_instruments) {
             self.add_instrument(d, now);
+        }
+        if out.pick_instrument {
+            self.plugin_picker = Some(PluginPicker::new(plugin_list::Scope::Instruments, None));
         }
         for (name, sample) in out.new_channels {
             self.add_channel(name, sample, now);
@@ -4476,10 +4540,7 @@ mod plugin_picker_tests {
             ..StubHost::default()
         };
         let mut app = JdanceApp::new(host, NoStore, Project::new(), None);
-        app.plugin_picker = Some(plugin_list::PluginList {
-            focus: true,
-            ..plugin_list::PluginList::default()
-        });
+        app.plugin_picker = Some(PluginPicker::new(plugin_list::Scope::All, None));
         let mut d = Driver::new();
         let mut ui = |ui: &mut egui::Ui| app.plugin_picker_window(ui.ctx(), 0.0);
         d.frame(vec![], &mut ui);
@@ -4510,13 +4571,74 @@ mod plugin_picker_tests {
         assert_eq!(track.inserts.len(), 1);
     }
 
+    fn picker_open(d: &Driver) -> bool {
+        d.find("★ Favorites only").is_some()
+    }
+
+    /// The picker for `scope`, with the stub's plugins.
+    fn picker_app(
+        scope: plugin_list::Scope,
+        track: Option<TrackId>,
+    ) -> JdanceApp<StubHost, NoStore> {
+        let host = StubHost {
+            plugins: vec![
+                plugin("Laser", PluginKind::Instrument),
+                plugin("Serum", PluginKind::Instrument),
+                plugin("Plate Reverb", PluginKind::Effect),
+            ],
+            ..StubHost::default()
+        };
+        let mut app = JdanceApp::new(host, NoStore, Project::new(), None);
+        app.plugin_picker = Some(PluginPicker::new(scope, track));
+        app
+    }
+
+    #[test]
+    fn filters_keep_the_window_and_a_click_loads_the_instrument() {
+        let mut app = picker_app(plugin_list::Scope::Instruments, None);
+        let n = app.project.channels.len();
+        let mut d = Driver::new();
+        let mut ui = |ui: &mut egui::Ui| app.plugin_picker_window(ui.ctx(), 0.0);
+        d.frame(vec![], &mut ui);
+        d.frame(vec![], &mut ui);
+        for filter in ["VST3", "★ Favorites only", "★ Favorites only", "VST3"] {
+            let at = d.find(filter).expect(filter);
+            d.click(at, &mut ui);
+            assert!(picker_open(&d), "{filter}: the window stays");
+        }
+        let at = d.find("Serum").expect("listed");
+        d.click(at, &mut ui);
+        d.frame(vec![], &mut ui);
+        drop(ui);
+        assert_eq!(app.project.channels.len(), n + 1);
+        assert_eq!(app.project.channels.last().unwrap().name, "Serum");
+        assert!(app.plugin_picker.is_none(), "loaded: the window closes");
+    }
+
+    #[test]
+    fn the_mixer_picker_puts_the_effect_into_its_track() {
+        let mut app = picker_app(plugin_list::Scope::All, None);
+        let track = jdance_commands::add_track(&mut app.history, &mut app.project, "Bus").unwrap();
+        app.mixer_action(mixer::MixerAction::PickPlugin(track), 0.0);
+        let mut d = Driver::new();
+        let mut ui = |ui: &mut egui::Ui| app.plugin_picker_window(ui.ctx(), 0.0);
+        d.frame(vec![], &mut ui);
+        d.frame(vec![], &mut ui);
+        assert!(d.find("Serum").is_none(), "effects only");
+        let at = d.find("Plate Reverb").expect("listed");
+        d.click(at, &mut ui);
+        drop(ui);
+        assert_ne!(app.mixer_view.selected, track);
+        assert_eq!(app.project.mixer.track(track).unwrap().inserts.len(), 1);
+    }
+
     #[test]
     fn esc_clears_the_text_then_closes() {
         let app = pick(vec![vec![Event::Text("x".into())], vec![key(Key::Escape)]]);
         assert!(
             app.plugin_picker
                 .as_ref()
-                .is_some_and(|p| p.text.is_empty())
+                .is_some_and(|p| p.list.text.is_empty())
         );
         let app = pick(vec![vec![key(Key::Escape)]]);
         assert!(app.plugin_picker.is_none());
