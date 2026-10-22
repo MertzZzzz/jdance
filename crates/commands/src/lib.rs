@@ -129,6 +129,8 @@ pub enum Edit {
     SetTrackMonitor(TrackId, bool),
     SetSendLevel(SendId, f32),
     SetInsertBypass(InsertId, bool),
+    /// Wet/dry of an insert, `0.0..=1.0`.
+    SetInsertWet(InsertId, f32),
     SetInsertEffect(InsertId, Effect),
 
     // Mixer structure: validated against the whole routing graph; the
@@ -259,6 +261,7 @@ pub enum MergeKey {
     TrackPan(TrackId),
     SendLevel(SendId),
     InsertEffect(InsertId),
+    InsertWet(InsertId),
     Limiter,
     Notes(PatternId, ChannelId),
     ChannelPlayback(ChannelId),
@@ -299,6 +302,7 @@ impl Edit {
             Edit::SetTrackMonitor(..) => "Monitor track input",
             Edit::SetSendLevel(..) => "Change send level",
             Edit::SetInsertBypass(..) => "Bypass effect",
+            Edit::SetInsertWet(..) => "Change effect mix",
             Edit::SetInsertEffect(..) => "Change effect",
             Edit::AddTrack { .. } => "Add mixer track",
             Edit::RemoveTrack(_) => "Remove mixer track",
@@ -358,6 +362,7 @@ impl Edit {
             Edit::SetTrackPan(id, _) => Some(MergeKey::TrackPan(*id)),
             Edit::SetSendLevel(id, _) => Some(MergeKey::SendLevel(*id)),
             Edit::SetInsertEffect(id, _) => Some(MergeKey::InsertEffect(*id)),
+            Edit::SetInsertWet(id, _) => Some(MergeKey::InsertWet(*id)),
             Edit::SetLimiter(_) => Some(MergeKey::Limiter),
             Edit::SetNotes {
                 pattern, channel, ..

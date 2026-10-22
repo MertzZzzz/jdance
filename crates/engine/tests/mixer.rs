@@ -26,6 +26,7 @@ fn insert(id: u64, effect: Effect, sidechain: Option<Sidechain>) -> Insert {
     Insert {
         id: InsertId(id),
         bypass: false,
+        wet: 1.0,
         effect,
         sidechain,
     }

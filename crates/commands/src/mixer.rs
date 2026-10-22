@@ -176,6 +176,11 @@ pub(crate) fn apply(edit: &Edit, p: &mut Project) -> Result<Edit, EditError> {
                 std::mem::replace(&mut i.bypass, *b),
             ))
         }
+        Edit::SetInsertWet(id, w) => {
+            let w = check_range(*w, 0.0, 1.0)?;
+            let i = insert_mut(&mut p.mixer, *id)?;
+            Ok(Edit::SetInsertWet(*id, std::mem::replace(&mut i.wet, w)))
+        }
         Edit::SetInsertEffect(id, effect) => {
             effect
                 .validate()
@@ -380,6 +385,7 @@ pub fn add_insert(
             insert: Insert {
                 id,
                 bypass: false,
+                wet: 1.0,
                 effect,
                 sidechain: None,
             },
@@ -605,6 +611,24 @@ mod tests {
             add_insert(&mut h, &mut p, t, comp()).is_err(),
             "limit of 8 inserts"
         );
+    }
+
+    #[test]
+    fn the_insert_mix_merges_into_one_step_and_stays_in_range() {
+        let mut p = Project::new();
+        let mut h = History::default();
+        let t = add_track(&mut h, &mut p, "T").unwrap();
+        let ins = add_insert(&mut h, &mut p, t, comp()).unwrap();
+        assert_eq!(p.mixer.track(t).unwrap().inserts[0].wet, 1.0);
+        for v in [0.8, 0.5, 0.3] {
+            h.execute_merging(&mut p, Edit::SetInsertWet(ins, v))
+                .unwrap();
+        }
+        h.end_gesture();
+        assert_eq!(p.mixer.track(t).unwrap().inserts[0].wet, 0.3);
+        assert!(h.execute(&mut p, Edit::SetInsertWet(ins, 1.2)).is_err());
+        h.undo(&mut p).unwrap();
+        assert_eq!(p.mixer.track(t).unwrap().inserts[0].wet, 1.0, "one step");
     }
 
     #[test]

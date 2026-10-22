@@ -9,7 +9,7 @@
 //! cause clicks or reset delay lines.
 
 use crate::automation::{AutoMap, AutomationRt};
-use crate::effect_rt::{EffectRt, InsertRt, InstrumentRt, PluginRt, SidechainRt};
+use crate::effect_rt::{EffectRt, InsertRt, InstrumentRt, PluginRt, SidechainRt, xfade_len};
 use jdance_domain::{
     ChannelId, InsertId, MAX_CHANNELS, MixerTrack, PluginSlot, PluginTarget, Project, ROOT_KEY,
     SampleRef, SendId, TICKS_PER_STEP, TrackId,
@@ -669,6 +669,7 @@ pub fn compile_full(
             });
             acc += effect.latency();
             let mut slot = InsertRt::new(ins.id, effect, ins.bypass, sample_rate);
+            slot.wet = Smoothed::new(ins.wet, xfade_len(sample_rate));
             slot.pre_delay = pdc.line(pre);
             slot.sidechain = sidechain;
             inserts.push(slot);
@@ -1086,6 +1087,7 @@ mod tests {
         a.inserts.push(Insert {
             id: InsertId(10),
             bypass: false,
+            wet: 1.0,
             effect: lookahead(1.0),
             sidechain: None,
         });
@@ -1101,6 +1103,7 @@ mod tests {
         c.inserts.push(Insert {
             id: InsertId(12),
             bypass: false,
+            wet: 1.0,
             effect: lookahead(2.0),
             sidechain: Some(Sidechain {
                 source: TrackId(2),
@@ -1135,6 +1138,7 @@ mod tests {
         kick.inserts.push(Insert {
             id: InsertId(10),
             bypass: false,
+            wet: 1.0,
             effect: lookahead(1.0),
             sidechain: None,
         });
@@ -1142,6 +1146,7 @@ mod tests {
         bass.inserts.push(Insert {
             id: InsertId(11),
             bypass: false,
+            wet: 1.0,
             effect: lookahead(0.0),
             sidechain: Some(Sidechain {
                 source: TrackId(1),

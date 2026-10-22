@@ -17,7 +17,7 @@ use jdance_dsp::{
 use jdance_plugin_api::{PluginProcessor, Transport};
 
 /// Bypass crossfade length, ≈ 10 ms.
-fn xfade_len(sample_rate: u32) -> u32 {
+pub(crate) fn xfade_len(sample_rate: u32) -> u32 {
     (sample_rate / 100).max(1)
 }
 
@@ -230,6 +230,8 @@ pub struct InsertRt {
     pub sidechain: Option<SidechainRt>,
     /// Wet/dry mix: 1 = active, 0 = bypassed.
     pub mix: Smoothed,
+    /// The user's wet/dry of the slot (0..1), on top of `mix`.
+    pub wet: Smoothed,
     /// Dry path delayed by the effect latency.
     pub dry_delay: DelayLine,
     /// The effect's state is clean (fresh or fully reset).
@@ -253,6 +255,7 @@ impl InsertRt {
             effect,
             sidechain: None,
             mix: Smoothed::new(if bypass { 0.0 } else { 1.0 }, xfade_len(sample_rate)),
+            wet: Smoothed::new(1.0, xfade_len(sample_rate)),
             dry_delay: DelayLine::new(latency),
             clean: true,
             force_reset: false,
@@ -268,6 +271,7 @@ impl InsertRt {
         self.effect.take_state(&mut old.effect);
         self.dry_delay.take_state(&mut old.dry_delay);
         self.mix.continue_from(&old.mix);
+        self.wet.continue_from(&old.wet);
         self.clean = old.clean;
         self.force_reset = old.force_reset;
         if let (Some(sc), Some(osc)) = (&mut self.sidechain, &mut old.sidechain) {
@@ -327,11 +331,15 @@ impl InsertRt {
             process_with_events(self.effect.processor(), l, r, events, &ctx);
         }
         self.clean = false;
-        if !self.mix.is_ramping() && self.mix.current() == 1.0 {
+        if !self.mix.is_ramping()
+            && self.mix.current() == 1.0
+            && !self.wet.is_ramping()
+            && self.wet.current() == 1.0
+        {
             return;
         }
         for i in 0..n {
-            let m = self.mix.next_value();
+            let m = self.mix.next_value() * self.wet.next_value();
             l[i] = dl[i] + (l[i] - dl[i]) * m;
             r[i] = dr[i] + (r[i] - dr[i]) * m;
         }
@@ -406,6 +414,35 @@ mod tests {
         slot.mix.set_target(1.0);
         let out = run(&mut slot, 0.0, 4_000);
         assert!(out.iter().all(|v| *v == 0.0));
+    }
+
+    #[test]
+    fn wet_dry_mixes_the_effect_with_the_dry_signal() {
+        // A full-wet reverb on a constant: its output differs from the
+        // input, so the mix shows in the result.
+        let mut full = reverb_slot(false);
+        let wet = run(&mut full, 0.5, 20_000);
+        let mut dry = reverb_slot(false);
+        dry.wet = Smoothed::new(0.0, 64);
+        assert!(
+            run(&mut dry, 0.5, 20_000).iter().all(|v| *v == 0.5),
+            "dry only"
+        );
+        let mut half = reverb_slot(false);
+        half.wet = Smoothed::new(0.5, 64);
+        let mixed = run(&mut half, 0.5, 20_000);
+        for (i, (m, w)) in mixed.iter().zip(&wet).enumerate() {
+            let want = 0.5 * 0.5 + 0.5 * w;
+            assert!((m - want).abs() < 1e-5, "{i}: {m} vs {want}");
+        }
+        // A change ramps without a jump.
+        half.wet.set_target(1.0);
+        let out = run(&mut half, 0.5, 4_000);
+        let max_step = out
+            .windows(2)
+            .map(|w| (w[1] - w[0]).abs())
+            .fold(0.0, f32::max);
+        assert!(max_step < 0.05, "step {max_step}");
     }
 
     #[test]

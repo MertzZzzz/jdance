@@ -153,6 +153,19 @@ pub struct Insert {
     pub bypass: bool,
     pub effect: Effect,
     pub sidechain: Option<Sidechain>,
+    /// Share of the effect in the output, `0.0..=1.0` (wet/dry); the rest
+    /// is the dry signal. 1 = the effect only.
+    #[serde(default = "full_wet", skip_serializing_if = "is_full_wet")]
+    pub wet: f32,
+}
+
+fn full_wet() -> f32 {
+    1.0
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_full_wet(w: &f32) -> bool {
+    *w == 1.0
 }
 
 /// Where a source track's signal is taken for a sidechain (MIX-010).
@@ -405,6 +418,12 @@ impl Mixer {
             for i in &t.inserts {
                 dup(i.id.0, &mut ids)?;
                 i.effect.validate().map_err(RoutingError::InvalidValue)?;
+                if !finite_in(i.wet, 0.0, 1.0) {
+                    return Err(RoutingError::InvalidValue(format!(
+                        "insert {} wet/dry out of range",
+                        i.id.0
+                    )));
+                }
                 if let Some(sc) = i.sidechain {
                     if !i.effect.accepts_sidechain() {
                         return Err(RoutingError::InvalidValue(format!(
@@ -573,6 +592,7 @@ mod tests {
         m.tracks[0].inserts.push(Insert {
             id: InsertId(50),
             bypass: false,
+            wet: 1.0,
             effect: Effect::new(crate::EffectKind::Compressor),
             sidechain: Some(Sidechain {
                 source: TrackId(2),
@@ -594,6 +614,7 @@ mod tests {
         m.tracks[0].inserts.push(Insert {
             id: InsertId(50),
             bypass: false,
+            wet: 1.0,
             effect: Effect::new(crate::EffectKind::Compressor),
             sidechain: Some(Sidechain {
                 source: TrackId::MASTER,

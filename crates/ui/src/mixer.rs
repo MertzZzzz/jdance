@@ -1119,6 +1119,18 @@ fn insert_ui(
             if ins.bypass { 1.0 } else { 0.0 },
             &mut out.automation,
         );
+        // Wet/dry of the slot: the effect's share of the output.
+        let mut wet = ins.wet;
+        let r = crate::widgets::knob(ui, &mut wet, 0.0..=1.0, 1.0, crate::theme::AMBER, 20.0)
+            .on_hover_text(format!(
+                "Mix {:.0}% wet (double-click: 100%)",
+                ins.wet * 100.0
+            ));
+        r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Slider, true, "Mix"));
+        if r.changed() {
+            out.edits.push((Edit::SetInsertWet(ins.id, wet), true));
+        }
+        out.end_gesture |= r.drag_stopped();
         if ins.sidechain.is_some() {
             ui.colored_label(Color32::from_rgb(120, 170, 235), "SC");
         }

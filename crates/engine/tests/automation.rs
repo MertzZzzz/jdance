@@ -279,6 +279,7 @@ fn builtin_parameter_and_bypass_are_automated() {
     p.mixer.tracks[0].inserts.push(Insert {
         id: InsertId(30),
         bypass: false,
+        wet: 1.0,
         effect: comp,
         sidechain: None,
     });
@@ -344,6 +345,7 @@ fn plugin_parameters_get_chase_breakpoints_and_intermediate_points() {
     p.mixer.tracks[0].inserts.push(Insert {
         id: InsertId(31),
         bypass: false,
+        wet: 1.0,
         effect: Effect::plugin(PluginSlot {
             format: "vst3".into(),
             class_id: "0".repeat(32),

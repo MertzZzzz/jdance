@@ -64,6 +64,7 @@ fn with_mixer(mut p: Project, volume: f32) -> Project {
     drums.inserts.push(Insert {
         id: InsertId(9010),
         bypass: false,
+        wet: 1.0,
         effect: comp(1.0),
         sidechain: None,
     });
@@ -77,6 +78,7 @@ fn with_mixer(mut p: Project, volume: f32) -> Project {
     bass.inserts.push(Insert {
         id: InsertId(9011),
         bypass: false,
+        wet: 1.0,
         effect: comp(0.0),
         sidechain: Some(Sidechain {
             source: TrackId(9001),
@@ -92,6 +94,7 @@ fn with_mixer(mut p: Project, volume: f32) -> Project {
         ret.inserts.push(Insert {
             id: InsertId(id),
             bypass: volume < 0.5 && id == 9013,
+            wet: 1.0,
             effect: Effect::new(kind).with(
                 if kind == EffectKind::ParametricEq {
                     "mid1_gain"

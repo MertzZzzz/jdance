@@ -456,6 +456,7 @@ fn gen_demo() -> Result<(), String> {
     perc.inserts.push(Insert {
         id: InsertId(project.ids.next()),
         bypass: false,
+        wet: 1.0,
         effect: Effect::new(EffectKind::Compressor)
             .with("threshold", -30.0)
             .with("ratio", 6.0)
@@ -473,6 +474,7 @@ fn gen_demo() -> Result<(), String> {
     verb.inserts.push(Insert {
         id: InsertId(project.ids.next()),
         bypass: false,
+        wet: 1.0,
         effect: Effect::new(EffectKind::Reverb)
             .with("wet", 1.0)
             .with("decay", 1.6),
@@ -487,6 +489,7 @@ fn gen_demo() -> Result<(), String> {
     perc.inserts.push(Insert {
         id: InsertId(project.ids.next()),
         bypass: false,
+        wet: 1.0,
         effect: Effect::new(EffectKind::TempoDelay)
             .with("division", 4.0)
             .with("feedback", 0.35)
@@ -498,6 +501,7 @@ fn gen_demo() -> Result<(), String> {
     kick_bus.inserts.push(Insert {
         id: InsertId(project.ids.next()),
         bypass: false,
+        wet: 1.0,
         effect: Effect::new(EffectKind::ParametricEq)
             .with("low_freq", 80.0)
             .with("low_gain", 3.0)

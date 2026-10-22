@@ -54,6 +54,7 @@ impl Fixture {
         self.p.mixer.track_mut(TRACK).unwrap().inserts.push(Insert {
             id: InsertId(id),
             bypass,
+            wet: 1.0,
             effect,
             sidechain: None,
         });
@@ -321,4 +322,19 @@ proptest! {
         }
         prop_assert_eq!(out, reference.left);
     }
+}
+
+#[test]
+fn an_insert_at_zero_wet_renders_like_no_insert() {
+    let sample = noise(4_000, 7, 0.5);
+    let plain = Fixture::new(sample.clone());
+    let reference = render_offline(plain.snapshot(), 24_000, || 256);
+    let mut f = Fixture::new(sample);
+    f.add(1, Effect::new(EffectKind::Reverb).with("wet", 1.0), false);
+    f.p.mixer.track_mut(TRACK).unwrap().inserts[0].wet = 0.0;
+    let dry = render_offline(f.snapshot(), 24_000, || 256);
+    assert_eq!(dry.left, reference.left);
+    f.p.mixer.track_mut(TRACK).unwrap().inserts[0].wet = 1.0;
+    let wet = render_offline(f.snapshot(), 24_000, || 256);
+    assert_ne!(wet.left, reference.left, "the reverb is heard at full wet");
 }

@@ -14,7 +14,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 pub const FORMAT_TAG: &str = "jdance-project";
-pub const CURRENT_FORMAT_VERSION: u32 = 15;
+pub const CURRENT_FORMAT_VERSION: u32 = 16;
 pub const PROJECT_EXTENSION: &str = "jdance";
 
 /// Saves `project` to `path` atomically. Sample paths inside the project
@@ -213,6 +213,10 @@ fn migrate(version: u32, mut project: Value) -> Result<Value, PersistError> {
     if v == 14 {
         // v15 (0.2.5) added pattern colours (absent = default).
         v = 15;
+    }
+    if v == 15 {
+        // v16 (0.2.6) added the wet/dry of inserts (absent = fully wet).
+        v = 16;
     }
     match v {
         CURRENT_FORMAT_VERSION => Ok(project),
@@ -753,6 +757,7 @@ mod tests {
         p.mixer.master.inserts.push(Insert {
             id,
             bypass: true,
+            wet: 1.0,
             effect: Effect::plugin(PluginSlot {
                 format: "vst3".into(),
                 class_id: "0123456789ABCDEF0123456789ABCDEF".into(),
@@ -803,12 +808,48 @@ mod tests {
         p.mixer.tracks.push(t);
         save_project(&path, &p).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("\"format_version\": 15"), "{text}");
+        assert!(text.contains("\"format_version\": 16"), "{text}");
         assert_eq!(load_project(&path).unwrap(), p, "signature and track input");
 
-        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 15, "project": p});
+        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 16, "project": p});
         v["project"]["time_signature"]["denominator"] = serde_json::json!(3);
         assert!(parse_project(v.to_string().as_bytes()).is_err(), "SIG-001");
+    }
+
+    #[test]
+    fn v15_inserts_are_fully_wet_and_the_mix_round_trips() {
+        let mut p = sample_project("a.wav");
+        p.mixer.master.inserts.push(jdance_domain::Insert {
+            id: jdance_domain::InsertId(p.ids.next()),
+            bypass: false,
+            wet: 1.0,
+            effect: jdance_domain::Effect::new(jdance_domain::EffectKind::Reverb),
+            sidechain: None,
+        });
+        let v = serde_json::json!({"format": FORMAT_TAG, "format_version": 15, "project": p});
+        assert!(
+            v["project"]["mixer"]["master"]["inserts"][0]
+                .get("wet")
+                .is_none(),
+            "fully wet is not written"
+        );
+        let loaded = parse_project(v.to_string().as_bytes()).unwrap();
+        assert_eq!(loaded.mixer.master.inserts[0].wet, 1.0);
+
+        p.mixer.master.inserts[0].wet = 0.25;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wet.jdance");
+        save_project(&path, &p).unwrap();
+        assert_eq!(
+            load_project(&path).unwrap().mixer.master.inserts[0].wet,
+            0.25
+        );
+        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 16, "project": p});
+        v["project"]["mixer"]["master"]["inserts"][0]["wet"] = serde_json::json!(1.5);
+        assert!(
+            parse_project(v.to_string().as_bytes()).is_err(),
+            "out of range"
+        );
     }
 
     #[test]
@@ -1102,6 +1143,7 @@ mod tests {
         t.inserts.push(Insert {
             id: InsertId(p.ids.next()),
             bypass: false,
+            wet: 1.0,
             effect: Effect::new(EffectKind::TempoDelay).with("feedback", 0.7),
             sidechain: None,
         });

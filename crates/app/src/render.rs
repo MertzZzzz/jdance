@@ -507,6 +507,7 @@ mod tests {
         p.mixer.master.inserts.push(Insert {
             id,
             bypass: false,
+            wet: 1.0,
             effect,
             sidechain: None,
         });
@@ -1063,6 +1064,7 @@ mod selection_tests {
             p.mixer.master.inserts.push(Insert {
                 id: InsertId(p.ids.next()),
                 bypass: false,
+                wet: 1.0,
                 effect: Effect::new(EffectKind::Reverb).with("decay", 6.0),
                 sidechain: None,
             });

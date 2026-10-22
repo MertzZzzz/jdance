@@ -29,6 +29,7 @@ fn stress_project() -> Project {
     let comp = |sc: Option<Sidechain>, id: u64| Insert {
         id: InsertId(id),
         bypass: false,
+        wet: 1.0,
         effect: Effect::new(EffectKind::Compressor).with("lookahead", 1.0),
         sidechain: sc,
     };

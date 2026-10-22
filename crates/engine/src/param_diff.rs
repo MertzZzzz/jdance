@@ -57,6 +57,7 @@ mod tests {
         t.inserts.push(Insert {
             id: InsertId(6),
             bypass: false,
+            wet: 1.0,
             effect,
             sidechain: None,
         });

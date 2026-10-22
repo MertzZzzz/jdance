@@ -597,6 +597,7 @@ mod tests {
         p.mixer.master.inserts.push(Insert {
             id: insert,
             bypass: false,
+            wet: 1.0,
             effect: Effect::plugin(PluginSlot {
                 format: "vst3".into(),
                 class_id: gain.plugin.class_id.clone(),

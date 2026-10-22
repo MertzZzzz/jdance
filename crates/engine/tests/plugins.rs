@@ -111,6 +111,7 @@ fn project(with_plugin: bool) -> (Project, Arc<SampleBuffer>) {
         a.inserts.push(Insert {
             id: PLUGIN_INSERT,
             bypass: false,
+            wet: 1.0,
             effect: Effect::plugin(slot()),
             sidechain: None,
         });

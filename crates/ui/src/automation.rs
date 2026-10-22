@@ -226,6 +226,7 @@ mod tests {
         t.inserts.push(Insert {
             id: InsertId(8),
             bypass: false,
+            wet: 1.0,
             effect: Effect::new(EffectKind::ParametricEq),
             sidechain: None,
         });
