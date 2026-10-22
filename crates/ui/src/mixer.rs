@@ -100,19 +100,30 @@ impl Default for MixerView {
 
 /// The headphones toggle of a track with an input (MON-001); the first
 /// time in a session it asks about feedback first (MON-002).
-fn monitor_toggle(ui: &mut egui::Ui, t: &MixerTrack, view: &mut MixerView, out: &mut MixerOutput) {
-    let Some(input) = t.input.filter(|_| !t.is_master()) else {
-        return;
+fn monitor_toggle(
+    ui: &mut egui::Ui,
+    t: &MixerTrack,
+    view: &mut MixerView,
+    out: &mut MixerOutput,
+) -> Option<egui::Response> {
+    let input = t.input.filter(|_| !t.is_master())?;
+    let width = ui.available_width().clamp(20.0, 120.0);
+    // Narrow strips show the channel numbers only (INP-015).
+    let text = if width < 44.0 {
+        input.number_label()
+    } else {
+        input.short_label()
     };
-    let width = ui.available_width().clamp(40.0, 120.0);
     let r = ui
         .add_sized(
             [width, 18.0],
-            egui::Button::selectable(t.monitor, RichText::new(input.short_label()).size(9.5)),
+            egui::Button::selectable(t.monitor, RichText::new(text).size(9.5)),
         )
-        .on_hover_text(
-            "Input of this track. Click: hear it through the track (its effects, fader and sends)",
-        );
+        .on_hover_text(format!(
+            "Input {} of this track. Click: hear it through the track (its effects, fader \
+             and sends). Right click: choose the input",
+            input.short_label()
+        ));
     if r.clicked() {
         let on = !t.monitor;
         if on && !view.monitor_warned {
@@ -121,6 +132,124 @@ fn monitor_toggle(ui: &mut egui::Ui, t: &MixerTrack, view: &mut MixerView, out: 
             out.edits.push((Edit::SetTrackMonitor(t.id, on), false));
         }
     }
+    Some(r)
+}
+
+/// "In 1 (Mic)", with the driver's channel names where it has them.
+fn input_label(i: TrackInput, names: &[String]) -> String {
+    let name = |c: u16| names.get(usize::from(c)).filter(|n| !n.is_empty());
+    let base = i.short_label();
+    match i {
+        TrackInput::Mono(c) => name(c).map_or(base.clone(), |n| format!("{base} ({n})")),
+        TrackInput::Stereo(c) => match (name(c), name(c + 1)) {
+            (Some(a), Some(b)) => format!("{base} ({a}/{b})"),
+            _ => base,
+        },
+    }
+}
+
+/// The inputs a track can take (INP-001): none, the stereo pairs and the
+/// mono channels of the open input device.
+fn input_choices(
+    ui: &mut egui::Ui,
+    t: &MixerTrack,
+    count: u16,
+    names: &[String],
+    out: &mut MixerOutput,
+) {
+    let mut choose = |ui: &mut egui::Ui, v: Option<TrackInput>, text: String| {
+        if ui.selectable_label(t.input == v, text).clicked() {
+            if t.input != v {
+                out.edits.push((Edit::SetTrackInput(t.id, v), false));
+            }
+            ui.close();
+        }
+    };
+    choose(ui, None, "(none)".into());
+    for c in (0..count.saturating_sub(1)).step_by(2) {
+        let i = TrackInput::Stereo(c);
+        choose(ui, Some(i), input_label(i, names));
+    }
+    for c in 0..count {
+        let i = TrackInput::Mono(c);
+        choose(ui, Some(i), input_label(i, names));
+    }
+}
+
+/// The input row of a strip (spec 0.2.4 INP-010…015): the monitoring
+/// button and the mono/stereo switch, or "—" to choose an input.
+fn strip_input(
+    ui: &mut egui::Ui,
+    t: &MixerTrack,
+    live: Option<&(u16, Vec<String>)>,
+    view: &mut MixerView,
+    out: &mut MixerOutput,
+) {
+    if t.is_master() {
+        return;
+    }
+    let (count, names) = live.map_or((0, &[][..]), |(c, n)| (*c, n.as_slice()));
+    let menu = |ui: &mut egui::Ui, out: &mut MixerOutput| {
+        if live.is_none() {
+            ui.label(
+                RichText::new("No input is open: choose the input device in Options › Recording")
+                    .color(crate::theme::MUTED),
+            );
+        }
+        input_choices(ui, t, count, names, out);
+    };
+    let Some(input) = t.input else {
+        let width = ui.available_width().clamp(20.0, 120.0);
+        let r = ui
+            .add_sized(
+                [width, 18.0],
+                egui::Button::new(RichText::new("—").size(9.5).color(crate::theme::MUTED)),
+            )
+            .on_hover_text("No input. Click: choose one");
+        // Left or right click (INP-014); one popup, so one id.
+        egui::Popup::menu(&r)
+            .open_memory(
+                (r.clicked() || r.secondary_clicked()).then_some(egui::SetOpenCommand::Toggle),
+            )
+            .show(|ui| menu(ui, out));
+        return;
+    };
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        let w = (ui.available_width() - 22.0).max(20.0);
+        let r = ui
+            .allocate_ui(vec2(w, 18.0), |ui| monitor_toggle(ui, t, view, out))
+            .inner;
+        if let Some(r) = r {
+            r.context_menu(|ui| menu(ui, out));
+        }
+        let next = input.toggled(count).filter(|_| live.is_some());
+        let r = ui
+            .add_enabled(
+                next.is_some(),
+                egui::Button::new(
+                    RichText::new(if input.is_stereo() { "S" } else { "M" }).size(9.5),
+                )
+                .min_size(vec2(20.0, 18.0)),
+            )
+            .on_hover_text(if input.is_stereo() {
+                "Stereo input. Click: mono (left channel)"
+            } else {
+                "Mono input. Click: stereo pair"
+            })
+            .on_disabled_hover_text(if live.is_none() {
+                "No input device is open (Options › Recording)"
+            } else {
+                "The input device has one channel: no stereo"
+            });
+        if r.clicked()
+            && let Some(next) = next
+        {
+            // One undo step; monitoring stays as it is (INP-011).
+            out.edits
+                .push((Edit::SetTrackInput(t.id, Some(next)), false));
+        }
+    });
 }
 
 /// The feedback warning before the first monitoring (MON-002, MON-020).
@@ -217,9 +346,19 @@ pub(crate) fn show(
                     ui.horizontal_top(|ui| {
                         ui.spacing_mut().item_spacing.x = 2.0;
                         scale(ui, view.view);
+                        let live = host.live_inputs();
                         for (i, track) in mixer.all_tracks().enumerate() {
                             strip(
-                                ui, mixer, automation, track, i, latency, meters, view, &mut out,
+                                ui,
+                                mixer,
+                                automation,
+                                track,
+                                i,
+                                latency,
+                                meters,
+                                live.as_ref(),
+                                view,
+                                &mut out,
                             );
                         }
                     });
@@ -287,6 +426,7 @@ fn strip(
     index: usize,
     latency: &LatencyInfo,
     meters: &MeterReadings,
+    live: Option<&(u16, Vec<String>)>,
     view: &mut MixerView,
     out: &mut MixerOutput,
 ) {
@@ -408,7 +548,7 @@ fn strip(
             let (row, _) = ui.allocate_exact_size(vec2(width, 22.0), Sense::hover());
             let mut cell =
                 ui.new_child(egui::UiBuilder::new().max_rect(row.shrink2(vec2(2.0, 2.0))));
-            monitor_toggle(&mut cell, t, view, out);
+            strip_input(&mut cell, t, live, view, out);
             // 4. Pan.
             ui.horizontal(|ui| {
                 ui.add_space((width - 26.0) / 2.0);
@@ -636,17 +776,6 @@ fn input_ui(
 ) {
     let live = host.live_inputs();
     let (count, names) = live.clone().unwrap_or_default();
-    let label = |i: TrackInput| {
-        let name = |c: u16| names.get(usize::from(c)).filter(|n| !n.is_empty());
-        let base = i.short_label();
-        match i {
-            TrackInput::Mono(c) => name(c).map_or(base.clone(), |n| format!("{base} ({n})")),
-            TrackInput::Stereo(c) => match (name(c), name(c + 1)) {
-                (Some(a), Some(b)) => format!("{base} ({a}/{b})"),
-                _ => base,
-            },
-        }
-    };
     ui.horizontal(|ui| {
         ui.label("Input");
         let missing = t.input.is_some_and(|i| i.needed() > count);
@@ -654,29 +783,12 @@ fn input_ui(
             None => RichText::new("(none)"),
             Some(i) if missing => RichText::new(format!("{} (not on device)", i.short_label()))
                 .color(crate::theme::WARN),
-            Some(i) => RichText::new(label(i)),
+            Some(i) => RichText::new(input_label(i, &names)),
         };
         let combo = egui::ComboBox::from_id_salt(("track_input", t.id.0))
             .width(170.0)
             .selected_text(text)
-            .show_ui(ui, |ui| {
-                let mut choose = |ui: &mut egui::Ui, v: Option<TrackInput>, text: String| {
-                    if ui.selectable_label(t.input == v, text).clicked() && t.input != v {
-                        out.edits.push((Edit::SetTrackInput(t.id, v), false));
-                    }
-                };
-                choose(ui, None, "(none)".into());
-                for c in (0..count.saturating_sub(1)).step_by(2) {
-                    choose(
-                        ui,
-                        Some(TrackInput::Stereo(c)),
-                        label(TrackInput::Stereo(c)),
-                    );
-                }
-                for c in 0..count {
-                    choose(ui, Some(TrackInput::Mono(c)), label(TrackInput::Mono(c)));
-                }
-            })
+            .show_ui(ui, |ui| input_choices(ui, t, count, &names, out))
             .response;
         if live.is_none() {
             combo.on_hover_text(
@@ -1301,4 +1413,86 @@ fn eq_graph(ui: &mut egui::Ui, effect: &Effect) {
         ui.visuals().widgets.noninteractive.bg_stroke,
         StrokeKind::Inside,
     );
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::*;
+    use crate::test_ui::{Driver, StubHost};
+
+    /// Clicks the widgets labelled `clicks` in turn; a leading `>` means
+    /// a right click.
+    fn run(mixer: &Mixer, clicks: &[&str]) -> Vec<(Edit, bool)> {
+        let mut d = Driver::new();
+        let mut host = StubHost {
+            live_inputs: Some((2, vec!["Mic".into(), "Line".into()])),
+            ..StubHost::default()
+        };
+        let mut view = MixerView::default();
+        let mut edits = Vec::new();
+        let mut ui = |ui: &mut egui::Ui| {
+            let out = show(
+                ui,
+                mixer,
+                &[],
+                &LatencyInfo::default(),
+                &MeterReadings::default(),
+                &mut host,
+                &mut view,
+            );
+            edits.extend(out.edits);
+        };
+        d.frame(vec![], &mut ui);
+        for label in clicks {
+            let (right, label) = match label.strip_prefix('>') {
+                Some(l) => (true, l),
+                None => (false, *label),
+            };
+            let at = d
+                .find(label)
+                .unwrap_or_else(|| panic!("{label} not shown: {:?}", d.labels()));
+            if right {
+                d.right_click(at, &mut ui);
+            } else {
+                d.click(at, &mut ui);
+            }
+            d.frame(vec![], &mut ui);
+        }
+        edits
+    }
+
+    #[test]
+    fn the_strip_switches_mono_to_stereo_without_touching_monitoring() {
+        let mut m = Mixer::default();
+        let mut t = MixerTrack::new(TrackId(1), "Vox");
+        t.input = Some(TrackInput::Mono(0));
+        t.monitor = true;
+        m.tracks.push(t);
+        let edits = run(&m, &["M"]);
+        assert_eq!(
+            edits,
+            [(
+                Edit::SetTrackInput(TrackId(1), Some(TrackInput::Stereo(0))),
+                false
+            )]
+        );
+        // Right click on the input ("1" on a compact strip, INP-015): the
+        // list of inputs (INP-013).
+        let edits = run(&m, &[">1", "(none)"]);
+        assert_eq!(edits, [(Edit::SetTrackInput(TrackId(1), None), false)]);
+    }
+
+    #[test]
+    fn a_strip_without_input_chooses_one_from_its_menu() {
+        let mut m = Mixer::default();
+        m.tracks.push(MixerTrack::new(TrackId(1), "Vox"));
+        let edits = run(&m, &["—", "In 2 (Line)"]);
+        assert_eq!(
+            edits,
+            [(
+                Edit::SetTrackInput(TrackId(1), Some(TrackInput::Mono(1))),
+                false
+            )]
+        );
+    }
 }

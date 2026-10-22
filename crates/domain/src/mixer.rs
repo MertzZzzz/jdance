@@ -87,6 +87,32 @@ impl TrackInput {
             Self::Stereo(c) => format!("In {}+{}", c + 1, c + 2),
         }
     }
+
+    /// "1" / "1+2", for narrow strips.
+    pub fn number_label(self) -> String {
+        match self {
+            Self::Mono(c) => format!("{}", c + 1),
+            Self::Stereo(c) => format!("{}+{}", c + 1, c + 2),
+        }
+    }
+
+    pub fn is_stereo(self) -> bool {
+        matches!(self, Self::Stereo(_))
+    }
+
+    /// The other of mono and stereo on a device with `count` channels,
+    /// keeping the channel where it can (spec 0.2.4 INP-011): a mono
+    /// channel becomes the pair it starts, or the pair it ends when it is
+    /// the last channel; a pair becomes its left channel. `None` when the
+    /// device has no pair.
+    pub fn toggled(self, count: u16) -> Option<Self> {
+        match self {
+            Self::Stereo(c) => Some(Self::Mono(c)),
+            _ if count < 2 => None,
+            Self::Mono(c) if c + 1 < count => Some(Self::Stereo(c)),
+            Self::Mono(_) => Some(Self::Stereo(count - 2)),
+        }
+    }
 }
 
 impl MixerTrack {
@@ -479,6 +505,21 @@ fn reaches(edges: &BTreeMap<TrackId, BTreeSet<TrackId>>, from: TrackId, to: Trac
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mono_and_stereo_toggle_keeping_the_channel() {
+        use TrackInput::{Mono, Stereo};
+        // INP-011 for 1, 2 and 8 channels.
+        assert_eq!(Mono(0).toggled(1), None);
+        assert_eq!(Stereo(0).toggled(1), Some(Mono(0)));
+        assert_eq!(Mono(0).toggled(2), Some(Stereo(0)));
+        assert_eq!(Mono(1).toggled(2), Some(Stereo(0)));
+        assert_eq!(Mono(4).toggled(8), Some(Stereo(4)));
+        assert_eq!(Mono(7).toggled(8), Some(Stereo(6)));
+        assert_eq!(Stereo(6).toggled(8), Some(Mono(6)));
+        assert_eq!(Mono(3).number_label(), "4");
+        assert_eq!(Stereo(2).number_label(), "3+4");
+    }
 
     fn mixer(n: u64) -> Mixer {
         let mut m = Mixer::default();

@@ -54,6 +54,12 @@ impl Driver {
             .map(|(_, r)| r.center())
     }
 
+    /// Labels of the last frame, for failing tests.
+    #[allow(dead_code)]
+    pub fn labels(&self) -> Vec<&str> {
+        self.nodes.iter().map(|(l, _)| l.as_str()).collect()
+    }
+
     /// Bounds of the last frame's widget labelled `label`.
     pub fn find_rect(&self, label: &str) -> Option<Rect> {
         self.nodes.iter().find(|(l, _)| l == label).map(|(_, r)| *r)
@@ -70,6 +76,20 @@ impl Driver {
             pressed,
             modifiers: self.modifiers,
         }
+    }
+
+    /// A right click at `p` over three frames.
+    pub fn right_click(&mut self, p: Pos2, ui: &mut dyn FnMut(&mut egui::Ui)) {
+        let modifiers = self.modifiers;
+        let ev = |pressed| Event::PointerButton {
+            pos: p,
+            button: PointerButton::Secondary,
+            pressed,
+            modifiers,
+        };
+        self.frame(vec![self.moved(p)], ui);
+        self.frame(vec![ev(true)], ui);
+        self.frame(vec![ev(false)], ui);
     }
 
     /// A click at `p` over three frames (move, press, release).
