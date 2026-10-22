@@ -244,6 +244,8 @@ pub(crate) enum PlaylistAction {
     SelectChannel(ChannelId),
     AddLane,
     RenameLane(LaneId),
+    /// The colour window for a lane (spec 0.2.5 §6).
+    Color(LaneId),
     /// Put the caret and the playhead at a position.
     Seek(u64),
     /// The caret during a ruler gesture: the playhead follows only while
@@ -735,6 +737,10 @@ impl PlaylistView {
                     .context_menu(|ui| {
                         if ui.button("Rename…").clicked() {
                             out.actions.push(PlaylistAction::RenameLane(lane.id));
+                            ui.close();
+                        }
+                        if ui.button("Color…").clicked() {
+                            out.actions.push(PlaylistAction::Color(lane.id));
                             ui.close();
                         }
                         if ui.button("Remove lane").clicked() {
@@ -1355,6 +1361,11 @@ impl PlaylistView {
                         ))
                     })
                     .unwrap_or_else(|| color(lane.color)),
+                // A pattern's own colour, else the lane's (spec 0.2.5 §9).
+                Item::Pattern(c) => project
+                    .pattern(c.pattern)
+                    .and_then(|x| x.color)
+                    .map_or_else(|| color(lane.color), color),
                 _ => color(lane.color),
             };
             draw_clip(

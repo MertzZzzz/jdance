@@ -8,6 +8,7 @@ mod automation;
 mod automation_editor;
 mod browser;
 mod channel_settings;
+mod color_picker;
 mod dock;
 mod host;
 mod icons;
@@ -45,6 +46,7 @@ use egui::Key;
 use jdance_commands::{
     Edit, History, add_insert, add_lane, add_pattern, add_sample_channel, add_send, add_track,
     audio_channels, duplicate_clips, make_unique,
+    naming::{self, Named},
 };
 use jdance_domain::{
     ChannelId, ClipId, DEFAULT_EXPORT_TAIL_SECONDS, Effect, ExportFormat, ExportOptions,
@@ -118,6 +120,16 @@ pub(crate) enum RenameTarget {
     Automation(jdance_domain::AutomationId),
 }
 
+/// The colour window and what it colours (spec 0.2.5 §6).
+#[derive(Debug)]
+struct ColorWindow {
+    targets: Vec<Named>,
+    /// Colours before the window opened, to undo the live view.
+    originals: Vec<Option<[u8; 3]>>,
+    picker: color_picker::Picker,
+    title: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct RenameDialog {
     target: RenameTarget,
@@ -127,6 +139,8 @@ struct RenameDialog {
     color: Option<Option<[u8; 3]>>,
     /// The color shown when `color` is the default.
     default_color: [u8; 3],
+    /// The colour wheel opened from the colour square (spec 0.2.5 §6).
+    wheel: Option<color_picker::Picker>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,6 +158,8 @@ pub struct JdanceApp<H: Host, S: ProjectStore> {
     path: Option<PathBuf>,
     settings: Option<SettingsWindow>,
     rename: Option<RenameDialog>,
+    /// The colour window (spec 0.2.5 §6).
+    color: Option<ColorWindow>,
     show_mixer: bool,
     show_rack: bool,
     show_playlist: bool,
@@ -260,6 +276,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             path,
             settings,
             rename: None,
+            color: None,
             show_mixer: true,
             show_rack: true,
             show_playlist: true,
@@ -1426,6 +1443,10 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 self.start_rename(RenameTarget::Lane(id));
                 Ok(())
             }
+            A::Color(id) => {
+                self.open_color(vec![Named::Lane(id)]);
+                Ok(())
+            }
             A::Seek(ticks) => {
                 self.set_caret(ticks);
                 Ok(())
@@ -1919,6 +1940,10 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 self.start_rename(RenameTarget::Pattern(id));
                 Ok(())
             }
+            A::ColorPattern(id) => {
+                self.open_color(vec![Named::Pattern(id)]);
+                Ok(())
+            }
             A::DeletePattern(id) => {
                 self.confirm_delete = Some(playlist::Source::Pattern(id));
                 Ok(())
@@ -2397,7 +2422,13 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                     jdance_domain::color_or_default(t.color, i),
                 )
             }),
-            RenameTarget::Pattern(id) => p.pattern(id).map(|x| (x.name.clone(), None, [0; 3])),
+            RenameTarget::Pattern(id) => p.pattern(id).map(|x| {
+                (
+                    x.name.clone(),
+                    Some(x.color),
+                    jdance_domain::color::DEFAULT_PATTERN_COLOR,
+                )
+            }),
             RenameTarget::Lane(id) => p
                 .playlist
                 .lane(id)
@@ -2413,6 +2444,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 text,
                 color,
                 default_color,
+                wheel: None,
             });
         }
     }
@@ -2808,10 +2840,116 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 self.start_rename(RenameTarget::Track(id));
                 Ok(())
             }
+            mixer::MixerAction::Color(id) => {
+                self.open_color(vec![Named::Track(id)]);
+                Ok(())
+            }
         };
         match result {
             Ok(()) => self.sync_needed = true,
             Err(e) => self.notify(Notice::error(e.to_string()), now),
+        }
+    }
+
+    /// Opens the colour window on `targets` (one window: a second call
+    /// switches its target).
+    fn open_color(&mut self, targets: Vec<Named>) {
+        self.close_color();
+        let Some(&first) = targets.first() else {
+            return;
+        };
+        let p = &self.project;
+        let Some((name, _)) = naming::name_color(p, first) else {
+            return;
+        };
+        let originals = targets
+            .iter()
+            .map(|t| naming::name_color(p, *t).and_then(|(_, c)| c))
+            .collect();
+        let picker = color_picker::Picker::new(
+            naming::shown_color(p, first),
+            naming::default_color(p, first),
+            !self.layout.color_snap_off,
+            !self.layout.color_safe_off,
+        );
+        let what = match first {
+            Named::Lane(_) => "Lane",
+            Named::Track(_) => "Mixer track",
+            Named::Channel(_) => "Channel",
+            Named::Pattern(_) => "Pattern",
+        };
+        self.color = Some(ColorWindow {
+            targets,
+            originals,
+            picker,
+            title: format!("Color · {what} {name}"),
+        });
+    }
+
+    /// Closes the colour window, undoing its live view.
+    fn close_color(&mut self) {
+        if let Some(w) = self.color.take() {
+            for (t, c) in w.targets.iter().zip(&w.originals) {
+                naming::write_color(&mut self.project, *t, *c);
+            }
+        }
+    }
+
+    fn color_window(&mut self, ctx: &egui::Context, now: f64) {
+        let Some(w) = &mut self.color else {
+            return;
+        };
+        let mut open = true;
+        let mut event = color_picker::PickerEvent::None;
+        let history = self.layout.colors.clone();
+        egui::Window::new(&w.title)
+            .id(egui::Id::unique("color_window"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                event = w.picker.ui(ui, &history);
+            });
+        if self.layout.color_snap_off == w.picker.quantize
+            || self.layout.color_safe_off == w.picker.safe
+        {
+            self.layout.color_snap_off = !w.picker.quantize;
+            self.layout.color_safe_off = !w.picker.safe;
+            self.layout.changed = true;
+        }
+        if !open {
+            event = color_picker::PickerEvent::Cancel;
+        }
+        self.color_event(event, now);
+    }
+
+    /// Applies what the colour window did: a live view outside the
+    /// history, one undo step on Accept, the old colours on Cancel.
+    fn color_event(&mut self, event: color_picker::PickerEvent, now: f64) {
+        let Some(w) = &self.color else {
+            return;
+        };
+        let color = w.picker.current;
+        match event {
+            color_picker::PickerEvent::Changed => {
+                // Live view, outside the history.
+                for t in w.targets.clone() {
+                    naming::write_color(&mut self.project, t, Some(color));
+                }
+            }
+            color_picker::PickerEvent::Accept => {
+                let targets = w.targets.clone();
+                self.close_color();
+                if let Some(edit) =
+                    naming::set_name_color(&self.project, &targets, None, Some(color))
+                {
+                    self.apply(edit, false, now);
+                }
+                jdance_domain::color::push_history(&mut self.layout.colors, color);
+                self.layout.changed = true;
+            }
+            color_picker::PickerEvent::Cancel => self.close_color(),
+            color_picker::PickerEvent::None => {}
         }
     }
 
@@ -2821,6 +2959,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
         };
         let mut commit = false;
         let mut cancel = false;
+        let wheel_open = dialog.wheel.is_some();
         egui::Modal::new(egui::Id::unique("rename")).show(ctx, |ui| {
             ui.set_width(320.0);
             let title = if dialog.color.is_some() {
@@ -2833,7 +2972,9 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             ui.label(egui::RichText::new("Name").color(theme::MUTED));
             let r =
                 ui.add(egui::TextEdit::singleline(&mut dialog.text).desired_width(f32::INFINITY));
-            r.request_focus();
+            if dialog.wheel.is_none() {
+                r.request_focus();
+            }
             if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                 commit = true;
             }
@@ -2859,6 +3000,58 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                         }
                     }
                 });
+                ui.add_space(4.0);
+                // The colour square: click opens the wheel, right click a
+                // random safe colour; F2 random, F3 the last used (§6, §9).
+                ui.horizontal(|ui| {
+                    let (sq, resp) =
+                        ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::click());
+                    ui.painter().rect_filled(sq, 5.0, theme::rgb(current));
+                    let resp = resp.on_hover_text(
+                        "Click: the colour wheel · right click: a random colour (F2) · F3: the last used",
+                    );
+                    if resp.clicked() {
+                        dialog.wheel = match dialog.wheel {
+                            Some(_) => None,
+                            None => Some(color_picker::Picker::new(
+                                current,
+                                dialog.default_color,
+                                !self.layout.color_snap_off,
+                                !self.layout.color_safe_off,
+                            )),
+                        };
+                    }
+                    let (f2, f3) =
+                        ui.input(|i| (i.key_pressed(Key::F2), i.key_pressed(Key::F3)));
+                    if resp.secondary_clicked() || f2 {
+                        let seed = (ui.input(|i| i.time) * 1000.0) as u64;
+                        *color = Some(jdance_domain::color::random_safe(seed));
+                    }
+                    if f3 && let Some(&last) = self.layout.colors.first() {
+                        *color = Some(last);
+                    }
+                    ui.label(
+                        egui::RichText::new(jdance_domain::color::color_name(current))
+                            .color(theme::MUTED),
+                    );
+                });
+                if let Some(w) = &mut dialog.wheel {
+                    match w.ui(ui, &self.layout.colors) {
+                        color_picker::PickerEvent::Changed => *color = Some(w.current),
+                        color_picker::PickerEvent::Accept => {
+                            *color = Some(w.current);
+                            jdance_domain::color::push_history(&mut self.layout.colors, w.current);
+                            self.layout.changed = true;
+                            dialog.wheel = None;
+                        }
+                        color_picker::PickerEvent::Cancel => {
+                            *color = Some(w.original);
+                            dialog.wheel = None;
+                        }
+                        color_picker::PickerEvent::None => {}
+                    }
+                }
+                let current = color.unwrap_or(dialog.default_color);
                 ui.add_space(4.0);
                 let (rect, _) =
                     ui.allocate_exact_size(egui::vec2(160.0, 28.0), egui::Sense::hover());
@@ -2886,7 +3079,8 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 cancel |= ui.button("Cancel").clicked();
                 commit |= ui.button("Apply").clicked();
             });
-            cancel |= ui.input(|i| i.key_pressed(Key::Escape));
+            // Esc with the wheel open closes the wheel only.
+            cancel |= ui.input(|i| i.key_pressed(Key::Escape)) && !wheel_open;
         });
         if commit {
             let name = dialog.text.trim().to_owned();
@@ -2915,6 +3109,9 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 }
                 (RenameTarget::Track(id), Some(_)) => edits.push(Edit::SetTrackColor(id, color)),
                 (RenameTarget::Lane(id), Some(c)) => edits.push(Edit::SetLaneColor(id, c)),
+                (RenameTarget::Pattern(id), Some(_)) => {
+                    edits.push(Edit::SetPatternColor(id, color));
+                }
                 _ => {}
             }
             if !edits.is_empty() {
@@ -3538,6 +3735,7 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
             self.automation_request(request, now);
         }
         self.rename_dialog(&ctx, now);
+        self.color_window(&ctx, now);
         self.delete_channels_dialog(&ctx, now);
         self.length_dialog(&ctx, now);
         self.export_dialog(&ctx);
@@ -3727,5 +3925,42 @@ mod export_tests {
                 end: 8 * bar
             })
         );
+    }
+}
+
+#[cfg(test)]
+mod color_tests {
+    use super::*;
+    use crate::color_picker::PickerEvent;
+    use crate::test_ui::{NoStore, StubHost};
+
+    #[test]
+    fn the_colour_window_previews_live_and_accepts_in_one_step() {
+        let mut p = Project::new();
+        p.playlist = jdance_domain::Playlist::with_lanes(2, || p.ids.next());
+        let (a, b) = (p.playlist.lanes[0].id, p.playlist.lanes[1].id);
+        let mut app = JdanceApp::new(StubHost::default(), NoStore, p, None);
+        let before = app.project.playlist.lane(a).unwrap().color;
+        let red = [180, 40, 40];
+        // Live view, then Esc: back, nothing to undo.
+        app.open_color(vec![Named::Lane(a)]);
+        app.color.as_mut().unwrap().picker.current = red;
+        app.color_event(PickerEvent::Changed, 0.0);
+        assert_eq!(app.project.playlist.lane(a).unwrap().color, red);
+        app.color_event(PickerEvent::Cancel, 0.0);
+        assert_eq!(app.project.playlist.lane(a).unwrap().color, before);
+        assert!(app.color.is_none());
+        assert_eq!(app.history.undo_label(), None);
+        // Two lanes, Accept: both coloured, one undo step, in the history.
+        app.open_color(vec![Named::Lane(a), Named::Lane(b)]);
+        app.color.as_mut().unwrap().picker.current = red;
+        app.color_event(PickerEvent::Changed, 0.0);
+        app.color_event(PickerEvent::Accept, 0.0);
+        assert_eq!(app.project.playlist.lane(b).unwrap().color, red);
+        assert_eq!(app.layout.colors.first(), Some(&red));
+        app.history.undo(&mut app.project).unwrap();
+        assert_eq!(app.project.playlist.lane(a).unwrap().color, before);
+        assert_ne!(app.project.playlist.lane(b).unwrap().color, red);
+        assert_eq!(app.history.undo_label(), None, "one step");
     }
 }

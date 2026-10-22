@@ -30,6 +30,8 @@ pub(crate) enum ProjectAction {
     AddPattern,
     DuplicatePattern(PatternId),
     RenamePattern(PatternId),
+    /// The colour window (spec 0.2.5 §6).
+    ColorPattern(PatternId),
     /// Ask before deleting when clips use it.
     DeletePattern(PatternId),
     ImportFiles,
@@ -98,6 +100,13 @@ impl ProjectBrowser {
                         let uses = project.playlist.clips.iter().filter(|c| c.pattern == p.id).count();
                         let src = Source::Pattern(p.id);
                         let resp = item(ui, &p.name, &format!("{uses}"), source == Some(src));
+                        // The pattern's colour (spec 0.2.5 §9).
+                        let c = p.color.unwrap_or(jdance_domain::color::DEFAULT_PATTERN_COLOR);
+                        ui.painter().rect_filled(
+                            egui::Rect::from_min_size(resp.rect.min, egui::vec2(3.0, resp.rect.height())),
+                            1.0,
+                            crate::theme::rgb(c),
+                        );
                         let resp = resp.on_hover_text(format!(
                             "{} steps · used by {uses} clip(s)\nClick: place with Draw/Paint · drag into the Playlist · double-click: Piano Roll",
                             p.length_steps
@@ -116,6 +125,10 @@ impl ProjectBrowser {
                             }
                             if ui.button("Rename…").clicked() {
                                 out.push(ProjectAction::RenamePattern(p.id));
+                                ui.close();
+                            }
+                            if ui.button("Color…").clicked() {
+                                out.push(ProjectAction::ColorPattern(p.id));
                                 ui.close();
                             }
                             if ui.button("Duplicate").clicked() {

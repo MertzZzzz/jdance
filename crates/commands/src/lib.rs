@@ -7,6 +7,7 @@
 
 pub mod audio_channels;
 mod mixer;
+pub mod naming;
 pub mod note_tools;
 pub mod notes;
 mod playlist;
@@ -158,6 +159,8 @@ pub enum Edit {
 
     // Patterns and playlist.
     RenamePattern(PatternId, String),
+    /// Spec 0.2.5 §9; `None` = the default colour.
+    SetPatternColor(PatternId, Option<[u8; 3]>),
     /// Replaces a pattern (same ID) wholesale; inverse of length changes.
     ReplacePattern(Pattern),
     /// Keeps clips' repeat counts. Shortening with active steps beyond
@@ -308,6 +311,7 @@ impl Edit {
             Edit::SetLimiter(_) => "Change limiter",
             Edit::Batch(_) => "Edit",
             Edit::RenamePattern(..) => "Rename pattern",
+            Edit::SetPatternColor(..) => "Change pattern color",
             Edit::ReplacePattern(_) | Edit::SetPatternLength { .. } => "Change pattern length",
             Edit::AddPattern { .. } => "Add pattern",
             Edit::RemovePattern(_) => "Remove pattern",
@@ -707,6 +711,7 @@ impl Edit {
                 Ok(Edit::Batch(inverses))
             }
             Edit::RenamePattern(..)
+            | Edit::SetPatternColor(..)
             | Edit::ReplacePattern(_)
             | Edit::SetPatternLength { .. }
             | Edit::AddPattern { .. }

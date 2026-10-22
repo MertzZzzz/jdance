@@ -21,10 +21,15 @@ use jdance_plugin_api::PluginDescriptor;
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum MixerAction {
     AddTrack,
-    AddSend { from: TrackId, to: TrackId },
+    AddSend {
+        from: TrackId,
+        to: TrackId,
+    },
     AddEffect(TrackId, EffectKind),
     AddPlugin(TrackId, PluginDescriptor),
     Rename(TrackId),
+    /// The colour window (spec 0.2.5 §6).
+    Color(TrackId),
 }
 
 #[derive(Debug, Default)]
@@ -512,6 +517,10 @@ fn strip(
             resp.context_menu(|ui| {
                 if ui.button("Rename…").clicked() {
                     out.actions.push(MixerAction::Rename(t.id));
+                    ui.close();
+                }
+                if ui.button("Color…").clicked() {
+                    out.actions.push(MixerAction::Color(t.id));
                     ui.close();
                 }
                 if !t.is_master() && ui.button("Remove track").clicked() {

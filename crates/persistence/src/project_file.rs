@@ -14,7 +14,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 pub const FORMAT_TAG: &str = "jdance-project";
-pub const CURRENT_FORMAT_VERSION: u32 = 14;
+pub const CURRENT_FORMAT_VERSION: u32 = 15;
 pub const PROJECT_EXTENSION: &str = "jdance";
 
 /// Saves `project` to `path` atomically. Sample paths inside the project
@@ -209,6 +209,10 @@ fn migrate(version: u32, mut project: Value) -> Result<Value, PersistError> {
         // v14 (0.2.3) added the time signature (absent = 4/4) and mixer
         // track inputs (absent = none).
         v = 14;
+    }
+    if v == 14 {
+        // v15 (0.2.5) added pattern colours (absent = default).
+        v = 15;
     }
     match v {
         CURRENT_FORMAT_VERSION => Ok(project),
@@ -788,10 +792,10 @@ mod tests {
         p.mixer.tracks.push(t);
         save_project(&path, &p).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("\"format_version\": 14"), "{text}");
+        assert!(text.contains("\"format_version\": 15"), "{text}");
         assert_eq!(load_project(&path).unwrap(), p, "signature and track input");
 
-        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 14, "project": p});
+        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 15, "project": p});
         v["project"]["time_signature"]["denominator"] = serde_json::json!(3);
         assert!(parse_project(v.to_string().as_bytes()).is_err(), "SIG-001");
     }

@@ -7,6 +7,7 @@
 
 mod audio;
 mod automation;
+pub mod color;
 mod effects;
 mod export;
 mod ids;
@@ -753,6 +754,9 @@ pub struct Pattern {
     pub name: String,
     pub length_steps: u32,
     pub rows: Vec<StepRow>,
+    /// Display colour (spec 0.2.5 §9); `None` = the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<[u8; 3]>,
 }
 
 impl Pattern {
@@ -762,6 +766,7 @@ impl Pattern {
             name: name.into(),
             length_steps: DEFAULT_PATTERN_STEPS,
             rows: Vec::new(),
+            color: None,
         }
     }
 

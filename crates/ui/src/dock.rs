@@ -85,6 +85,11 @@ pub(crate) struct Layout {
     /// Playlist zoom keeps the mouse, not the caret, in place (spec 0.2.5
     /// §2, the reference behaviour).
     pub zoom_to_mouse: bool,
+    /// Colour window: recent colours (newest first), and the magnet and
+    /// lock turned off (spec 0.2.5 §6).
+    pub colors: Vec<[u8; 3]>,
+    pub color_snap_off: bool,
+    pub color_safe_off: bool,
     /// Global keys pressed in the undocked windows (KEY-001); the main
     /// window handles them.
     pub keys: crate::keys::GlobalKeys,
@@ -134,6 +139,20 @@ impl Layout {
         if self.zoom_to_mouse {
             text.push_str("zoom mouse\n");
         }
+        if !self.colors.is_empty() {
+            let hex: Vec<String> = self
+                .colors
+                .iter()
+                .map(|c| jdance_domain::color::to_hex(*c))
+                .collect();
+            text.push_str(&format!("colors {}\n", hex.join(" ")));
+        }
+        if self.color_snap_off {
+            text.push_str("color snap off\n");
+        }
+        if self.color_safe_off {
+            text.push_str("color safe off\n");
+        }
         text
     }
 
@@ -142,6 +161,8 @@ impl Layout {
         let mut undocked = BTreeMap::new();
         let mut no_follow = false;
         let mut zoom_to_mouse = false;
+        let mut colors = Vec::new();
+        let (mut color_snap_off, mut color_safe_off) = (false, false);
         for line in text.lines() {
             let f: Vec<&str> = line.split_whitespace().collect();
             if f[..] == ["follow", "off"] {
@@ -151,6 +172,25 @@ impl Layout {
             if f[..] == ["zoom", "mouse"] {
                 zoom_to_mouse = true;
                 continue;
+            }
+            if f.first() == Some(&"colors") {
+                colors = f[1..]
+                    .iter()
+                    .filter_map(|h| jdance_domain::color::parse_hex(h))
+                    .take(10)
+                    .collect();
+                continue;
+            }
+            match f[..] {
+                ["color", "snap", "off"] => {
+                    color_snap_off = true;
+                    continue;
+                }
+                ["color", "safe", "off"] => {
+                    color_safe_off = true;
+                    continue;
+                }
+                _ => {}
             }
             let [key, x, y, w, h] = f[..] else { continue };
             let Some(p) = Panel::ALL.into_iter().find(|p| p.key() == key) else {
@@ -176,6 +216,9 @@ impl Layout {
             undocked,
             no_follow,
             zoom_to_mouse,
+            colors,
+            color_snap_off,
+            color_safe_off,
             keys: Default::default(),
             changed: false,
         }
@@ -340,6 +383,11 @@ mod tests {
         assert!(Layout::from_text(&l.to_text()).no_follow);
         l.zoom_to_mouse = true;
         assert!(Layout::from_text(&l.to_text()).zoom_to_mouse);
+        l.colors = vec![[1, 2, 3], [255, 0, 16]];
+        l.color_safe_off = true;
+        let back = Layout::from_text(&l.to_text());
+        assert_eq!(back.colors, l.colors);
+        assert!(back.color_safe_off && !back.color_snap_off);
         assert!(!Layout::from_text("").no_follow);
     }
 

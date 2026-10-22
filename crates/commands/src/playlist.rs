@@ -79,6 +79,13 @@ pub(crate) fn apply(edit: &Edit, p: &mut Project) -> Result<Edit, EditError> {
                 std::mem::replace(&mut pat.name, name.clone()),
             ))
         }
+        Edit::SetPatternColor(id, color) => {
+            let pat = p.pattern_mut(*id).ok_or(EditError::NoSuchPattern(*id))?;
+            Ok(Edit::SetPatternColor(
+                *id,
+                std::mem::replace(&mut pat.color, *color),
+            ))
+        }
         Edit::ReplacePattern(new) => {
             if new.length_steps == 0 || new.length_steps > MAX_PATTERN_STEPS {
                 return Err(EditError::OutOfRange(f64::from(new.length_steps)));
