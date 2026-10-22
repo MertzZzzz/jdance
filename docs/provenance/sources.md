@@ -25,6 +25,10 @@
   `recording_audio.htm`, `envsettings_audio.htm`, `app_wiz3.htm`,
   `mixer_mixermenu.htm`; ответы на форуме Image-Line о маршруте записанных
   клипов помечены в спецификации [?].
+- Для `docs/spec/spec-0.2.3.md` (2026-10-22; прямое чтение руководства
+  недоступно, только выдержки поисковой выдачи): `html/menu_options.htm` —
+  пункты Metronome (Ctrl+M) и Recording precount (Ctrl+P). Остальное
+  поведение в этом документе помечено [?] или [Н].
 - ASIO SDK (Steinberg): лицензия GPLv3 с октября 2025 (сообщения
   Steinberg и прессы). Для `crates/audio-asio` (2026-10-22): раскладка
   интерфейса драйвера (порядок методов таблицы виртуальных функций),
