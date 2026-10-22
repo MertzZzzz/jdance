@@ -33,7 +33,9 @@ pub(crate) enum BrowserAction {
     /// Middle click: the file replaces the sample of the selected channel
     /// (spec 0.2.5 §3).
     ReplaceSample(PathBuf),
-    AddInstrument(PluginDescriptor),
+    /// An instrument into a new channel, an effect into the selected
+    /// mixer track (spec 0.2.5 §10 item 12).
+    LoadPlugin(PluginDescriptor),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -277,34 +279,27 @@ impl BrowserView {
     }
 
     fn plugins(&mut self, ui: &mut egui::Ui, host: &mut dyn Host, out: &mut Vec<BrowserAction>) {
-        let instruments = host.plugin_instruments();
-        let effects = host.plugin_effects();
+        let count = host.plugin_instruments().len() + host.plugin_effects().len();
         let open = self.open.contains(&Section::Plugins);
-        if disclosure_row(
-            ui,
-            open,
-            "Plugins",
-            Some(instruments.len() + effects.len()),
-            0,
-        )
-        .clicked()
-        {
+        if disclosure_row(ui, open, "Plugins", Some(count), 0).clicked() {
             toggle(&mut self.open, Section::Plugins);
         }
         if !open {
             return;
         }
-        for d in instruments {
-            let resp = item(ui, &format!("{} · instrument", d.plugin.name), 1)
-                .on_hover_text("Drag onto the Channel Rack or double-click to add");
-            resp.dnd_set_drag_payload(BrowserItem::Instrument(d.clone()));
-            if resp.double_clicked() {
-                out.push(BrowserAction::AddInstrument(d));
-            }
-        }
-        for d in effects {
-            item(ui, &format!("{} · effect", d.plugin.name), 1)
-                .on_hover_text("Add from a mixer track's + Effect menu");
+        // Search and favorites (spec 0.2.5 §10): double click or Enter
+        // loads an instrument into a new channel, an effect into the
+        // selected mixer track.
+        let picked = crate::plugin_list::PluginList::show_kept(
+            ui,
+            "browser_plugins",
+            host,
+            crate::plugin_list::Scope::All,
+            320.0,
+            false,
+        );
+        if let Some(d) = picked.load {
+            out.push(BrowserAction::LoadPlugin(d));
         }
     }
 

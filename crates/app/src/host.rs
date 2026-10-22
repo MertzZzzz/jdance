@@ -1665,6 +1665,17 @@ impl Host for AudioHost {
         }
     }
 
+    fn plugin_prefs(&self) -> jdance_plugin_api::search::PluginPrefs {
+        self.settings.plugin_prefs.clone()
+    }
+
+    fn set_plugin_prefs(&mut self, prefs: jdance_plugin_api::search::PluginPrefs) {
+        if self.settings.plugin_prefs != prefs {
+            self.settings.plugin_prefs = prefs;
+            self.save_settings();
+        }
+    }
+
     fn ui_layout(&self) -> String {
         self.settings.ui_layout.clone()
     }

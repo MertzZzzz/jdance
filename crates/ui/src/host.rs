@@ -644,5 +644,11 @@ pub trait Host {
         jdance_domain::name_presets::NamePresets::factory_patterns()
     }
     fn set_pattern_presets(&mut self, _presets: jdance_domain::name_presets::NamePresets) {}
+    /// Plugin favorites, recent plugins and the plugin list's filters
+    /// (spec 0.2.5 §10), from the user settings.
+    fn plugin_prefs(&self) -> jdance_plugin_api::search::PluginPrefs {
+        jdance_plugin_api::search::PluginPrefs::default()
+    }
+    fn set_plugin_prefs(&mut self, _prefs: jdance_plugin_api::search::PluginPrefs) {}
     fn take_notices(&mut self) -> Vec<Notice>;
 }

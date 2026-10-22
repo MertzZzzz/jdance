@@ -132,7 +132,7 @@ impl RackView {
         ui: &mut egui::Ui,
         project: &Project,
         pattern: PatternId,
-        host: &dyn Host,
+        host: &mut dyn Host,
         dir: Option<&Path>,
         marks: PatternMarks,
     ) -> RackOutput {
@@ -386,7 +386,7 @@ impl RackView {
         ui: &mut egui::Ui,
         project: &Project,
         pattern: &Pattern,
-        host: &dyn Host,
+        host: &mut dyn Host,
         out: &mut RackOutput,
     ) {
         ui.horizontal(|ui| {
@@ -447,18 +447,24 @@ impl RackView {
                         ui.close();
                     }
                     ui.menu_button("Instrument (VST3)", |ui| {
-                        let list = host.plugin_instruments();
-                        if list.is_empty() {
+                        if host.plugin_instruments().is_empty() {
                             ui.label("No VST3 instruments found. See Options → Plugins.");
+                            return;
                         }
-                        for d in list {
-                            if ui
-                                .button(format!("{} ({})", d.plugin.name, d.plugin.vendor))
-                                .clicked()
-                            {
-                                out.new_instruments.push(d);
-                                ui.close();
-                            }
+                        ui.set_min_width(300.0);
+                        let picked = crate::plugin_list::PluginList::show_kept(
+                            ui,
+                            "rack_instruments",
+                            host,
+                            crate::plugin_list::Scope::Instruments,
+                            320.0,
+                            true,
+                        );
+                        if let Some(d) = picked.load {
+                            out.new_instruments.push(d);
+                            ui.close();
+                        } else if picked.close {
+                            ui.close();
                         }
                     });
                 });

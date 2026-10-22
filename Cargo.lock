@@ -1376,6 +1376,7 @@ name = "jdance-plugin-api"
 version = "0.2.4"
 dependencies = [
  "serde",
+ "serde_json",
 ]
 
 [[package]]

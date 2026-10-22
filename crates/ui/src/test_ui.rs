@@ -106,10 +106,32 @@ pub(crate) struct StubHost {
     pub transport: crate::host::TransportStatus,
     pub seeks: Vec<u64>,
     pub live_inputs: Option<(u16, Vec<String>)>,
+    pub plugins: Vec<jdance_plugin_api::PluginDescriptor>,
+    pub plugin_prefs: jdance_plugin_api::search::PluginPrefs,
 }
 
 impl crate::Host for StubHost {
     fn poll(&mut self) {}
+    fn plugin_instruments(&self) -> Vec<jdance_plugin_api::PluginDescriptor> {
+        self.plugins
+            .iter()
+            .filter(|d| d.kind == jdance_plugin_api::PluginKind::Instrument)
+            .cloned()
+            .collect()
+    }
+    fn plugin_effects(&self) -> Vec<jdance_plugin_api::PluginDescriptor> {
+        self.plugins
+            .iter()
+            .filter(|d| d.kind == jdance_plugin_api::PluginKind::Effect)
+            .cloned()
+            .collect()
+    }
+    fn plugin_prefs(&self) -> jdance_plugin_api::search::PluginPrefs {
+        self.plugin_prefs.clone()
+    }
+    fn set_plugin_prefs(&mut self, prefs: jdance_plugin_api::search::PluginPrefs) {
+        self.plugin_prefs = prefs;
+    }
     fn set_project(&mut self, _: &jdance_domain::Project, _: Option<&std::path::Path>) {}
     fn play(&mut self) {
         self.transport.playing = true;

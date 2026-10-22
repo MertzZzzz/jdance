@@ -322,7 +322,6 @@ pub(crate) fn show(
     if mixer.track(view.selected).is_none() {
         view.selected = TrackId::MASTER;
     }
-    let plugins = host.plugin_effects();
     ui.horizontal(|ui| {
         ui.strong("Mixer");
         for (v, name) in [
@@ -384,8 +383,7 @@ pub(crate) fn show(
                 .show(ui, |ui| {
                     if let Some(t) = mixer.track(view.selected) {
                         inspector(
-                            ui, mixer, automation, t, latency, meters, &plugins, host, view,
-                            &mut out,
+                            ui, mixer, automation, t, latency, meters, host, view, &mut out,
                         );
                     }
                 });
@@ -880,7 +878,6 @@ fn inspector(
     t: &MixerTrack,
     latency: &LatencyInfo,
     meters: &MeterReadings,
-    plugins: &[PluginDescriptor],
     host: &mut dyn Host,
     view: &mut MixerView,
     out: &mut MixerOutput,
@@ -906,20 +903,25 @@ fn inspector(
                 }
                 ui.separator();
                 ui.menu_button("VST3", |ui| {
-                    if plugins.is_empty() {
+                    if host.plugin_effects().is_empty() {
                         ui.label("No plugins found. See Plugins.");
+                        return;
                     }
-                    egui::ScrollArea::vertical()
-                        .max_height(320.0)
-                        .show(ui, |ui| {
-                            for d in plugins {
-                                let label = format!("{} ({})", d.plugin.name, d.plugin.vendor);
-                                if ui.button(label).clicked() {
-                                    out.actions.push(MixerAction::AddPlugin(t.id, d.clone()));
-                                    ui.close();
-                                }
-                            }
-                        });
+                    ui.set_min_width(300.0);
+                    let picked = crate::plugin_list::PluginList::show_kept(
+                        ui,
+                        "mixer_effects",
+                        host,
+                        crate::plugin_list::Scope::Effects,
+                        320.0,
+                        true,
+                    );
+                    if let Some(d) = picked.load {
+                        out.actions.push(MixerAction::AddPlugin(t.id, d));
+                        ui.close();
+                    } else if picked.close {
+                        ui.close();
+                    }
                 });
             },
         );

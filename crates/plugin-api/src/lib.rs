@@ -7,10 +7,22 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod search;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginFormat {
     Vst3,
+}
+
+impl PluginFormat {
+    pub const ALL: [Self; 1] = [Self::Vst3];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Vst3 => "VST3",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
