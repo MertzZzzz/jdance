@@ -47,6 +47,7 @@ pub fn take_space_presses() -> u32 {
     SPACE_PRESSES.swap(0, Ordering::Relaxed)
 }
 
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub(crate) fn note_space_press() {
     SPACE_PRESSES.fetch_add(1, Ordering::Relaxed);
 }
