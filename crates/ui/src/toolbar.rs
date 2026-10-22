@@ -99,21 +99,17 @@ pub(crate) fn signature_field(ui: &mut egui::Ui, sig: TimeSignature) -> Option<T
                     chosen = Some(TimeSignature::new(n, sig.denominator));
                 }
                 ui.label("/");
-                egui::ComboBox::from_id_salt("sig_denominator")
-                    .width(44.0)
-                    .selected_text(sig.denominator.to_string())
-                    .show_ui(ui, |ui| {
-                        for d in jdance_domain::DENOMINATORS {
-                            if ui
-                                .selectable_label(d == sig.denominator, d.to_string())
-                                .clicked()
-                            {
-                                chosen = Some(TimeSignature::new(sig.numerator, d));
-                            }
-                        }
-                    })
-                    .response
-                    .on_hover_text("Note value of a beat");
+                // Buttons, not a combo box: egui keeps one open popup per
+                // viewport, so a combo here would close this popup (BUG-001).
+                for d in jdance_domain::DENOMINATORS {
+                    if ui
+                        .selectable_label(d == sig.denominator, d.to_string())
+                        .on_hover_text("Note value of a beat")
+                        .clicked()
+                    {
+                        chosen = Some(TimeSignature::new(sig.numerator, d));
+                    }
+                }
             });
             ui.separator();
             ui.horizontal_wrapped(|ui| {
@@ -264,5 +260,33 @@ mod tests {
         assert!((t.bpm().unwrap() - 240.0).abs() < 1e-9);
         t.reset();
         assert_eq!(t.bpm(), None);
+    }
+}
+
+#[cfg(test)]
+mod popup_tests {
+    use super::*;
+    use crate::test_ui::Driver;
+
+    /// BUG-001: the denominator can be chosen inside the field's popup.
+    #[test]
+    fn the_denominator_is_chosen_in_the_popup() {
+        let mut d = Driver::new();
+        let mut sig = TimeSignature::COMMON;
+        let mut changes = 0;
+        let mut ui = |ui: &mut egui::Ui| {
+            if let Some(new) = signature_field(ui, sig) {
+                sig = new;
+                changes += 1;
+            }
+        };
+        d.frame(vec![], &mut ui);
+        let field = d.find("4/4").expect("the field");
+        d.click(field, &mut ui);
+        d.frame(vec![], &mut ui);
+        let eight = d.find("8").expect("the denominator buttons are shown");
+        d.click(eight, &mut ui);
+        assert_eq!(sig, TimeSignature::new(4, 8));
+        assert_eq!(changes, 1);
     }
 }

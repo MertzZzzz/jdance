@@ -27,6 +27,8 @@ mod scripts;
 pub use scripts::ScriptJob;
 mod sample_editor;
 mod settings;
+#[cfg(test)]
+mod test_ui;
 mod theme;
 mod toolbar;
 mod widgets;

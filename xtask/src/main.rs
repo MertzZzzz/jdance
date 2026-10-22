@@ -90,7 +90,8 @@ fn main() -> ExitCode {
     let result = match cmd.as_deref() {
         Some("check") => check_deps()
             .and_then(|()| check_spdx())
-            .and_then(|()| check_meter()),
+            .and_then(|()| check_meter())
+            .and_then(|()| check_popups()),
         Some("gen-demo") => gen_demo(),
         _ => Err("usage: cargo xtask <check|gen-demo>".into()),
     };
@@ -298,6 +299,74 @@ fn check_meter() -> Result<(), String> {
     }
 }
 
+/// egui keeps one open popup per viewport: a combo box or menu button
+/// inside a toggle-button popup closes its parent when it opens (spec
+/// 0.2.4 BUG-003).
+fn check_popups() -> Result<(), String> {
+    let mut found = Vec::new();
+    walk(&root().join("crates/ui/src"), &mut |p| {
+        if p.extension().is_none_or(|e| e != "rs") {
+            return;
+        }
+        let Ok(text) = std::fs::read_to_string(p) else {
+            return;
+        };
+        for hit in nested_popups(&text) {
+            found.push(format!("{}:{hit}", p.display()));
+        }
+    });
+    if found.is_empty() {
+        println!("popups: ok");
+        Ok(())
+    } else {
+        Err(format!(
+            "combo box or menu inside a toggle-button popup (BUG-003):\n{}",
+            found.join("\n")
+        ))
+    }
+}
+
+/// 1-based lines of `ComboBox`/`menu_button` calls inside the closure of
+/// `Popup::from_toggle_button_response(..).show(..)`.
+fn nested_popups(text: &str) -> Vec<usize> {
+    const OPEN: &str = "Popup::from_toggle_button_response";
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(at) = text[from..].find(OPEN).map(|i| i + from) {
+        from = at + OPEN.len();
+        let Some(show) = text[from..].find(".show(").map(|i| i + from) else {
+            break;
+        };
+        let Some(body) = text[show..].find('{').map(|i| i + show) else {
+            break;
+        };
+        let mut depth = 0usize;
+        let mut end = text.len();
+        for (i, c) in text[body..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = body + i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let inner = &text[body..end];
+        for pat in ["ComboBox", "menu_button"] {
+            for (i, _) in inner.match_indices(pat) {
+                out.push(text[..body + i].lines().count());
+            }
+        }
+        from = end;
+    }
+    out.sort_unstable();
+    out
+}
+
 fn walk(dir: &Path, f: &mut dyn FnMut(&Path)) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -493,4 +562,17 @@ fn gen_demo() -> Result<(), String> {
     save_project(&dir.join("demo.jdance"), &project).map_err(|e| e.to_string())?;
     println!("wrote {}", dir.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::nested_popups;
+
+    #[test]
+    fn finds_a_combo_box_inside_a_toggle_popup() {
+        let bad = "let b = ui.button(\"x\");\negui::Popup::from_toggle_button_response(&b)\n    .show(|ui| {\n        egui::ComboBox::from_id_salt(1).show_ui(ui, |ui| {});\n    });\n";
+        assert_eq!(nested_popups(bad), [4]);
+        let ok = "egui::Popup::from_toggle_button_response(&b)\n    .show(|ui| {\n        ui.label(\"x\");\n    });\negui::ComboBox::from_id_salt(1);\n";
+        assert!(nested_popups(ok).is_empty());
+    }
 }
