@@ -12,8 +12,10 @@
 //! the marker at the start of a clip's name or with Shift + right click.
 //! Every gesture is one undo step. Files dropped from the Browser or the
 //! system become audio clips; below the last lane a new lane is made.
-//! Double-click opens a clip's editor. Ruler: click seeks, Shift-drag sets
-//! the loop. Alt disables snapping while dragging.
+//! Double-click opens a clip's editor. Ruler (spec 0.2.4): the left button
+//! takes the caret along; Shift-drag makes a time selection (the loop
+//! range), moves one or moves its edge; a double click clears it. Alt
+//! disables snapping while dragging.
 //!
 //! Automation clips (spec 0.2.0 §11) place a range of an automation
 //! source like any clip; their points are edited in the Automation
@@ -99,7 +101,6 @@ pub(crate) enum Source {
 enum DragKind {
     Move,
     Edge(ClipId, Edge),
-    Loop(u64),
     /// Draw: a copy of the source follows the pointer until release.
     Place,
     /// Paint: copies from `start` on `lane` up to the pointer.
@@ -142,6 +143,8 @@ pub(crate) struct PlaylistView {
     pub armed: Option<LaneId>,
     /// The Song caret, drawn in song mode (spec 0.2.3 CUR-005).
     pub caret: Option<u64>,
+    /// Caret and time-selection gestures on the ruler (spec 0.2.4).
+    ruler: crate::ruler::Ruler,
     /// The take being recorded, drawn as a growing clip (REC-014).
     pub live: Option<LiveTake>,
     /// Keep the playhead in view while playing (REC-017).
@@ -178,6 +181,7 @@ impl Default for PlaylistView {
             rmb: crate::widgets::RightSweep::default(),
             armed: None,
             caret: None,
+            ruler: crate::ruler::Ruler::default(),
             live: None,
             follow: true,
             follow_paused: false,
@@ -203,7 +207,13 @@ pub(crate) enum PlaylistAction {
     SelectChannel(ChannelId),
     AddLane,
     RenameLane(LaneId),
+    /// Put the caret and the playhead at a position.
     Seek(u64),
+    /// The caret during a ruler gesture: the playhead follows only while
+    /// stopped (spec 0.2.4 CUR-012).
+    CaretPreview(u64),
+    /// Open the export with the Selection range (SEL-007).
+    RenderSelection,
     /// Import a file as an audio clip; `lane: None` = a new lane.
     ImportAudio {
         path: PathBuf,
@@ -234,6 +244,12 @@ pub(crate) struct PlaylistOutput {
 
 fn color(c: [u8; 3]) -> Color32 {
     theme::rgb(c)
+}
+
+/// A length as whole bars, beats and ticks: "4:2:000".
+fn length_text(ticks: u64, sig: TimeSignature) -> String {
+    let (bars, beats, rest) = sig.split(ticks);
+    format!("{bars}:{beats}:{rest:03}")
 }
 
 fn snap(ticks: i64, grid: u64) -> i64 {
@@ -680,8 +696,19 @@ impl PlaylistView {
         let in_lanes = |p: Pos2| p.y >= origin.y + RULER_H && p.y < origin.y + lanes_bottom;
 
         self.background(&painter, rect, sig, bars, n_lanes, lanes_bottom);
-        if let Some((a, b)) = pl.loop_range {
-            let fill = if pl.loop_enabled {
+        self.ruler_input(ui, project, rect, ppt, out);
+        let gesture = self.ruler.active().copied();
+        if gesture.is_some() {
+            // The ruler scrolls the view itself (CUR-013).
+            self.follow_paused = true;
+        }
+        let selecting = gesture.filter(|g| g.selecting());
+        let loop_range = match selecting {
+            Some(g) => g.selection(),
+            None => pl.loop_range,
+        };
+        if let Some((a, b)) = loop_range {
+            let fill = if pl.loop_enabled || selecting.is_some() {
                 theme::AMBER.gamma_multiply(0.6)
             } else {
                 theme::MUTED.gamma_multiply(0.3)
@@ -693,6 +720,31 @@ impl PlaylistView {
                 ),
                 CornerRadius::ZERO,
                 fill,
+            );
+        }
+        if let Some(g) = selecting
+            && let Some((a, b)) = g.selection()
+        {
+            // The selection being made, across the lanes (SEL-005).
+            painter.rect_filled(
+                Rect::from_min_max(
+                    pos2(x_of(a), origin.y + RULER_H),
+                    pos2(x_of(b), origin.y + lanes_bottom),
+                ),
+                CornerRadius::ZERO,
+                theme::AMBER.gamma_multiply(0.08),
+            );
+            let text = if g.moving() {
+                bars_text(a, sig)
+            } else {
+                length_text(b - a, sig)
+            };
+            painter.text(
+                pos2(x_of(b) + 4.0, origin.y + 2.0),
+                Align2::LEFT_TOP,
+                text,
+                FontId::monospace(10.0),
+                theme::TEXT,
             );
         }
 
@@ -709,8 +761,9 @@ impl PlaylistView {
         if response.drag_started_by(PointerButton::Primary)
             && let Some(p) = press.or(response.interact_pointer_pos())
         {
+            // The ruler has its own gestures (CUR-015).
             let kind = if p.y < origin.y + RULER_H {
-                shift.then(|| DragKind::Loop(snap(tick_at(p.x), bar_ticks).max(0) as u64))
+                None
             } else if ctrl {
                 Some(DragKind::Frame { add: shift })
             } else {
@@ -905,18 +958,6 @@ impl PlaylistView {
                         }
                     }
                 }
-                DragKind::Loop(a) => {
-                    if let Some(p) = pointer {
-                        let b = snap(tick_at(p.x), bar_ticks).max(0) as u64;
-                        let (lo, hi) = (a.min(b), a.max(b));
-                        if hi > lo {
-                            out.edits.push(Edit::SetLoop {
-                                range: Some((lo, hi)),
-                                enabled: true,
-                            });
-                        }
-                    }
-                }
                 DragKind::Place | DragKind::Paint { .. } => {
                     if let (Some(&(lane, start, _)), Some(source)) = (ghosts.first(), self.source) {
                         out.actions.push(PlaylistAction::Place {
@@ -988,9 +1029,6 @@ impl PlaylistView {
             });
             if let Some((k, _)) = on_marker {
                 open_menu = Some(Some(items[k].item.id()));
-            } else if p.y < origin.y + RULER_H {
-                out.actions
-                    .push(PlaylistAction::Seek(snap(tick_at(p.x), grid).max(0) as u64));
             } else if in_lanes(p) {
                 match (hit(p), self.tool) {
                     (Some((k, _)), Tool::Delete) => {
@@ -1218,17 +1256,6 @@ impl PlaylistView {
             );
         }
 
-        if let (Some(DragKind::Loop(a)), Some(p)) = (drag_kind, pointer) {
-            let b = snap(tick_at(p.x), bar_ticks).max(0) as u64;
-            painter.rect_filled(
-                Rect::from_min_max(
-                    pos2(x_of(a.min(b)), origin.y),
-                    pos2(x_of(a.max(b)), origin.y + RULER_H),
-                ),
-                CornerRadius::ZERO,
-                theme::AMBER.gamma_multiply(0.35),
-            );
-        }
         if let (Some(t), Some(pos)) = (&self.live, playhead) {
             let row = t
                 .lane
@@ -1238,7 +1265,11 @@ impl PlaylistView {
             live_take(&painter, r, t);
         }
         self.follow_playhead(ui, playhead.map(x_of));
-        if let Some(c) = self.caret {
+        let caret = match gesture {
+            Some(g) if self.caret.is_some() => Some(g.caret()),
+            _ => self.caret,
+        };
+        if let Some(c) = caret {
             // Caret: a triangle on the ruler and a dashed line (CUR-005).
             let x = x_of(c);
             painter.add(egui::Shape::convex_polygon(
@@ -1277,6 +1308,89 @@ impl PlaylistView {
             };
             ui.ctx().set_cursor_icon(icon);
         }
+    }
+
+    /// Caret and selection gestures on the ruler, its double click and
+    /// its menu (spec 0.2.4 CUR-010…015, SEL-001…011).
+    fn ruler_input(
+        &mut self,
+        ui: &mut egui::Ui,
+        project: &Project,
+        rect: Rect,
+        ppt: f32,
+        out: &mut PlaylistOutput,
+    ) {
+        let pl = &project.playlist;
+        let sig = project.time_signature;
+        let frame = crate::ruler::RulerFrame {
+            rect: Rect::from_min_size(rect.min, vec2(rect.width(), RULER_H)),
+            origin_x: rect.min.x,
+            px_per_tick: ppt,
+            grids: crate::ruler::Grids::new(self.grid, u64::from(sig.beat_ticks())),
+            caret: self.caret.unwrap_or(0),
+            selection: pl.loop_range,
+            select: true,
+            limit: None,
+        };
+        let (response, r) = self
+            .ruler
+            .ui(ui, egui::Id::unique("playlist-ruler"), &frame);
+        if let Some(c) = r.preview {
+            out.actions.push(PlaylistAction::CaretPreview(c));
+        }
+        if let Some(end) = r.end {
+            out.actions.push(PlaylistAction::Seek(end.caret));
+            if let Some(range) = end.selection {
+                // Shift-selections turn the loop on, as before 0.2.4 (SEL-003).
+                out.edits.push(Edit::SetLoop {
+                    range: Some(range),
+                    enabled: true,
+                });
+            }
+        }
+        if r.clear && pl.loop_range.is_some() {
+            out.edits.push(Edit::SetLoop {
+                range: None,
+                enabled: false,
+            });
+        }
+        response.context_menu(|ui| {
+            let has = pl.loop_range.is_some_and(|(a, b)| b > a);
+            if ui
+                .add_enabled(has, egui::Button::new("Clear selection"))
+                .on_hover_text("Also: double-click the ruler")
+                .clicked()
+            {
+                out.edits.push(Edit::SetLoop {
+                    range: None,
+                    enabled: false,
+                });
+                ui.close();
+            }
+            let end = sig.ceil_to_bar(project.arrangement_end_ticks());
+            if ui
+                .add_enabled(end > 0, egui::Button::new("Select whole song"))
+                .clicked()
+            {
+                out.edits.push(Edit::SetLoop {
+                    range: Some((0, end)),
+                    enabled: pl.loop_enabled,
+                });
+                ui.close();
+            }
+            if ui
+                .add_enabled(has, egui::Button::new("Render selection…"))
+                .clicked()
+            {
+                out.actions.push(PlaylistAction::RenderSelection);
+                ui.close();
+            }
+        });
+    }
+
+    /// A gesture on the ruler is moving the caret.
+    pub(crate) fn caret_dragging(&self) -> bool {
+        self.ruler.active().is_some()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2002,5 +2116,148 @@ mod tests {
             out.textures_delta.clear();
         }
         assert_eq!(got, (false, true));
+    }
+}
+
+#[cfg(test)]
+mod ruler_tests {
+    use super::*;
+    use crate::test_ui::{Driver, StubHost};
+    use egui::{Modifiers, Pos2};
+
+    /// Runs the gesture `points` (press at the first, release at the
+    /// last) on the ruler and returns everything the Playlist reported.
+    fn gesture(
+        view: &mut PlaylistView,
+        project: &Project,
+        shift: bool,
+        ticks: &[u64],
+    ) -> PlaylistOutput {
+        let mut d = Driver::new();
+        let mut host = StubHost::default();
+        let mut all = PlaylistOutput::default();
+        let mut ui = |ui: &mut egui::Ui| {
+            let out = view.show(
+                ui,
+                project,
+                None,
+                TICKS_PER_STEP,
+                PatternId(0),
+                &mut host,
+                None,
+            );
+            all.edits.extend(out.edits);
+            all.actions.extend(out.actions);
+        };
+        d.frame(vec![], &mut ui);
+        let ruler = d.find_rect("Timeline ruler").expect("ruler");
+        // Default zoom: 120 px per whole note.
+        let at = |t: u64| {
+            Pos2::new(
+                ruler.left() + t as f32 * 120.0 / 3840.0 + 0.1,
+                ruler.center().y,
+            )
+        };
+        d.modifiers = if shift {
+            Modifiers::SHIFT
+        } else {
+            Modifiers::NONE
+        };
+        let first = at(ticks[0]);
+        d.frame(vec![d.moved(first)], &mut ui);
+        d.frame(vec![d.button(first, true)], &mut ui);
+        for &t in &ticks[1..] {
+            d.frame(vec![d.moved(at(t))], &mut ui);
+        }
+        let last = at(*ticks.last().unwrap());
+        d.frame(vec![d.button(last, false)], &mut ui);
+        d.frame(vec![], &mut ui);
+        all
+    }
+
+    fn project() -> Project {
+        let mut p = Project::new();
+        p.playlist = jdance_domain::Playlist::with_lanes(2, || 0);
+        p
+    }
+
+    #[test]
+    fn the_caret_follows_a_drag_on_the_ruler() {
+        let p = project();
+        let mut view = PlaylistView {
+            caret: Some(0),
+            ..PlaylistView::default()
+        };
+        let out = gesture(&mut view, &p, false, &[960, 1920, 3840, 7680]);
+        let previews: Vec<u64> = out
+            .actions
+            .iter()
+            .filter_map(|a| match a {
+                PlaylistAction::CaretPreview(t) => Some(*t),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(previews, [960, 1920, 3840, 7680], "every frame");
+        assert!(out.actions.contains(&PlaylistAction::Seek(7680)));
+        assert!(out.edits.is_empty(), "no selection, no clip frame");
+    }
+
+    #[test]
+    fn a_shift_drag_makes_one_selection_and_turns_the_loop_on() {
+        let p = project();
+        let mut view = PlaylistView {
+            caret: Some(0),
+            ..PlaylistView::default()
+        };
+        let out = gesture(&mut view, &p, true, &[960, 2400, 4800]);
+        assert_eq!(
+            out.edits,
+            [Edit::SetLoop {
+                range: Some((960, 4800)),
+                enabled: true
+            }]
+        );
+        assert!(
+            out.actions.contains(&PlaylistAction::Seek(960)),
+            "caret on the start"
+        );
+    }
+
+    #[test]
+    fn a_shift_drag_inside_moves_the_selection_and_a_double_click_clears_it() {
+        let mut p = project();
+        p.playlist.loop_range = Some((3840, 7680));
+        p.playlist.loop_enabled = true;
+        let mut view = PlaylistView {
+            caret: Some(0),
+            ..PlaylistView::default()
+        };
+        let out = gesture(&mut view, &p, true, &[4800, 5760, 6720]);
+        assert_eq!(
+            out.edits,
+            [Edit::SetLoop {
+                range: Some((5760, 9600)),
+                enabled: true
+            }]
+        );
+        // Double click.
+        let mut d = Driver::new();
+        let mut host = StubHost::default();
+        let mut edits = Vec::new();
+        let mut ui = |ui: &mut egui::Ui| {
+            let out = view.show(ui, &p, None, TICKS_PER_STEP, PatternId(0), &mut host, None);
+            edits.extend(out.edits);
+        };
+        d.frame(vec![], &mut ui);
+        let at = d.find("Timeline ruler").unwrap();
+        d.click(at, &mut ui);
+        d.click(at, &mut ui);
+        assert_eq!(
+            edits,
+            [Edit::SetLoop {
+                range: None,
+                enabled: false
+            }]
+        );
     }
 }

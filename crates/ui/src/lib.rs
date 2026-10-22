@@ -23,6 +23,7 @@ mod plugins;
 mod project_browser;
 mod rack;
 mod recording;
+mod ruler;
 mod scripts;
 pub use scripts::ScriptJob;
 mod sample_editor;
@@ -944,7 +945,9 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             ui.separator();
             // Position; stopped in song mode the caret; during a count-in
             // the beats left (MET-022).
+            // Also the caret while it is dragged on the ruler (CUR-014).
             let ticks = match transport.position_ticks {
+                Some(_) if self.song_mode && self.playlist_view.caret_dragging() => self.caret,
                 Some(p) if transport.playing || !self.song_mode => p,
                 _ => self.caret,
             };
@@ -1174,6 +1177,18 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             }
             A::Seek(ticks) => {
                 self.set_caret(ticks);
+                Ok(())
+            }
+            A::CaretPreview(ticks) => {
+                // While playing, the playhead jumps on release (CUR-012).
+                self.caret = ticks;
+                if self.song_mode && !self.host.transport().playing {
+                    self.host.seek_ticks(ticks);
+                }
+                Ok(())
+            }
+            A::RenderSelection => {
+                self.open_export_dialog();
                 Ok(())
             }
             A::Place {

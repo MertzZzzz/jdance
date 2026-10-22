@@ -54,6 +54,11 @@ impl Driver {
             .map(|(_, r)| r.center())
     }
 
+    /// Bounds of the last frame's widget labelled `label`.
+    pub fn find_rect(&self, label: &str) -> Option<Rect> {
+        self.nodes.iter().find(|(l, _)| l == label).map(|(_, r)| *r)
+    }
+
     pub fn moved(&self, p: Pos2) -> Event {
         Event::PointerMoved(p)
     }
@@ -72,5 +77,104 @@ impl Driver {
         self.frame(vec![self.moved(p)], ui);
         self.frame(vec![self.button(p, true)], ui);
         self.frame(vec![self.button(p, false)], ui);
+    }
+}
+
+/// A host with no audio: records seeks, reports a settable transport.
+#[derive(Debug, Default)]
+pub(crate) struct StubHost {
+    pub transport: crate::host::TransportStatus,
+    pub seeks: Vec<u64>,
+    pub live_inputs: Option<(u16, Vec<String>)>,
+}
+
+impl crate::Host for StubHost {
+    fn poll(&mut self) {}
+    fn set_project(&mut self, _: &jdance_domain::Project, _: Option<&std::path::Path>) {}
+    fn play(&mut self) {
+        self.transport.playing = true;
+    }
+    fn stop(&mut self) {
+        self.transport.playing = false;
+    }
+    fn set_mode(&mut self, _: crate::host::TransportMode) {}
+    fn seek_ticks(&mut self, ticks: u64) {
+        self.seeks.push(ticks);
+    }
+    fn transport(&self) -> crate::host::TransportStatus {
+        self.transport
+    }
+    fn latency(&self) -> crate::host::LatencyInfo {
+        crate::host::LatencyInfo::default()
+    }
+    fn meters(&self) -> crate::host::MeterReadings {
+        crate::host::MeterReadings::default()
+    }
+    fn stream(&self) -> Option<crate::host::StreamStatus> {
+        None
+    }
+    fn sample_status(
+        &self,
+        _: &jdance_domain::SampleRef,
+        _: Option<&std::path::Path>,
+    ) -> Option<crate::host::SampleStatus> {
+        None
+    }
+    fn live_inputs(&self) -> Option<(u16, Vec<String>)> {
+        self.live_inputs.clone()
+    }
+    fn backends(&self) -> Vec<(jdance_audio_api::BackendId, String)> {
+        Vec::new()
+    }
+    fn devices(
+        &self,
+        _: &jdance_audio_api::BackendId,
+    ) -> Result<Vec<jdance_audio_api::DeviceInfo>, jdance_audio_api::AudioError> {
+        Ok(Vec::new())
+    }
+    fn capabilities(
+        &self,
+        _: &jdance_audio_api::DeviceKey,
+    ) -> Result<jdance_audio_api::DeviceCapabilities, jdance_audio_api::AudioError> {
+        Err(jdance_audio_api::AudioError::Backend("stub".into()))
+    }
+    fn saved_settings(
+        &self,
+        _: &jdance_audio_api::DeviceKey,
+    ) -> Option<jdance_audio_api::DeviceSettings> {
+        None
+    }
+    fn current_device(&self) -> Option<jdance_audio_api::DeviceKey> {
+        None
+    }
+    fn open_device(
+        &mut self,
+        _: jdance_audio_api::DeviceKey,
+        _: jdance_audio_api::DeviceSettings,
+    ) -> Result<(), jdance_audio_api::AudioError> {
+        Ok(())
+    }
+    fn close_device(&mut self) {}
+    fn open_control_panel(
+        &mut self,
+        _: &jdance_audio_api::DeviceKey,
+    ) -> Result<(), jdance_audio_api::AudioError> {
+        Ok(())
+    }
+    fn export_audio(
+        &mut self,
+        _: &jdance_domain::Project,
+        _: Option<&std::path::Path>,
+        _: std::path::PathBuf,
+        _: jdance_domain::ExportOptions,
+        _: String,
+        _: String,
+    ) {
+    }
+    fn estimated_tail_seconds(&mut self, _: &jdance_domain::Project) -> f32 {
+        0.0
+    }
+    fn take_notices(&mut self) -> Vec<crate::host::Notice> {
+        Vec::new()
     }
 }
