@@ -278,6 +278,7 @@ mod tests {
             length,
             key,
             velocity: 0.8,
+            muted: false,
         }
     }
 

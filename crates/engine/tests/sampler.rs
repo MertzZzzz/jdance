@@ -28,6 +28,7 @@ fn note(step: u32, steps: u32, key: u8) -> Note {
         length: steps * TICKS_PER_STEP,
         key,
         velocity: 1.0,
+        muted: false,
     }
 }
 

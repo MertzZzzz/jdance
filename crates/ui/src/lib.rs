@@ -134,6 +134,13 @@ struct ColorWindow {
     title: String,
 }
 
+/// Which editor takes the editor keys (Ctrl+B, Ctrl+D, tools…).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyFocus {
+    Playlist,
+    PianoRoll,
+}
+
 /// The plugin picker window: which plugins, and the mixer track an
 /// effect goes into (`None`: the selected one).
 #[derive(Debug)]
@@ -204,6 +211,13 @@ pub struct JdanceApp<H: Host, S: ProjectStore> {
     presets: jdance_domain::name_presets::NamePresets,
     /// Options › Pattern name presets is open.
     show_presets: bool,
+    /// The project revision after a Ctrl+Z undo: the next Ctrl+Z redoes
+    /// while the project is still there.
+    undo_toggle: Option<u64>,
+    /// The editor last clicked gets the editor keys (spec 0.2.7 §1).
+    key_focus: KeyFocus,
+    /// Options › Keyboard shortcuts is open.
+    show_keys: bool,
     /// The plugin picker (F8, spec 0.2.5 §10 item 13), also opened by
     /// the Channel Rack's and mixer's add buttons.
     plugin_picker: Option<PluginPicker>,
@@ -329,6 +343,9 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             presets,
             show_presets: false,
             plugin_picker: None,
+            undo_toggle: None,
+            key_focus: KeyFocus::Playlist,
+            show_keys: false,
             show_mixer: true,
             show_rack: true,
             show_playlist: true,
@@ -811,6 +828,26 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
         {
             self.new_pattern(now);
         }
+        // F7: the Piano Roll of the selected channel, or closes it.
+        if !ctx.egui_wants_keyboard_input()
+            && ctx.input_mut(|i| crate::bindings::PIANO_ROLL.take(i))
+        {
+            if let Some(mut roll) = self.piano.take() {
+                roll.release(&mut self.host);
+            } else {
+                let ch = self
+                    .project
+                    .channels
+                    .iter()
+                    .filter(|c| !c.is_audio())
+                    .find(|c| self.rack_view.selection.contains(&c.id))
+                    .or_else(|| self.project.channels.iter().find(|c| !c.is_audio()));
+                if let Some(c) = ch {
+                    self.piano = Some(piano::PianoRoll::new(c.id));
+                    self.key_focus = KeyFocus::PianoRoll;
+                }
+            }
+        }
         // F8: the plugin picker.
         if !ctx.egui_wants_keyboard_input()
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::F8))
@@ -822,8 +859,22 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
         }
         if k.redo {
             self.redo(now);
-        } else if k.undo {
+        } else if k.undo_step {
             self.undo(now);
+            self.undo_toggle = None;
+        } else if k.undo {
+            // Ctrl+Z undoes the last action, and again redoes it, as long
+            // as nothing changed in between (spec 0.2.7 §1 item 13).
+            match self.undo_toggle {
+                Some(rev) if rev == self.history.revision() => {
+                    self.redo(now);
+                    self.undo_toggle = None;
+                }
+                _ => {
+                    self.undo(now);
+                    self.undo_toggle = Some(self.history.revision());
+                }
+            }
         }
         if k.save_as {
             self.save(true, now);
@@ -1150,6 +1201,10 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 }
                 if ui.button("Pattern name presets…").clicked() {
                     self.show_presets = true;
+                    ui.close();
+                }
+                if ui.button("Keyboard shortcuts…").clicked() {
+                    self.show_keys = true;
                     ui.close();
                 }
                 if ui.button("Plugin picker (F8)").clicked() {
@@ -3791,6 +3846,23 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
             self.piano = None;
         }
         let piano_docked = !self.layout.is_undocked(dock::Panel::PianoRoll);
+        // The editor keys go to the editor last clicked; a docked Piano
+        // Roll hides the Playlist and has them (spec 0.2.7 §1 item 1).
+        if let Some(press) =
+            ctx.input(|i| i.pointer.press_origin().filter(|_| i.pointer.any_pressed()))
+        {
+            if self.piano.as_ref().is_some_and(|p| p.area.contains(press)) {
+                self.key_focus = KeyFocus::PianoRoll;
+            } else if self.playlist_view.area.contains(press) {
+                self.key_focus = KeyFocus::Playlist;
+            }
+        }
+        let piano_keys = self.piano.is_some()
+            && (piano_docked || self.key_focus == KeyFocus::PianoRoll || !self.show_playlist);
+        if let Some(roll) = &mut self.piano {
+            roll.keys_active = piano_keys;
+        }
+        self.playlist_view.keys_active = !piano_keys;
         let marks = self
             .project
             .pattern(self.current_pattern)
@@ -4121,6 +4193,9 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
         self.color_window(&ctx, now);
         self.presets_window(&ctx);
         self.plugin_picker_window(&ctx, now);
+        if self.show_keys {
+            bindings::keys_window(&ctx, &mut self.show_keys);
+        }
         self.delete_channels_dialog(&ctx, now);
         self.length_dialog(&ctx, now);
         self.export_dialog(&ctx);

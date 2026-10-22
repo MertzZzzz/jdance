@@ -13,6 +13,7 @@ pub(crate) enum Glyph {
     Delete,
     Slice,
     Select,
+    Mute,
 }
 
 /// A 24×24 tool button; `on` = the active tool.
@@ -83,6 +84,20 @@ pub(crate) fn paint(ui: &Ui, glyph: Glyph, r: Rect, color: Color32) {
             p.circle_stroke(at(11.5, 11.5), 2.5, s);
             line(at(6.0, 9.5), at(12.0, 2.0));
             line(at(10.0, 9.5), at(4.0, 2.0));
+        }
+        Glyph::Mute => {
+            // Speaker with a slash.
+            let body = vec![
+                at(2.0, 6.0),
+                at(5.0, 6.0),
+                at(9.0, 2.5),
+                at(9.0, 13.5),
+                at(5.0, 10.0),
+                at(2.0, 10.0),
+            ];
+            p.add(egui::Shape::closed_line(body, s));
+            line(at(11.0, 5.0), at(15.0, 11.0));
+            line(at(15.0, 5.0), at(11.0, 11.0));
         }
         Glyph::Select => {
             // Dashed rectangle.

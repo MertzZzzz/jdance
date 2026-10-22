@@ -933,6 +933,10 @@ pub struct Note {
     pub key: u8,
     /// `0.0..=1.0`.
     pub velocity: f32,
+    /// Muted notes stay in the pattern but do not play (the Mute tool,
+    /// spec 0.2.7 §1).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub muted: bool,
 }
 
 impl Note {

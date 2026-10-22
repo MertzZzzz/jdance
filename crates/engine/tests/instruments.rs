@@ -157,6 +157,7 @@ fn notes_and_steps_turn_on_and_off_on_time() {
         length: 2 * TICKS_PER_STEP,
         key: 72,
         velocity: 0.7,
+        muted: false,
     };
     let (p, _, pid) = project(&[0], vec![long]);
     let (mut h, mut e) = create_engine(SR);
@@ -186,6 +187,7 @@ fn loop_wrap_and_stop_turn_sounding_notes_off() {
         length: 4 * TICKS_PER_STEP,
         key: 64,
         velocity: 1.0,
+        muted: false,
     };
     let (p, _, pid) = project(&[], vec![tail]);
     let (mut h, mut e) = create_engine(SR);
@@ -218,6 +220,7 @@ fn panic_turns_notes_off_and_playback_continues() {
         length: 8 * TICKS_PER_STEP,
         key: 67,
         velocity: 1.0,
+        muted: false,
     };
     let (p, _, pid) = project(&[10], vec![long]);
     let (mut h, mut e) = create_engine(SR);
@@ -249,6 +252,7 @@ fn transposition_and_mono_apply_to_instruments() {
         length: 4 * TICKS_PER_STEP,
         key: 60,
         velocity: 1.0,
+        muted: false,
     };
     let b = Note {
         id: 0,
@@ -345,6 +349,7 @@ fn instrument_rendering_does_not_allocate() {
             length: 300,
             key: 40 + (i % 40) as u8,
             velocity: 0.5,
+            muted: false,
         })
         .collect();
     let (p, _, pid) = project(&all, notes);

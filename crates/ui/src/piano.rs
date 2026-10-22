@@ -41,13 +41,16 @@ pub(crate) enum Tool {
     Delete,
     Slice,
     Select,
+    /// Click or drag over notes: they stay but do not play (spec 0.2.7).
+    Mute,
 }
 
 impl Tool {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Draw,
         Self::Paint,
         Self::Delete,
+        Self::Mute,
         Self::Slice,
         Self::Select,
     ];
@@ -59,18 +62,22 @@ impl Tool {
             Self::Delete => Glyph::Delete,
             Self::Slice => Glyph::Slice,
             Self::Select => Glyph::Select,
+            Self::Mute => Glyph::Mute,
         }
     }
 
     fn hint(self) -> &'static str {
         match self {
-            Self::Draw => "Draw (P): click adds a note, drag sets its length; edges resize",
-            Self::Paint => "Paint (B): drag adds a note on every grid cell",
+            Self::Draw => {
+                "Draw (P): click adds a note, drag sets its length; edges resize · hold Ctrl to select"
+            }
+            Self::Paint => "Paint (B): drag adds a note on every grid cell · hold Ctrl to select",
             Self::Delete => {
                 "Delete (D): click or drag over notes · in every tool the right button deletes"
             }
+            Self::Mute => "Mute (T): click or drag over notes to mute or unmute them",
             Self::Slice => "Slice (C): click a note to cut it in two (both retrigger)",
-            Self::Select => "Select (E): drag a frame · Shift adds",
+            Self::Select => "Select (E): drag a frame · Ctrl+Shift adds",
         }
     }
 }
@@ -90,6 +97,10 @@ enum DragKind {
     Frame {
         add: bool,
     },
+    /// The Mute tool swept over notes: they all get `muted`.
+    Mute {
+        muted: bool,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -100,6 +111,28 @@ struct Drag {
     dragged: Vec<usize>,
     selection: Vec<Note>,
     start: Pos2,
+}
+
+/// The note clipboard: shared by every Piano Roll while the app runs, so
+/// notes copied in one pattern or channel paste into another (§1 item 11).
+fn clipboard(ctx: &egui::Context) -> Vec<Note> {
+    ctx.data(|d| d.get_temp::<Vec<Note>>(egui::Id::unique("piano_clipboard")))
+        .unwrap_or_default()
+}
+
+fn set_clipboard(ctx: &egui::Context, notes: Vec<Note>) {
+    ctx.data_mut(|d| d.insert_temp(egui::Id::unique("piano_clipboard"), notes));
+}
+
+/// Whether `n` (or the selection it belongs to) is toggled by a Mute
+/// click: the notes that change and their new state.
+fn mute_targets(notes: &[Note], selection: &[Note], i: usize) -> (Vec<usize>, bool) {
+    let muted = !notes[i].muted;
+    if selection.contains(&notes[i]) {
+        (indices(notes, selection), muted)
+    } else {
+        (vec![i], muted)
+    }
 }
 
 /// A velocity lane drag: original notes and the note grabbed.
@@ -131,7 +164,6 @@ pub(crate) struct PianoRoll {
     /// Several notes in the velocity lane: scale together (relative) or
     /// set to one value.
     relative: bool,
-    clipboard: Vec<Note>,
     scale: Option<Scale>,
     dialog: Option<Dialog>,
     /// Key held on the keyboard, or of a note being drawn or dragged.
@@ -155,6 +187,30 @@ pub(crate) struct PianoRoll {
     rmb: crate::widgets::RightSweep,
     /// Caret gestures on the ruler (spec 0.2.4 PCR-005).
     ruler: crate::ruler::Ruler,
+    /// The editor keys go here (the app sets it: the Piano Roll is the
+    /// editor last clicked, spec 0.2.7 §1 item 1).
+    pub keys_active: bool,
+    /// The computer keyboard plays notes (Ctrl+T, §1 item 2).
+    pub typing: bool,
+    /// Keys held on the computer keyboard while typing: key and note.
+    typing_held: Vec<(Key, u8)>,
+    /// The toolbar snap, for Backspace to turn back on.
+    snap_choice: Snap,
+    last_snap: Snap,
+    /// Alt is held: no snap while it is (§1 item 6).
+    alt: bool,
+    /// Scroll offsets to apply next frame (zoom keys, middle drag, reveal).
+    pending_scroll: Option<egui::Vec2>,
+    scroll_offset: egui::Vec2,
+    /// The visible grid width, for the reveal after a paste.
+    view_w: f32,
+    /// The pattern caret this frame (paste target, §1 item 8).
+    caret_tick: u32,
+    /// Show this tick after a paste beyond the view (§1 item 10).
+    reveal: Option<u32>,
+    /// Where the Piano Roll was drawn, for the app's key focus.
+    pub area: Rect,
+    hover_hint: &'static str,
 }
 
 /// The caret moved on the Piano Roll ruler, as a pattern position.
@@ -266,7 +322,6 @@ impl PianoRoll {
             drag: None,
             lane_drag: None,
             relative: true,
-            clipboard: Vec::new(),
             scale: None,
             dialog: None,
             sounding: None,
@@ -281,12 +336,25 @@ impl PianoRoll {
             scripts: Vec::new(),
             ruler: crate::ruler::Ruler::default(),
             rmb: crate::widgets::RightSweep::default(),
+            keys_active: true,
+            typing: false,
+            typing_held: Vec::new(),
+            snap_choice: Snap::Step,
+            last_snap: Snap::Step,
+            alt: false,
+            pending_scroll: None,
+            scroll_offset: egui::Vec2::ZERO,
+            view_w: 0.0,
+            caret_tick: 0,
+            reveal: None,
+            area: Rect::NOTHING,
+            hover_hint: "",
         }
     }
 
     fn snap_tick(&self, t: f32) -> u32 {
         let t = t.max(0.0);
-        if self.snap == 0 {
+        if self.snap == 0 || self.alt {
             t.round() as u32
         } else {
             ((t / self.snap as f32).floor() as u32) * self.snap
@@ -295,7 +363,7 @@ impl PianoRoll {
 
     /// The smallest note length / move step: the grid, or one tick.
     fn min_len(&self) -> u32 {
-        self.snap.max(1)
+        if self.alt { 1 } else { self.snap.max(1) }
     }
 
     fn sound(&mut self, host: &mut dyn Host, key: Option<u8>) {
@@ -327,9 +395,24 @@ impl PianoRoll {
         notes: Vec<Note>,
         select: Vec<Note>,
     ) {
+        // IDs as the edit will give them, so the selection finds the new
+        // notes (copies arrive with their originals' IDs, appended last).
+        let before = notes.clone();
+        let mut notes = notes;
+        jdance_domain::assign_note_ids(&mut notes);
+        let mut used = vec![false; notes.len()];
+        self.selection = select
+            .into_iter()
+            .filter_map(|s| {
+                let i = (0..before.len())
+                    .rev()
+                    .find(|&i| !used[i] && before[i] == s)?;
+                used[i] = true;
+                Some(notes[i])
+            })
+            .collect();
         out.edits.push((self.set(pattern, notes), false));
         out.end_gesture = true;
-        self.selection = select;
     }
 
     /// The tools' view of the row: scope = selection, generator range =
@@ -578,7 +661,13 @@ impl PianoRoll {
     ) -> PianoOutput {
         let playhead_tick = marks.playhead.map(|t| t as f32);
         let caret = marks.caret;
+        self.caret_tick = caret.map_or(0, |c| c.min(u64::from(u32::MAX)) as u32);
         self.sig = project.time_signature;
+        self.snap_choice = snap;
+        if snap != Snap::Off {
+            self.last_snap = snap;
+        }
+        self.alt = ui.input(|i| i.modifiers.alt);
         let snap = snap.ticks(self.sig);
         self.snap = snap;
         if snap > 0 {
@@ -628,6 +717,11 @@ impl PianoRoll {
             // Start around C5.
             scroll = scroll.vertical_scroll_offset((f32::from(KEYS - 76) * key_h).max(0.0));
             self.scrolled = true;
+        }
+        if let Some(o) = self.pending_scroll.take() {
+            scroll = scroll
+                .horizontal_scroll_offset(o.x.max(0.0))
+                .vertical_scroll_offset(o.y.max(0.0));
         }
         let mut h_offset = 0.0;
         let scroll_out = scroll.show(ui, |ui| {
@@ -745,8 +839,14 @@ impl PianoRoll {
                 let selected = self.selection.contains(n);
                 let (fill, stroke) = if selected {
                     (
-                        SELECTED,
+                        SELECTED.gamma_multiply(if n.muted { 0.45 } else { 1.0 }),
                         Stroke::new(2.0, Color32::from_rgb(0xE9, 0xF3, 0xFF)),
+                    )
+                } else if n.muted {
+                    // Muted: grey, still editable.
+                    (
+                        theme::MUTED.gamma_multiply(0.35),
+                        Stroke::new(1.0, theme::MUTED),
                     )
                 } else {
                     (
@@ -969,6 +1069,19 @@ impl PianoRoll {
                 .filter(|p| on_grid(*p))
                 .map(|p| self.snap_tick(to_tick(p.x)));
 
+            // The hint line (§1 item 16): what the keys do here.
+            self.hover_hint = match response.hover_pos() {
+                Some(p) if hit(p).is_some() => {
+                    "Drag: move · Shift+drag: copy · then Shift: keep key, Ctrl: keep time · edges: length · right click: delete · double click: properties"
+                }
+                Some(p) if on_grid(p) => match self.tool {
+                    Tool::Draw | Tool::Paint => {
+                        "Click: note · Shift+drag: note with its length · Ctrl+drag: select · Alt: no snap"
+                    }
+                    _ => self.tool.hint(),
+                },
+                _ => "",
+            };
             if let Some(p) = pointer
                 && let Some(i) = hit(p)
             {
@@ -996,12 +1109,47 @@ impl PianoRoll {
                 }
             }
 
+            // Middle button: scroll both ways.
+            if response.dragged_by(PointerButton::Middle) {
+                let d = response.drag_delta();
+                self.pending_scroll = Some(self.scroll_offset - d);
+            }
+
             // Clicks.
             if response.clicked()
                 && let Some(p) = pointer
                 && on_grid(p)
             {
                 match (hit(p), self.tool) {
+                    // Ctrl: the selection tool for the moment, in every
+                    // tool (spec 0.2.7 §1).
+                    (Some(i), _) if ctrl => {
+                        let n = notes[i];
+                        if !shift {
+                            self.selection = vec![n];
+                        } else if let Some(at) = self.selection.iter().position(|s| *s == n) {
+                            self.selection.remove(at);
+                        } else {
+                            self.selection.push(n);
+                        }
+                    }
+                    (None, _) if ctrl => {
+                        if !shift {
+                            self.selection.clear();
+                        }
+                    }
+                    (Some(i), Tool::Mute) => {
+                        let (targets, muted) = mute_targets(&notes, &self.selection, i);
+                        let mut new = notes.clone();
+                        for &j in &targets {
+                            new[j].muted = muted;
+                        }
+                        let keep = indices(&notes, &self.selection)
+                            .into_iter()
+                            .map(|j| new[j])
+                            .collect();
+                        self.commit(&mut out, pattern, new, keep);
+                    }
                     (Some(i), Tool::Delete) => {
                         let mut new = notes.clone();
                         new.remove(i);
@@ -1025,7 +1173,7 @@ impl PianoRoll {
                         }
                     }
                     (Some(i), _) => self.selection = vec![notes[i]],
-                    (None, Tool::Draw | Tool::Paint) if !ctrl => {
+                    (None, Tool::Draw | Tool::Paint) => {
                         if notes.len() < MAX_NOTES_PER_ROW {
                             let n = Note {
                                 id: 0,
@@ -1033,6 +1181,7 @@ impl PianoRoll {
                                 length: self.new_len.max(1),
                                 key: to_key(p.y),
                                 velocity: NEW_VELOCITY,
+                                muted: false,
                             };
                             let mut new = notes.clone();
                             new.push(n);
@@ -1088,6 +1237,9 @@ impl PianoRoll {
                 let kind = match hit(p) {
                     _ if ctrl => DragKind::Frame { add: shift },
                     Some(_) if self.tool == Tool::Delete => DragKind::Erase,
+                    Some(i) if self.tool == Tool::Mute => DragKind::Mute {
+                        muted: !notes[i].muted,
+                    },
                     Some(_) if self.tool == Tool::Slice => DragKind::Frame { add: shift },
                     Some(i) => match edge_of(&note_rect(&notes[i]), p.x) {
                         Some(Edge::Right) => DragKind::Resize,
@@ -1095,9 +1247,11 @@ impl PianoRoll {
                         None => DragKind::Move,
                     },
                     None => match self.tool {
+                        // Shift+drag adds a note and sets its length.
+                        Tool::Draw | Tool::Paint if shift => DragKind::Create,
                         Tool::Draw => DragKind::Create,
                         Tool::Paint => DragKind::Paint,
-                        Tool::Select | Tool::Slice => DragKind::Frame { add: shift },
+                        Tool::Select | Tool::Slice | Tool::Mute => DragKind::Frame { add: shift },
                         Tool::Delete => DragKind::Erase,
                     },
                 };
@@ -1112,6 +1266,12 @@ impl PianoRoll {
                         dragged = indices(&notes, &self.selection);
                         if kind == DragKind::Move {
                             self.sound(host, Some(n.key));
+                            if shift && original.len() + dragged.len() <= MAX_NOTES_PER_ROW {
+                                // Shift+drag: a copy moves, the notes stay.
+                                let copies: Vec<Note> = dragged.iter().map(|&i| original[i]).collect();
+                                dragged = (original.len()..original.len() + copies.len()).collect();
+                                original.extend(copies);
+                            }
                         }
                     }
                     DragKind::Create if notes.len() < MAX_NOTES_PER_ROW => {
@@ -1121,6 +1281,7 @@ impl PianoRoll {
                             length: self.min_len(),
                             key: to_key(p.y),
                             velocity: NEW_VELOCITY,
+                            muted: false,
                         };
                         dragged.push(original.len());
                         original.push(n);
@@ -1140,8 +1301,20 @@ impl PianoRoll {
                 && let Some(p) = response.interact_pointer_pos()
                 && response.dragged_by(PointerButton::Primary)
             {
-                let dt = (p.x - d.start.x) / px_tick;
-                let dk = i32::from(to_key(p.y)) - i32::from(to_key(d.start.y));
+                let (lock_key, lock_time) = ui.input(|i| (i.modifiers.shift, i.modifiers.command));
+                let mut dt = (p.x - d.start.x) / px_tick;
+                let mut dk = i32::from(to_key(p.y)) - i32::from(to_key(d.start.y));
+                // Shift pressed during a move keeps the key, Ctrl the time
+                // (a copy started with Shift keeps it free).
+                if d.kind == DragKind::Move {
+                    let copy = d.original.len() > notes.len();
+                    if lock_key && !copy {
+                        dk = 0;
+                    }
+                    if lock_time {
+                        dt = 0.0;
+                    }
+                }
                 match d.kind {
                     DragKind::Move | DragKind::Resize | DragKind::ResizeLeft | DragKind::Create => {
                         let mut new = d.original.clone();
@@ -1203,6 +1376,7 @@ impl PianoRoll {
                                     length: self.new_len.max(1),
                                     key,
                                     velocity: NEW_VELOCITY,
+                                    muted: false,
                                 });
                             }
                             t += step;
@@ -1217,6 +1391,15 @@ impl PianoRoll {
                         if let Some(i) = hit(p) {
                             let mut new = notes.clone();
                             new.remove(i);
+                            out.edits.push((self.set(pattern, new), true));
+                        }
+                    }
+                    DragKind::Mute { muted } => {
+                        if let Some(i) = hit(p)
+                            && notes[i].muted != muted
+                        {
+                            let mut new = notes.clone();
+                            new[i].muted = muted;
                             out.edits.push((self.set(pattern, new), true));
                         }
                     }
@@ -1239,10 +1422,29 @@ impl PianoRoll {
             }
             h_offset = clip.left() - rect.left();
         });
-        let _ = scroll_out;
+        self.scroll_offset = scroll_out.state.clamped_offset();
+        self.view_w = scroll_out.inner_rect.width() - KEYBOARD_W;
 
         self.velocity_lane(ui, pattern, &notes, px_tick, h_offset, &mut out);
-        self.shortcuts(ui, pattern, &notes, &mut out);
+        ui.horizontal(|ui| {
+            if self.typing {
+                ui.label(
+                    RichText::new("⌨ KEYBOARD PLAYS NOTES (Ctrl+T)")
+                        .size(11.0)
+                        .color(theme::AMBER),
+                );
+            }
+            ui.add(
+                egui::Label::new(
+                    RichText::new(self.hover_hint)
+                        .size(11.0)
+                        .color(theme::MUTED),
+                )
+                .truncate(),
+            );
+        });
+        let px_tick = self.zoom / TICKS_PER_STEP as f32;
+        self.shortcuts(ui, pattern, &notes, host, px_tick, &mut out);
 
         if let Some(req) = out.script.take() {
             use crate::scripts::{ScriptDialog, ScriptRequest};
@@ -1321,6 +1523,17 @@ impl PianoRoll {
                 self.dialog = Some(d);
             }
         }
+        // After a paste beyond the view: just enough scroll to show it,
+        // at the same zoom (§1 item 10).
+        if let Some(t) = self.reveal.take() {
+            let x = t as f32 * px_tick;
+            let (left, w) = (self.scroll_offset.x, self.view_w.max(1.0));
+            if x < left || x > left + w - 20.0 {
+                let to = if x < left { x - 20.0 } else { x - w + 60.0 };
+                self.pending_scroll = Some(egui::vec2(to.max(0.0), self.scroll_offset.y));
+            }
+        }
+        self.area = ui.min_rect();
         out
     }
 
@@ -1446,18 +1659,40 @@ impl PianoRoll {
         }
     }
 
+    /// The editor keys of the Piano Roll (spec 0.2.7 §1), from the one
+    /// table in [`crate::bindings`]. Only while the Piano Roll has the
+    /// keys, no text field edits and no dialog is open.
+    #[allow(clippy::too_many_lines)]
     fn shortcuts(
         &mut self,
         ui: &mut egui::Ui,
         pattern: &Pattern,
         notes: &[Note],
+        host: &mut dyn Host,
+        px_tick: f32,
         out: &mut PianoOutput,
     ) {
-        if ui.ctx().egui_wants_keyboard_input() || self.dialog.is_some() {
+        use crate::bindings as b;
+        if !self.keys_active || ui.ctx().egui_wants_keyboard_input() || self.dialog.is_some() {
             return;
         }
+        let ctx = ui.ctx().clone();
+        let take = |bnd: b::Binding| ctx.input_mut(|i| bnd.take(i));
+        // Ctrl+T: the computer keyboard plays notes (letters then do not
+        // switch tools).
+        if take(b::TYPING_PIANO) {
+            self.typing = !self.typing;
+            if !self.typing {
+                self.stop_typing(host);
+            }
+        }
+        if self.typing {
+            self.play_typing(ui, host);
+        }
         let sel = indices(notes, &self.selection);
-        let (copy, cut, paste) = ui.input(|i| {
+        // The system turns Ctrl+C / X / V into clipboard events; the keys
+        // are read too where it does not.
+        let (copy_ev, cut_ev, paste_ev) = ui.input(|i| {
             let has = |f: fn(&Event) -> bool| i.events.iter().any(f);
             (
                 has(|e| matches!(e, Event::Copy)),
@@ -1465,34 +1700,68 @@ impl PianoRoll {
                 has(|e| matches!(e, Event::Paste(_))),
             )
         });
-        let cmd = |k| egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, k);
-        let (all, dup) = ui.input_mut(|i| {
-            (
-                i.consume_shortcut(&cmd(Key::A)),
-                i.consume_shortcut(&cmd(Key::D)),
-            )
-        });
-        let key = |k| ui.input(|i| i.key_pressed(k) && i.modifiers.is_none());
-        let shift_key = |k| ui.input(|i| i.key_pressed(k) && i.modifiers.shift_only());
-        for (k, t) in [
-            (Key::P, Tool::Draw),
-            (Key::B, Tool::Paint),
-            (Key::D, Tool::Delete),
-            (Key::C, Tool::Slice),
-            (Key::E, Tool::Select),
-        ] {
-            if key(k) {
-                self.tool = t;
+        let copy = take(b::COPY) | copy_ev;
+        let cut = take(b::CUT) | cut_ev;
+        let paste = take(b::PASTE) | paste_ev;
+        let all = take(b::SELECT_ALL);
+        let deselect = take(b::DESELECT);
+        let dup = take(b::DUPLICATE);
+        {
+            for (bnd, t) in [
+                (b::TOOL_DRAW, Tool::Draw),
+                (b::TOOL_PAINT, Tool::Paint),
+                (b::TOOL_DELETE, Tool::Delete),
+                (b::TOOL_MUTE, Tool::Mute),
+                (b::TOOL_SELECT, Tool::Select),
+                (b::TOOL_SLICE, Tool::Slice),
+            ] {
+                // Letters play notes while the keyboard is a piano.
+                if !(self.typing && bnd.is_letter()) && take(bnd) {
+                    self.tool = t;
+                }
             }
+        }
+        if take(b::SNAP_TOGGLE) {
+            out.snap = Some(if self.snap_choice == Snap::Off {
+                self.last_snap
+            } else {
+                Snap::Off
+            });
+        }
+        if take(b::CLOSE) {
+            out.close = true;
+        }
+        // Zoom around the pointer (or the middle of the view).
+        let zoom = if take(b::ZOOM_IN) {
+            1.25
+        } else if take(b::ZOOM_OUT) {
+            0.8
+        } else {
+            1.0
+        };
+        if zoom != 1.0 {
+            let old = self.zoom;
+            self.zoom = (self.zoom * zoom).clamp(8.0, 96.0);
+            let anchor = ui
+                .input(|i| i.pointer.hover_pos())
+                .map_or(self.view_w / 2.0, |p| {
+                    (p.x - ui.min_rect().left() - KEYBOARD_W).max(0.0)
+                });
+            let content = self.scroll_offset.x + anchor;
+            let x = content * self.zoom / old - anchor;
+            self.pending_scroll = Some(egui::vec2(x, self.scroll_offset.y));
         }
         if all {
             self.selection = notes.to_vec();
         }
-        if (copy || cut) && !sel.is_empty() {
-            self.clipboard = self.selection.clone();
+        if deselect {
+            self.selection.clear();
+            return;
         }
-        let delete = cut || key(Key::Delete) || key(Key::Backspace);
-        if delete && !sel.is_empty() {
+        if (copy || cut) && !sel.is_empty() {
+            set_clipboard(ui.ctx(), self.selection.clone());
+        }
+        if (cut || take(b::DELETE)) && !sel.is_empty() {
             let new = notes
                 .iter()
                 .filter(|n| !self.selection.contains(n))
@@ -1501,16 +1770,18 @@ impl PianoRoll {
             self.commit(out, pattern, new, Vec::new());
             return;
         }
-        if paste && !self.clipboard.is_empty() {
-            let at = self
-                .hover_tick
-                .unwrap_or_else(|| self.clipboard.iter().map(Note::end).max().unwrap_or(0));
-            let (new, added) = notes::paste(notes, &self.clipboard, at);
+        let clipboard = clipboard(ui.ctx());
+        if paste && !clipboard.is_empty() {
+            // The leftmost note on the caret, exactly (§1 item 8).
+            let at = self.caret_tick;
+            let (new, added) = notes::paste(notes, &clipboard, at);
             let select = added.iter().map(|&i| new[i]).collect();
+            self.reveal = Some(at);
             self.commit(out, pattern, new, select);
             return;
         }
-        if dup && !sel.is_empty() {
+        if dup && !notes.is_empty() {
+            // To the right of the selection; all notes without one.
             let (new, added) = notes::duplicate(notes, &sel, self.sig.beat_ticks());
             let select = added.iter().map(|&i| new[i]).collect();
             self.commit(out, pattern, new, select);
@@ -1519,35 +1790,43 @@ impl PianoRoll {
         if sel.is_empty() {
             return;
         }
-        // Arrows: transpose (Shift: octave) and move by the grid.
-        let semis = if key(Key::ArrowUp) {
+        let semis = if take(b::SEMITONE_UP) {
             1
-        } else if key(Key::ArrowDown) {
+        } else if take(b::SEMITONE_DOWN) {
             -1
-        } else if shift_key(Key::ArrowUp) {
+        } else if take(b::OCTAVE_UP) {
             12
-        } else if shift_key(Key::ArrowDown) {
+        } else if take(b::OCTAVE_DOWN) {
             -12
         } else {
             0
         };
-        if semis != 0
-            && let Some(new) = notes::transpose(notes, &sel, semis)
-        {
-            let select = sel.iter().map(|&i| new[i]).collect();
-            self.commit(out, pattern, new, select);
+        if semis != 0 {
+            if let Some(new) = notes::transpose(notes, &sel, semis) {
+                let select = sel.iter().map(|&i| new[i]).collect();
+                self.commit(out, pattern, new, select);
+            }
             return;
         }
-        let step = i64::from(self.snap.max(TICKS_PER_STEP));
-        let dt = if key(Key::ArrowRight) {
+        let step = i64::from(self.snap.max(1));
+        let pixel = i64::from(((1.0 / px_tick).round() as u32).max(1));
+        let dt = if take(b::MOVE_RIGHT) {
             step
-        } else if key(Key::ArrowLeft) {
+        } else if take(b::MOVE_LEFT) {
             -step
+        } else if take(b::NUDGE_RIGHT) {
+            pixel
+        } else if take(b::NUDGE_LEFT) {
+            -pixel
         } else {
             0
         };
         let first = sel.iter().map(|&i| notes[i].start).min().unwrap_or(0);
-        if dt != 0 && i64::from(first) + dt >= 0 {
+        if dt != 0 {
+            let dt = dt.max(-i64::from(first));
+            if dt == 0 {
+                return;
+            }
             let mut new = notes.to_vec();
             for &i in &sel {
                 new[i].start = (i64::from(new[i].start) + dt) as u32;
@@ -1557,9 +1836,87 @@ impl PianoRoll {
         }
     }
 
+    /// Letters as piano keys (Ctrl+T): Z S X D C V G B H N J M from C5,
+    /// Q 2 W 3 E R 5 T 6 Y 7 U an octave up.
+    fn play_typing(&mut self, ui: &mut egui::Ui, host: &mut dyn Host) {
+        const LOWER: [Key; 12] = [
+            Key::Z,
+            Key::S,
+            Key::X,
+            Key::D,
+            Key::C,
+            Key::V,
+            Key::G,
+            Key::B,
+            Key::H,
+            Key::N,
+            Key::J,
+            Key::M,
+        ];
+        const UPPER: [Key; 12] = [
+            Key::Q,
+            Key::Num2,
+            Key::W,
+            Key::Num3,
+            Key::E,
+            Key::R,
+            Key::Num5,
+            Key::T,
+            Key::Num6,
+            Key::Y,
+            Key::Num7,
+            Key::U,
+        ];
+        let note_of = |k: Key| {
+            LOWER
+                .iter()
+                .position(|x| *x == k)
+                .map(|i| 60 + i as u8)
+                .or_else(|| UPPER.iter().position(|x| *x == k).map(|i| 72 + i as u8))
+        };
+        let events: Vec<(Key, bool)> = ui.input_mut(|i| {
+            let mut out = Vec::new();
+            i.events.retain(|e| match e {
+                Event::Key {
+                    key,
+                    pressed,
+                    repeat,
+                    modifiers,
+                    ..
+                } if modifiers.is_none() && note_of(*key).is_some() => {
+                    if !repeat {
+                        out.push((*key, *pressed));
+                    }
+                    false
+                }
+                _ => true,
+            });
+            out
+        });
+        for (key, pressed) in events {
+            let Some(note) = note_of(key) else { continue };
+            if pressed {
+                if !self.typing_held.iter().any(|(k, _)| *k == key) {
+                    self.typing_held.push((key, note));
+                    host.live_note(self.channel, note, Some(NEW_VELOCITY));
+                }
+            } else if let Some(at) = self.typing_held.iter().position(|(k, _)| *k == key) {
+                let (_, n) = self.typing_held.remove(at);
+                host.live_note(self.channel, n, None);
+            }
+        }
+    }
+
+    fn stop_typing(&mut self, host: &mut dyn Host) {
+        for (_, n) in self.typing_held.drain(..) {
+            host.live_note(self.channel, n, None);
+        }
+    }
+
     /// Releases a note still sounding (the roll is closing).
     pub fn release(&mut self, host: &mut dyn Host) {
         self.sound(host, None);
+        self.stop_typing(host);
     }
 }
 
@@ -1602,6 +1959,7 @@ mod tests {
             length: 960,
             key: 60,
             velocity: 0.7,
+            muted: false,
         };
         let (a, b) = slice_note(n, 480).unwrap();
         assert_eq!((a.start, a.length, b.start, b.length), (240, 240, 480, 720));
@@ -1663,5 +2021,220 @@ mod caret_tests {
             ],
             "kept inside the pattern"
         );
+    }
+}
+
+/// Spec 0.2.7 §1: every P0 key of the Piano Roll, one test per group.
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+    use crate::test_ui::{Driver, StubHost};
+    use egui::{Event, Modifiers};
+    use jdance_commands::History;
+
+    struct Env {
+        p: Project,
+        h: History,
+        ch: ChannelId,
+        roll: PianoRoll,
+        host: StubHost,
+        d: Driver,
+        caret: u64,
+        snaps: Vec<Snap>,
+        close: bool,
+    }
+
+    fn key(k: Key, modifiers: Modifiers) -> Event {
+        Event::Key {
+            key: k,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    fn note(start: u32, key: u8) -> Note {
+        Note {
+            id: 0,
+            start,
+            length: TICKS_PER_STEP,
+            key,
+            velocity: 0.8,
+            muted: false,
+        }
+    }
+
+    impl Env {
+        fn new(notes: Vec<Note>) -> Self {
+            let mut p = Project::new();
+            let ch = ChannelId(p.ids.next());
+            p.channels
+                .push(jdance_domain::Channel::new_sampler(ch, "c"));
+            p.patterns[0].row_mut(ch).notes = notes;
+            jdance_domain::assign_note_ids(&mut p.patterns[0].row_mut(ch).notes);
+            let mut env = Self {
+                p,
+                h: History::default(),
+                ch,
+                roll: PianoRoll::new(ch),
+                host: StubHost::default(),
+                d: Driver::new(),
+                caret: 0,
+                snaps: Vec::new(),
+                close: false,
+            };
+            env.frame(vec![]);
+            env.frame(vec![]);
+            env
+        }
+
+        fn notes(&self) -> Vec<Note> {
+            self.p.patterns[0].row(self.ch).unwrap().notes.clone()
+        }
+
+        fn frame(&mut self, events: Vec<Event>) {
+            let pattern = self.p.patterns[0].clone();
+            let marks = crate::rack::PatternMarks {
+                playhead: None,
+                caret: Some(self.caret),
+            };
+            let (roll, host, p) = (&mut self.roll, &mut self.host, &self.p);
+            let mut out = PianoOutput::default();
+            let mut ui = |ui: &mut egui::Ui| {
+                out = roll.show(ui, p, &pattern, host, marks, Snap::Step);
+            };
+            self.d.frame(events, &mut ui);
+            for (e, _) in out.edits {
+                self.h.execute(&mut self.p, e).unwrap();
+            }
+            self.snaps.extend(out.snap);
+            self.close |= out.close;
+        }
+
+        fn press(&mut self, k: Key, m: Modifiers) {
+            self.frame(vec![key(k, m)]);
+            self.frame(vec![]);
+        }
+    }
+
+    const CTRL: Modifiers = Modifiers::COMMAND;
+
+    #[test]
+    fn paste_puts_the_leftmost_note_on_the_caret_and_selects_the_copies() {
+        let mut e = Env::new(vec![note(480, 60), note(960, 64)]);
+        e.press(Key::A, CTRL);
+        e.press(Key::C, CTRL);
+        // Off the grid: no rounding (item 8).
+        e.caret = 3 * 3840 + 37;
+        e.press(Key::V, CTRL);
+        let notes = e.notes();
+        assert_eq!(notes.len(), 4);
+        let pasted: Vec<(u32, u8)> = notes[2..].iter().map(|n| (n.start, n.key)).collect();
+        assert_eq!(pasted, [(3 * 3840 + 37, 60), (3 * 3840 + 37 + 480, 64)]);
+        assert_eq!(
+            e.roll.selection,
+            notes[2..].to_vec(),
+            "the copies are selected"
+        );
+        // The clipboard outlives the roll (another channel or pattern).
+        let ctx = e.d.ctx.clone();
+        assert_eq!(clipboard(&ctx).len(), 2);
+        // Cut: gone and in the clipboard; one undo brings them back.
+        e.press(Key::A, CTRL);
+        e.press(Key::X, CTRL);
+        assert!(e.notes().is_empty());
+        e.h.undo(&mut e.p).unwrap();
+        assert_eq!(e.notes().len(), 4);
+    }
+
+    #[test]
+    fn tool_letters_and_the_typing_keyboard() {
+        let mut e = Env::new(vec![]);
+        for (k, t) in [
+            (Key::B, Tool::Paint),
+            (Key::D, Tool::Delete),
+            (Key::T, Tool::Mute),
+            (Key::E, Tool::Select),
+            (Key::C, Tool::Slice),
+            (Key::P, Tool::Draw),
+        ] {
+            e.press(k, Modifiers::NONE);
+            assert_eq!(e.roll.tool, t, "{k:?}");
+        }
+        e.press(Key::T, CTRL);
+        assert!(e.roll.typing);
+        e.press(Key::E, Modifiers::NONE);
+        assert_eq!(e.roll.tool, Tool::Draw, "E plays a note instead");
+        e.press(Key::T, CTRL);
+        assert!(!e.roll.typing);
+    }
+
+    #[test]
+    fn selection_duplicate_and_delete() {
+        let mut e = Env::new(vec![note(0, 60), note(240, 62)]);
+        // Ctrl+B with nothing selected: all notes, to the right.
+        e.press(Key::B, CTRL);
+        assert_eq!(e.notes().len(), 4);
+        assert!(e.notes()[2].start >= 480);
+        e.press(Key::D, CTRL);
+        assert!(e.roll.selection.is_empty(), "Ctrl+D deselects");
+        e.press(Key::A, CTRL);
+        assert_eq!(e.roll.selection.len(), 4);
+        e.press(Key::Delete, Modifiers::NONE);
+        assert!(e.notes().is_empty());
+    }
+
+    #[test]
+    fn arrows_move_by_snap_and_pixel_and_transpose() {
+        let mut e = Env::new(vec![note(480, 60)]);
+        e.press(Key::A, CTRL);
+        e.press(Key::ArrowRight, Modifiers::SHIFT);
+        assert_eq!(e.notes()[0].start, 480 + TICKS_PER_STEP, "one snap step");
+        e.press(Key::ArrowLeft, Modifiers::ALT);
+        // 28 px per 240 ticks: a pixel is 9 ticks.
+        assert_eq!(e.notes()[0].start, 480 + TICKS_PER_STEP - 9);
+        e.press(Key::ArrowUp, Modifiers::SHIFT);
+        assert_eq!(e.notes()[0].key, 61);
+        e.press(Key::ArrowUp, CTRL);
+        assert_eq!(e.notes()[0].key, 73);
+        e.press(Key::ArrowDown, CTRL);
+        e.press(Key::ArrowDown, Modifiers::SHIFT);
+        assert_eq!(e.notes()[0].key, 60);
+        // Nothing selected: the arrows do nothing (item 12).
+        e.press(Key::D, CTRL);
+        e.press(Key::ArrowRight, Modifiers::SHIFT);
+        assert_eq!(e.notes()[0].start, 480 + TICKS_PER_STEP - 9);
+    }
+
+    #[test]
+    fn snap_zoom_close_and_the_key_focus() {
+        let mut e = Env::new(vec![note(0, 60)]);
+        e.press(Key::Backspace, Modifiers::NONE);
+        assert_eq!(e.snaps, [Snap::Off], "Backspace: snap off");
+        assert_eq!(e.notes().len(), 1, "and deletes nothing");
+        let zoom = e.roll.zoom;
+        e.press(Key::PageUp, Modifiers::NONE);
+        assert!(e.roll.zoom > zoom);
+        e.press(Key::PageDown, Modifiers::NONE);
+        assert!((e.roll.zoom - zoom).abs() < 1e-3);
+        e.press(Key::Escape, Modifiers::NONE);
+        assert!(e.close);
+        // Without the key focus the Piano Roll takes no keys.
+        e.roll.keys_active = false;
+        e.press(Key::B, Modifiers::NONE);
+        assert_eq!(e.roll.tool, Tool::Draw);
+    }
+
+    #[test]
+    fn the_mute_tool_mutes_and_the_engine_skips_muted_notes() {
+        let mut e = Env::new(vec![note(0, 60)]);
+        e.press(Key::T, Modifiers::NONE);
+        e.roll.selection = e.notes();
+        // Muting through the keys is not a P0 key; the tool's click logic
+        // is tested through `mute_targets`.
+        let notes = e.notes();
+        let (targets, muted) = mute_targets(&notes, &e.roll.selection, 0);
+        assert_eq!((targets, muted), (vec![0], true));
     }
 }

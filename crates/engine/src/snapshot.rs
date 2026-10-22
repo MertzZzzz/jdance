@@ -1025,7 +1025,7 @@ fn push_pattern_events(
         }
         // Notes start inside the pattern; gated notes end at the
         // repetition's (or the clip's) end at the latest.
-        for n in &row.notes {
+        for n in row.notes.iter().filter(|n| !n.muted) {
             let start = base + i64::from(n.start);
             if !inside(start) {
                 continue;

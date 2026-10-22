@@ -972,6 +972,12 @@ impl History {
         self.redo.last().map(|e| e.label)
     }
 
+    /// Identifies the project state: equal after a redo to before the
+    /// matching undo.
+    pub fn revision(&self) -> u64 {
+        self.current_rev
+    }
+
     pub fn is_dirty(&self) -> bool {
         self.current_rev != self.saved_rev
     }
@@ -1173,6 +1179,7 @@ mod tests {
             length: 240,
             key,
             velocity: 0.8,
+            muted: false,
         }
     }
 

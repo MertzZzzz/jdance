@@ -84,7 +84,56 @@ const CMD_SHIFT: Modifiers = Modifiers {
 };
 const ALT: Modifiers = Modifiers::ALT;
 
-use Scope::{Editors, PianoRoll, Playlist};
+use Scope::{Editors, PianoRoll};
+
+impl Scope {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Playlist => "Playlist",
+            Self::PianoRoll => "Piano Roll",
+            Self::Editors => "Playlist and Piano Roll",
+        }
+    }
+}
+
+/// The keys window: every binding by window.
+pub(crate) fn keys_window(ctx: &egui::Context, open: &mut bool) {
+    egui::Window::new("Keyboard shortcuts")
+        .id(egui::Id::unique("keys_window"))
+        .open(open)
+        .default_size([420.0, 480.0])
+        .show(ctx, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                for scope in [Editors, Scope::Playlist, PianoRoll] {
+                    ui.add_space(6.0);
+                    ui.strong(scope.name());
+                    egui::Grid::new(("keys", scope.name()))
+                        .num_columns(2)
+                        .striped(true)
+                        .show(ui, |ui| {
+                            for b in ALL.iter().filter(|b| b.scope == scope) {
+                                ui.monospace(b.label());
+                                let text = if b.priority == Priority::P1 && b.key == Key::V {
+                                    format!("{} (reserved)", b.command)
+                                } else {
+                                    b.command.to_owned()
+                                };
+                                ui.label(text);
+                                ui.end_row();
+                            }
+                        });
+                }
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(
+                        "Hold Ctrl in Draw, Paint, Delete, Mute or Slice to select; hold Alt for no snap. \
+                         Ctrl+Z undoes and, pressed again, redoes the last action.",
+                    )
+                    .size(11.0),
+                );
+            });
+        });
+}
 
 pub(crate) const DUPLICATE: Binding = Binding::new("Duplicate", Editors, CMD, Key::B);
 pub(crate) const DESELECT: Binding = Binding::new("Deselect", Editors, CMD, Key::D);
@@ -139,6 +188,8 @@ pub(crate) const ZOOM_IN: Binding = Binding::new("Zoom in", Editors, NONE, Key::
 pub(crate) const ZOOM_OUT: Binding = Binding::new("Zoom out", Editors, NONE, Key::PageDown);
 pub(crate) const PIANO_ROLL: Binding = Binding::new("Piano Roll", PianoRoll, NONE, Key::F7);
 pub(crate) const CLOSE: Binding = Binding::new("Close", PianoRoll, NONE, Key::Escape);
+pub(crate) const CLEAR_SELECTION: Binding =
+    Binding::new("Clear selection", Scope::Playlist, NONE, Key::Escape);
 pub(crate) const TYPING_PIANO: Binding =
     Binding::new("Computer keyboard as piano", PianoRoll, CMD, Key::T);
 /// Reserved for the Piano Roll's own paste of MIDI (P2): not taken by
@@ -178,10 +229,12 @@ pub(crate) const ALL: &[Binding] = &[
     ZOOM_OUT,
     PIANO_ROLL,
     CLOSE,
+    CLEAR_SELECTION,
     TYPING_PIANO,
 ];
 
 /// Whether `b` works in `scope`.
+#[cfg(test)]
 pub(crate) fn applies(b: &Binding, scope: Scope) -> bool {
     b.scope == scope || b.scope == Editors || scope == Editors
 }
@@ -192,7 +245,7 @@ mod tests {
 
     #[test]
     fn no_two_commands_share_keys_in_one_window() {
-        for scope in [Playlist, PianoRoll] {
+        for scope in [Scope::Playlist, PianoRoll] {
             let here: Vec<&Binding> = ALL.iter().filter(|b| applies(b, scope)).collect();
             for (i, a) in here.iter().enumerate() {
                 for b in &here[i + 1..] {

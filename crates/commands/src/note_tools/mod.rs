@@ -228,6 +228,8 @@ pub fn replace(input: &Input, removed: &[usize], new: Vec<Cand>) -> Result<Outco
             length: length as u32,
             key: c.key.clamp(0, 127) as u8,
             velocity: stored_velocity(c.velocity),
+            // A note the tool kept (same id) stays muted.
+            muted: c.id != 0 && input.notes.iter().any(|n| n.id == c.id && n.muted),
         });
     }
     // A kept ID may not appear twice (a split keeps it on its first part).
@@ -476,6 +478,7 @@ pub(crate) mod test_util {
             length,
             key,
             velocity: stored_velocity(i32::from(vel)),
+            muted: false,
         }
     }
 

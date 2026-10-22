@@ -158,6 +158,10 @@ pub(crate) struct PlaylistView {
     /// Zoom before Shift+4 went to the widest view.
     zoom_back: Option<f32>,
 
+    /// The editor keys go here (the app sets it, spec 0.2.7 §1 item 1).
+    pub keys_active: bool,
+    /// Where the Playlist was drawn, for the app's key focus.
+    pub area: Rect,
     /// Times Ctrl+D showed that duplicating moved to Ctrl+B (spec 0.2.7
     /// §3 item 6: at most three).
     ctrl_d_hints: u8,
@@ -230,6 +234,8 @@ impl Default for PlaylistView {
             follow: true,
             follow_paused: false,
             ctrl_d_hints: 0,
+            keys_active: true,
+            area: Rect::NOTHING,
         }
     }
 }
@@ -626,6 +632,7 @@ impl PlaylistView {
             });
         self.view = view;
         self.shortcuts(ui, project, &mut out);
+        self.area = ui.min_rect();
         out
     }
 
@@ -671,11 +678,11 @@ impl PlaylistView {
     /// no text field has focus (spec 0.2.7 §3).
     fn shortcuts(&mut self, ui: &egui::Ui, project: &Project, out: &mut PlaylistOutput) {
         let ctx = ui.ctx().clone();
-        if ctx.egui_wants_keyboard_input() {
+        if !self.keys_active || ctx.egui_wants_keyboard_input() {
             return;
         }
         let (del, dup, deselect) = ctx.input_mut(|i| {
-            let del = i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace);
+            let del = crate::bindings::DELETE.take(i) || i.key_pressed(egui::Key::Backspace);
             let dup = i.consume_shortcut(&crate::bindings::DUPLICATE.shortcut());
             let deselect = i.consume_shortcut(&crate::bindings::DESELECT.shortcut());
             (del, dup, deselect)
@@ -692,20 +699,20 @@ impl PlaylistView {
             self.selection.clear();
             return;
         }
-        let key = |k| ctx.input(|i| i.key_pressed(k) && i.modifiers.is_none());
-        for (k, t) in [
-            (egui::Key::P, Tool::Draw),
-            (egui::Key::B, Tool::Paint),
-            (egui::Key::D, Tool::Delete),
-            (egui::Key::C, Tool::Slice),
-            (egui::Key::E, Tool::Select),
+        use crate::bindings as b;
+        for (bnd, t) in [
+            (b::TOOL_DRAW, Tool::Draw),
+            (b::TOOL_PAINT, Tool::Paint),
+            (b::TOOL_DELETE, Tool::Delete),
+            (b::TOOL_SLICE, Tool::Slice),
+            (b::TOOL_SELECT, Tool::Select),
         ] {
-            if key(k) {
+            if ctx.input_mut(|i| bnd.take(i)) {
                 self.tool = t;
             }
         }
         // Esc clears the selection (spec 0.2.5 §1, open question 4).
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) && self.ruler.active().is_none() {
+        if self.ruler.active().is_none() && ctx.input_mut(|i| b::CLEAR_SELECTION.take(i)) {
             self.selection.clear();
         }
         if self.selection.is_empty() {

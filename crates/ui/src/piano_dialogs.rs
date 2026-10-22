@@ -284,6 +284,7 @@ mod tests {
             length: 240,
             key,
             velocity,
+            muted: false,
         }
     }
 

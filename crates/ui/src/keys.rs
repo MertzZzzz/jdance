@@ -9,6 +9,8 @@ use egui::{Key, KeyboardShortcut, Modifiers};
 pub(crate) struct GlobalKeys {
     pub space: bool,
     pub undo: bool,
+    /// Ctrl+Alt+Z: undo, step by step (spec 0.2.7 §1 item 13).
+    pub undo_step: bool,
     pub redo: bool,
     pub save: bool,
     pub save_as: bool,
@@ -23,6 +25,7 @@ impl GlobalKeys {
     pub fn merge(&mut self, o: Self) {
         self.space |= o.space;
         self.undo |= o.undo;
+        self.undo_step |= o.undo_step;
         self.redo |= o.redo;
         self.save |= o.save;
         self.save_as |= o.save_as;
@@ -48,9 +51,11 @@ pub(crate) fn take(ctx: &egui::Context) -> GlobalKeys {
         // egui matches shortcuts "logically" (extra Shift is ignored), so
         // the Shift variants must be consumed before the plain ones.
         let redo = i.consume_shortcut(&cmd_shift(Key::Z)) || i.consume_shortcut(&cmd(Key::Y));
+        let undo_step = i.consume_shortcut(&crate::bindings::UNDO_STEP.shortcut());
         let save_as = i.consume_shortcut(&cmd_shift(Key::S));
         let mut keys = GlobalKeys {
             redo,
+            undo_step,
             undo: i.consume_shortcut(&cmd(Key::Z)),
             save_as,
             save: i.consume_shortcut(&cmd(Key::S)),

@@ -23,6 +23,7 @@ fn note(step: u32, key: u8) -> Note {
         length: TICKS_PER_STEP,
         key,
         velocity: 1.0,
+        muted: false,
     }
 }
 
@@ -54,6 +55,16 @@ fn notes_start_on_time_and_pitch_changes_speed() {
 }
 
 #[test]
+fn muted_notes_do_not_play() {
+    let muted = Note {
+        muted: true,
+        ..note(1, ROOT_KEY)
+    };
+    let out = render(vec![muted], 4 * STEP);
+    assert!(out.iter().all(|v| *v == 0.0), "spec 0.2.7: the Mute tool");
+}
+
+#[test]
 fn notes_after_the_pattern_end_do_not_play() {
     // Default pattern: 16 steps; a note on step 20 is outside.
     let out = render(vec![note(20, ROOT_KEY)], 16 * STEP);
@@ -70,6 +81,7 @@ fn gate_is_cut_at_the_repetition_end() {
         length: 8 * TICKS_PER_STEP,
         key: 64,
         velocity: 0.5,
+        muted: false,
     };
     p.patterns[0].row_mut(ch).notes = vec![long];
     let pid = p.patterns[0].id;
