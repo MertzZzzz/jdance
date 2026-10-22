@@ -73,11 +73,13 @@ fn scan_lists_classes_and_kinds() {
             "JD Test Latency",
             "JD Test Sidechain",
             "JD Test Logger",
-            "JD Test Synth"
+            "JD Test Synth",
+            "JD Test Drums",
+            "JD Test Mono"
         ]
     );
     for x in &d {
-        let kind = if x.plugin.name == "JD Test Synth" {
+        let kind = if ["JD Test Synth", "JD Test Drums"].contains(&x.plugin.name.as_str()) {
             PluginKind::Instrument
         } else {
             PluginKind::Effect
@@ -98,7 +100,7 @@ fn scan_lists_classes_and_kinds() {
 fn out_of_process_scan_and_blocklist_reasons() {
     let scanner = Path::new(env!("CARGO_BIN_EXE_jdance-plugin-scanner"));
     match scan_out_of_process(scanner, bundle(), Duration::from_secs(30)) {
-        ScanOutcome::Ok(d) => assert_eq!(d.len(), 5),
+        ScanOutcome::Ok(d) => assert_eq!(d.len(), 7),
         f => panic!("{f:?}"),
     }
     let missing = bundle().with_file_name("Missing.vst3");
@@ -334,4 +336,38 @@ fn instrument_receives_sample_accurate_notes() {
         synth_log(&mut c),
         [(0x1000, 10, 69), (0x1000, 10, 72), (0x1001, 50, 69)]
     );
+}
+
+#[test]
+fn a_multi_output_instrument_that_refuses_stereo_everywhere_opens() {
+    use jdance_plugin_api::{NoteEvent, NoteKind};
+    // Stereo main out plus separate stereo and mono outputs; it refuses
+    // stereo on all of them, as multi-output drum instruments do.
+    let (mut p, _c) = open("JD Test Drums", None);
+    let events = [NoteEvent {
+        offset: 0,
+        note_id: 60,
+        key: 60,
+        kind: NoteKind::On { velocity: 1.0 },
+    }];
+    let (mut l, mut r) = (vec![0.0; 512], vec![0.0; 512]);
+    p.process_instrument(&mut l, &mut r, &events, &Transport::default());
+    assert!(l.iter().any(|v| v.abs() > 0.1), "the main output sounds");
+    assert_eq!(l, r);
+}
+
+#[test]
+fn a_mono_effect_takes_the_mix_and_feeds_both_sides() {
+    let (mut p, _c) = open("JD Test Mono", None);
+    let left = ramp(600);
+    let mut right: Vec<f32> = left.iter().map(|v| -v * 0.5).collect();
+    let mut l = left.clone();
+    let t = Transport::default();
+    p.process(&mut l, &mut right, None, &t);
+    // Default gain 0.5 → ×1: the output is the mono mix on both sides.
+    for (i, (a, b)) in l.iter().zip(&right).enumerate() {
+        let mix = 0.5 * (left[i] - left[i] * 0.5);
+        assert!((a - mix).abs() < 1e-6, "{i}: {a} vs {mix}");
+        assert_eq!(a, b);
+    }
 }

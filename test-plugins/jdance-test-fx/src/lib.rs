@@ -12,6 +12,12 @@
 //!   (id, sample offset, value) into its component state, has a
 //!   non-automatable parameter, and echoes the gain as an output
 //!   parameter change.
+//! - **JD Test Synth**: sine voices from note events.
+//! - **JD Test Drums**: the synth with a stereo main output and separate
+//!   outputs (one stereo, three mono), like multi-output drum
+//!   instruments; it accepts only its own bus arrangement.
+//! - **JD Test Mono**: gain with one mono input and one mono output; it
+//!   refuses stereo.
 //!
 //! `JDANCE_TEST_FX_FAULT=crash|hang` makes `GetPluginFactory` abort or
 //! never return, for scanner blocklist and timeout tests.
@@ -52,14 +58,27 @@ enum Mode {
     Sidechain = 2,
     Logger = 3,
     Synth = 4,
+    Drums = 5,
+    Mono = 6,
 }
 
-const MODES: [Mode; 5] = [
+const MODES: [Mode; 7] = [
     Mode::Gain,
     Mode::Latency,
     Mode::Sidechain,
     Mode::Logger,
     Mode::Synth,
+    Mode::Drums,
+    Mode::Mono,
+];
+
+/// Output buses of the drums class.
+const DRUM_OUTS: [SpeakerArrangement; 5] = [
+    SpeakerArr::kStereo,
+    SpeakerArr::kStereo,
+    SpeakerArr::kMono,
+    SpeakerArr::kMono,
+    SpeakerArr::kMono,
 ];
 
 impl Mode {
@@ -70,6 +89,8 @@ impl Mode {
             Mode::Sidechain => "JD Test Sidechain",
             Mode::Logger => "JD Test Logger",
             Mode::Synth => "JD Test Synth",
+            Mode::Drums => "JD Test Drums",
+            Mode::Mono => "JD Test Mono",
         }
     }
 
@@ -85,7 +106,7 @@ impl Mode {
         match self {
             Mode::Gain => &[P_GAIN, P_BYPASS],
             Mode::Logger => &[P_GAIN, P_FIXED, P_OUT],
-            Mode::Latency | Mode::Sidechain | Mode::Synth => &[P_GAIN],
+            Mode::Latency | Mode::Sidechain | Mode::Synth | Mode::Drums | Mode::Mono => &[P_GAIN],
         }
     }
 }
@@ -190,13 +211,60 @@ impl Processor {
     fn input_buses(&self) -> i32 {
         match self.mode {
             Mode::Sidechain => 2,
-            Mode::Synth => 0,
+            Mode::Synth | Mode::Drums => 0,
             _ => 1,
+        }
+    }
+
+    fn output_buses(&self) -> i32 {
+        if self.mode == Mode::Drums {
+            DRUM_OUTS.len() as i32
+        } else {
+            1
+        }
+    }
+
+    fn is_instrument(&self) -> bool {
+        matches!(self.mode, Mode::Synth | Mode::Drums)
+    }
+
+    /// The bus's own arrangement.
+    fn arrangement(&self, dir: BusDirection, index: usize) -> SpeakerArrangement {
+        match self.mode {
+            Mode::Mono => SpeakerArr::kMono,
+            Mode::Drums if dir == BusDirections_::kOutput as BusDirection => DRUM_OUTS[index],
+            _ => SpeakerArr::kStereo,
         }
     }
 }
 
+/// `n` values at `ptr`, or none for a null pointer.
+unsafe fn slice_or_empty<'a, T>(ptr: *const T, n: i32) -> &'a [T] {
+    if ptr.is_null() || n <= 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(ptr, n as usize) }
+    }
+}
+
 impl Processor {
+    /// Mono gain: one channel in, one channel out.
+    unsafe fn mono(&self, data: &ProcessData, n: usize) {
+        if n == 0 || data.numInputs < 1 || data.numOutputs < 1 {
+            return;
+        }
+        let (input, output) = unsafe { (&*data.inputs, &*data.outputs) };
+        if input.numChannels != 1 || output.numChannels != 1 {
+            return;
+        }
+        let gain = (2.0 * self.gain()) as f32;
+        let src = unsafe { *input.__field0.channelBuffers32 };
+        let dst = unsafe { *output.__field0.channelBuffers32 };
+        for i in 0..n {
+            unsafe { *dst.add(i) = *src.add(i) * gain };
+        }
+    }
+
     /// Sine voices from note events; logs every event (offset, key).
     unsafe fn synth(&self, data: &ProcessData, dsp: &mut Dsp, n: usize) {
         let mut events = Vec::new();
@@ -294,7 +362,7 @@ impl IComponentTrait for Processor {
     unsafe fn getBusCount(&self, media_type: MediaType, dir: BusDirection) -> i32 {
         if media_type == MediaTypes_::kEvent as MediaType {
             return i32::from(
-                self.mode == Mode::Synth && dir == BusDirections_::kInput as BusDirection,
+                self.is_instrument() && dir == BusDirections_::kInput as BusDirection,
             );
         }
         if media_type != MediaTypes_::kAudio as MediaType {
@@ -303,7 +371,7 @@ impl IComponentTrait for Processor {
         if dir == BusDirections_::kInput as BusDirection {
             self.input_buses()
         } else {
-            1
+            self.output_buses()
         }
     }
 
@@ -336,7 +404,7 @@ impl IComponentTrait for Processor {
         let bus = unsafe { &mut *bus };
         bus.mediaType = media_type;
         bus.direction = dir;
-        bus.channelCount = 2;
+        bus.channelCount = self.arrangement(dir, index as usize).count_ones() as i32;
         if index == 0 {
             let name = if dir == BusDirections_::kInput as BusDirection {
                 "Input"
@@ -347,7 +415,12 @@ impl IComponentTrait for Processor {
             bus.busType = BusTypes_::kMain as BusType;
             bus.flags = BusInfo_::BusFlags_::kDefaultActive as u32;
         } else {
-            copy_wstring("Sidechain", &mut bus.name);
+            let name = if dir == BusDirections_::kInput as BusDirection {
+                "Sidechain"
+            } else {
+                "Separate"
+            };
+            copy_wstring(name, &mut bus.name);
             bus.busType = BusTypes_::kAux as BusType;
             bus.flags = 0;
         }
@@ -421,16 +494,22 @@ impl IAudioProcessorTrait for Processor {
         outputs: *mut SpeakerArrangement,
         num_outs: i32,
     ) -> tresult {
-        if num_ins != self.input_buses() || num_outs != 1 {
+        if num_ins != self.input_buses() || num_outs != self.output_buses() {
             return kResultFalse;
         }
-        let ins = unsafe { std::slice::from_raw_parts(inputs, num_ins as usize) };
-        let outs = unsafe { std::slice::from_raw_parts(outputs, 1) };
-        if ins.iter().chain(outs).all(|a| *a == SpeakerArr::kStereo) {
-            kResultTrue
-        } else {
-            kResultFalse
-        }
+        let ins = unsafe { slice_or_empty(inputs, num_ins) };
+        let outs = unsafe { slice_or_empty(outputs, num_outs) };
+        let input = BusDirections_::kInput as BusDirection;
+        let output = BusDirections_::kOutput as BusDirection;
+        let own = ins
+            .iter()
+            .enumerate()
+            .all(|(i, a)| *a == self.arrangement(input, i))
+            && outs
+                .iter()
+                .enumerate()
+                .all(|(i, a)| *a == self.arrangement(output, i));
+        if own { kResultTrue } else { kResultFalse }
     }
 
     unsafe fn getBusArrangement(
@@ -443,7 +522,7 @@ impl IAudioProcessorTrait for Processor {
         if index < 0 || index >= count {
             return kInvalidArgument;
         }
-        unsafe { *arr = SpeakerArr::kStereo };
+        unsafe { *arr = self.arrangement(dir, index as usize) };
         kResultOk
     }
 
@@ -515,8 +594,12 @@ impl IAudioProcessorTrait for Processor {
         }
 
         let n = data.numSamples as usize;
-        if self.mode == Mode::Synth {
+        if self.is_instrument() {
             unsafe { self.synth(data, &mut dsp, n) };
+            return kResultOk;
+        }
+        if self.mode == Mode::Mono {
+            unsafe { self.mono(data, n) };
             return kResultOk;
         }
         if n == 0 || data.numInputs < 1 || data.numOutputs < 1 {
@@ -1026,6 +1109,7 @@ impl IPluginFactory2Trait for Factory {
         let sub = match mode {
             Mode::Sidechain => "Fx|Dynamics",
             Mode::Synth => "Instrument|Synth",
+            Mode::Drums => "Instrument|Drum",
             _ => "Fx",
         };
         copy_cstring(sub, &mut info.subCategories);

@@ -116,8 +116,9 @@ fn stream_ptr(s: &ComWrapper<MemStream>) -> *mut IBStream {
         .map_or(std::ptr::null_mut(), |r| r.as_ptr())
 }
 
-/// Bus roles chosen for the instance (PLG-031).
-#[derive(Debug, Clone, Copy)]
+/// Bus roles chosen for the instance (PLG-031) and the channel count of
+/// every audio bus as agreed with the plugin.
+#[derive(Debug, Clone)]
 struct Buses {
     inputs: usize,
     outputs: usize,
@@ -125,6 +126,15 @@ struct Buses {
     aux_in: Option<usize>,
     main_out: usize,
     has_events: bool,
+    in_channels: Vec<usize>,
+    out_channels: Vec<usize>,
+}
+
+impl Buses {
+    fn channels_in(&self, bus: Option<usize>) -> usize {
+        bus.and_then(|b| self.in_channels.get(b).copied())
+            .unwrap_or(0)
+    }
 }
 
 unsafe fn configure_buses(
@@ -172,20 +182,68 @@ unsafe fn configure_buses(
             }
         }
     }
-    let mut ins = vec![SpeakerArr::kStereo; inputs];
-    let mut outs = vec![SpeakerArr::kStereo; outputs];
-    let r = unsafe {
-        processor.setBusArrangements(
-            ins.as_mut_ptr(),
-            inputs as i32,
-            outs.as_mut_ptr(),
-            outputs as i32,
-        )
+    // Bus arrangements (PLG-031). First stereo everywhere; then stereo
+    // on the main buses and the plugin's own arrangement elsewhere
+    // (multi-output instruments with mono outputs); else the plugin keeps
+    // its own and the host adapts to it, as VST3 asks of a host when
+    // `setBusArrangements` is refused.
+    let own = |d, n: usize| -> Vec<SpeakerArrangement> {
+        (0..n)
+            .map(|i| {
+                let mut a: SpeakerArrangement = 0;
+                if unsafe { processor.getBusArrangement(d, i as i32, &mut a) } == kResultOk {
+                    a
+                } else {
+                    // No answer: as many channels as the bus reports.
+                    let mut info: BusInfo = unsafe { std::mem::zeroed() };
+                    unsafe { component.getBusInfo(audio, d, i as i32, &mut info) };
+                    match info.channelCount {
+                        1 => SpeakerArr::kMono,
+                        _ => SpeakerArr::kStereo,
+                    }
+                }
+            })
+            .collect()
     };
-    if r != kResultTrue {
-        // Mono-only plugins are adapted in a later step (PLG-031).
+    let (own_in, own_out) = (own(input, inputs), own(output, outputs));
+    let mut main_in_stereo = own_in.clone();
+    for i in [main_in, aux_in].into_iter().flatten() {
+        main_in_stereo[i] = SpeakerArr::kStereo;
+    }
+    let mut main_out_stereo = own_out.clone();
+    main_out_stereo[main_out] = SpeakerArr::kStereo;
+    let proposals = [
+        (
+            vec![SpeakerArr::kStereo; inputs],
+            vec![SpeakerArr::kStereo; outputs],
+        ),
+        (main_in_stereo, main_out_stereo),
+    ];
+    for (mut ins, mut outs) in proposals {
+        let r = unsafe {
+            processor.setBusArrangements(
+                ins.as_mut_ptr(),
+                inputs as i32,
+                outs.as_mut_ptr(),
+                outputs as i32,
+            )
+        };
+        if r == kResultTrue {
+            break;
+        }
+    }
+    // What the plugin settled on.
+    let in_channels: Vec<usize> = own(input, inputs)
+        .into_iter()
+        .map(|a| a.count_ones() as usize)
+        .collect();
+    let out_channels: Vec<usize> = own(output, outputs)
+        .into_iter()
+        .map(|a| a.count_ones() as usize)
+        .collect();
+    if out_channels[main_out] == 0 {
         return Err(PluginError::Unsupported(
-            "plugin does not accept a stereo bus arrangement".into(),
+            "plugin's main output has no channels".into(),
         ));
     }
     Ok(Buses {
@@ -195,6 +253,8 @@ unsafe fn configure_buses(
         aux_in,
         main_out,
         has_events,
+        in_channels,
+        out_channels,
     })
 }
 
@@ -375,6 +435,14 @@ pub fn instantiate(
     }
 }
 
+/// Left becomes the mix of left and right, for a mono bus.
+fn mix_into_left(pair: &mut [Vec<f32>; 2], n: usize) {
+    let [l, r] = pair;
+    for (a, b) in l[..n].iter_mut().zip(&r[..n]) {
+        *a = 0.5 * (*a + *b);
+    }
+}
+
 /// A note event in VST3 form, `base` samples into the block.
 fn vst_event(e: &NoteEvent, base: usize) -> Event {
     let mut ev: Event = unsafe { std::mem::zeroed() };
@@ -420,9 +488,9 @@ pub struct Vst3Processor {
     output: [Vec<f32>; 2],
     silence: Vec<f32>,
     scratch: Vec<f32>,
-    /// Channel pointer pairs per bus; heap storage keeps them stable.
-    in_ptrs: Vec<[*mut f32; 2]>,
-    out_ptrs: Vec<[*mut f32; 2]>,
+    /// Channel pointers per bus; heap storage keeps them stable.
+    in_ptrs: Vec<Vec<*mut f32>>,
+    out_ptrs: Vec<Vec<*mut f32>>,
     in_buses: Vec<AudioBusBuffers>,
     out_buses: Vec<AudioBusBuffers>,
     in_changes: ComWrapper<ParamChanges>,
@@ -464,6 +532,7 @@ impl Vst3Processor {
     ) -> Self {
         let n = setup.max_block.max(1);
         let buf = || [vec![0.0f32; n], vec![0.0f32; n]];
+        let (inputs, outputs) = (buses.inputs, buses.outputs);
         let mut p = Self {
             processor,
             buses,
@@ -476,10 +545,10 @@ impl Vst3Processor {
             output: buf(),
             silence: vec![0.0; n],
             scratch: vec![0.0; n],
-            in_ptrs: vec![[std::ptr::null_mut(); 2]; buses.inputs],
-            out_ptrs: vec![[std::ptr::null_mut(); 2]; buses.outputs],
-            in_buses: Vec::with_capacity(buses.inputs),
-            out_buses: Vec::with_capacity(buses.outputs),
+            in_ptrs: Vec::with_capacity(inputs),
+            out_ptrs: Vec::with_capacity(outputs),
+            in_buses: Vec::with_capacity(inputs),
+            out_buses: Vec::with_capacity(outputs),
             in_changes: ComWrapper::new(ParamChanges::new()),
             out_changes: ComWrapper::new(ParamChanges::new()),
             events: ComWrapper::new(EventList::new()),
@@ -490,25 +559,36 @@ impl Vst3Processor {
             automation: Vec::with_capacity(AUTOMATION_POINTS),
             _core: core,
         };
-        for i in 0..buses.inputs {
-            p.in_ptrs[i] = if Some(i) == buses.main_in {
+        // The main and sidechain buses get the host's left and right
+        // (a mono bus: the left, which holds the mix); extra channels and
+        // other buses read silence and write into scratch.
+        for i in 0..p.buses.inputs {
+            let pair = if Some(i) == p.buses.main_in {
                 [p.input[0].as_mut_ptr(), p.input[1].as_mut_ptr()]
-            } else if Some(i) == buses.aux_in {
+            } else if Some(i) == p.buses.aux_in {
                 [p.sidechain[0].as_mut_ptr(), p.sidechain[1].as_mut_ptr()]
             } else {
                 [p.silence.as_mut_ptr(); 2]
             };
+            let ptrs = (0..p.buses.in_channels[i])
+                .map(|c| pair.get(c).copied().unwrap_or(p.silence.as_mut_ptr()))
+                .collect();
+            p.in_ptrs.push(ptrs);
         }
-        for i in 0..buses.outputs {
-            p.out_ptrs[i] = if i == buses.main_out {
+        for i in 0..p.buses.outputs {
+            let pair = if i == p.buses.main_out {
                 [p.output[0].as_mut_ptr(), p.output[1].as_mut_ptr()]
             } else {
                 [p.scratch.as_mut_ptr(); 2]
             };
+            let ptrs = (0..p.buses.out_channels[i])
+                .map(|c| pair.get(c).copied().unwrap_or(p.scratch.as_mut_ptr()))
+                .collect();
+            p.out_ptrs.push(ptrs);
         }
         for ptrs in &mut p.in_ptrs {
             p.in_buses.push(AudioBusBuffers {
-                numChannels: 2,
+                numChannels: ptrs.len() as i32,
                 silenceFlags: 0,
                 __field0: AudioBusBuffers__type0 {
                     channelBuffers32: ptrs.as_mut_ptr(),
@@ -517,7 +597,7 @@ impl Vst3Processor {
         }
         for ptrs in &mut p.out_ptrs {
             p.out_buses.push(AudioBusBuffers {
-                numChannels: 2,
+                numChannels: ptrs.len() as i32,
                 silenceFlags: 0,
                 __field0: AudioBusBuffers__type0 {
                     channelBuffers32: ptrs.as_mut_ptr(),
@@ -525,6 +605,27 @@ impl Vst3Processor {
             });
         }
         p
+    }
+
+    /// A mono main or sidechain input takes the mix of left and right.
+    fn mix_mono_inputs(&mut self, n: usize) {
+        if self.buses.channels_in(self.buses.main_in) == 1 {
+            mix_into_left(&mut self.input, n);
+        }
+        if self.buses.channels_in(self.buses.aux_in) == 1 {
+            mix_into_left(&mut self.sidechain, n);
+        }
+    }
+
+    /// The main output into `left` and `right`; a mono output feeds both.
+    fn copy_output(&self, left: &mut [f32], right: &mut [f32]) {
+        let n = left.len();
+        left.copy_from_slice(&self.output[0][..n]);
+        if self.buses.out_channels[self.buses.main_out] == 1 {
+            right.copy_from_slice(&self.output[0][..n]);
+        } else {
+            right.copy_from_slice(&self.output[1][..n]);
+        }
     }
 
     fn fill_context(&mut self, t: &Transport, offset: usize) {
@@ -641,12 +742,12 @@ impl PluginProcessor for Vst3Processor {
                 }
             }
             self.silence[..n].fill(0.0);
+            self.mix_mono_inputs(n);
             self.chunk_automation(done, n);
             self.fill_context(transport, done);
             // On failure the input passes through unchanged.
             if self.run(n) {
-                left[range.clone()].copy_from_slice(&self.output[0][..n]);
-                right[range].copy_from_slice(&self.output[1][..n]);
+                self.copy_output(&mut left[range.clone()], &mut right[range]);
             }
             done += n;
         }
@@ -686,8 +787,7 @@ impl PluginProcessor for Vst3Processor {
             self.fill_context(transport, done);
             let range = done..done + n;
             if self.run(n) {
-                left[range.clone()].copy_from_slice(&self.output[0][..n]);
-                right[range].copy_from_slice(&self.output[1][..n]);
+                self.copy_output(&mut left[range.clone()], &mut right[range]);
             } else {
                 left[range.clone()].fill(0.0);
                 right[range].fill(0.0);
