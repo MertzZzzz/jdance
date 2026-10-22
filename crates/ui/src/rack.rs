@@ -396,7 +396,10 @@ impl RackView {
             let bars = if pattern.length_steps.is_multiple_of(per_bar) {
                 format!("{}", pattern.length_steps / per_bar)
             } else {
-                format!("{:.2}", f64::from(pattern.length_steps) / f64::from(per_bar))
+                format!(
+                    "{:.2}",
+                    f64::from(pattern.length_steps) / f64::from(per_bar)
+                )
             };
             ui.label(
                 RichText::new(format!("{} steps · {bars} bar(s)", pattern.length_steps))
