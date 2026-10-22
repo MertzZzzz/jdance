@@ -305,7 +305,7 @@ GUI — под Xvfb со скриншотами, звук — ALSA null.
 | Освобождение драйвера при потере фокуса (ASIO-025) | PASS (код), на драйвере NOT RUN | по умолчанию выключено |
 | Вычитание задержки драйвера из позиции дубля (ASIO-042) | PASS (код), на драйвере NOT RUN | сообщение «driver latency N frames compensated» |
 | Уведомление об ASIO SDK (ASIO-030) | PARTIAL | `ASIO-NOTICE.txt` в MSI; окна About в программе нет |
-| Windows MSI 0.2.2 | см. CI | workflow `Release` |
+| Windows MSI 0.2.2 | PASS | сборка, установка, проверка версии в workflow `Release`; https://github.com/MertzZzzz/jdance/releases/tag/v0.2.2 |
 
 Отступления от спецификации 0.2.2:
 
