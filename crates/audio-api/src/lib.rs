@@ -286,10 +286,18 @@ impl ChannelNames {
     }
 }
 
+/// Most device input channels handed to [`CaptureCallback::capture_all`]
+/// (mixer track inputs, spec 0.2.3 INP-001).
+pub const MAX_LIVE_INPUTS: usize = 32;
+
 /// Receives captured audio on the device thread; same realtime rules as
 /// [`RenderCallback`]. Mono captures pass the same slice twice.
 pub trait CaptureCallback: Send + 'static {
     fn capture(&mut self, left: &[f32], right: &[f32]);
+    /// The same block with every device input channel (at most
+    /// [`MAX_LIVE_INPUTS`]), interleaved, `channels` per frame; called
+    /// right before [`Self::capture`].
+    fn capture_all(&mut self, _frames: &[f32], _channels: usize) {}
 }
 
 /// An open input stream; dropping it stops and closes the stream.

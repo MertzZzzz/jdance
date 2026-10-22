@@ -12,7 +12,7 @@ use jdance_commands::Edit;
 use jdance_domain::{
     AutomationLane, AutomationTarget, Effect, EffectKind, Insert, LimiterSettings,
     MAX_INSERTS_PER_TRACK, MAX_SEND_LEVEL, MAX_SENDS_PER_TRACK, MAX_TRACKS, MAX_VOLUME, Mapping,
-    Mixer, MixerTrack, ParamUnit, PluginTarget, Sidechain, Tap, TrackId,
+    Mixer, MixerTrack, ParamUnit, PluginTarget, Sidechain, Tap, TrackId, TrackInput,
 };
 use jdance_dsp::Processor;
 use jdance_plugin_api::PluginDescriptor;
@@ -81,6 +81,10 @@ impl StripView {
 pub(crate) struct MixerView {
     pub selected: TrackId,
     pub view: StripView,
+    /// The feedback warning was confirmed this session (MON-002).
+    monitor_warned: bool,
+    /// Track waiting for the feedback warning before monitoring.
+    confirm_monitor: Option<TrackId>,
 }
 
 impl Default for MixerView {
@@ -88,8 +92,73 @@ impl Default for MixerView {
         Self {
             selected: TrackId::MASTER,
             view: StripView::Compact,
+            monitor_warned: false,
+            confirm_monitor: None,
         }
     }
+}
+
+/// The headphones toggle of a track with an input (MON-001); the first
+/// time in a session it asks about feedback first (MON-002).
+fn monitor_toggle(ui: &mut egui::Ui, t: &MixerTrack, view: &mut MixerView, out: &mut MixerOutput) {
+    let Some(input) = t.input.filter(|_| !t.is_master()) else {
+        return;
+    };
+    let mut on = t.monitor;
+    let r = ui
+        .toggle_value(
+            &mut on,
+            RichText::new(format!("Mon · {}", input.short_label())).size(10.0),
+        )
+        .on_hover_text("Hear the input through this track (its effects, fader and sends)");
+    if r.changed() {
+        if on && !view.monitor_warned {
+            view.confirm_monitor = Some(t.id);
+        } else {
+            out.edits.push((Edit::SetTrackMonitor(t.id, on), false));
+        }
+    }
+}
+
+/// The feedback warning before the first monitoring (MON-002, MON-020).
+fn monitor_warning(
+    ctx: &egui::Context,
+    host: &mut dyn Host,
+    view: &mut MixerView,
+    out: &mut MixerOutput,
+) {
+    let Some(id) = view.confirm_monitor else {
+        return;
+    };
+    egui::Modal::new(egui::Id::unique("monitor_warning")).show(ctx, |ui| {
+        ui.set_width(380.0);
+        ui.heading("Monitor the input?");
+        ui.label(
+            "With speakers and an open microphone this can feed back loudly. Use headphones.",
+        );
+        let direct = host.recording_settings().monitor;
+        if direct {
+            ui.colored_label(
+                crate::theme::WARN,
+                "The direct monitor of Options › Recording turns off, so the input is not heard twice.",
+            );
+        }
+        ui.horizontal(|ui| {
+            if ui.button("Turn monitoring on").clicked() {
+                if direct {
+                    let mut s = host.recording_settings();
+                    s.monitor = false;
+                    let _ = host.set_recording_settings(s);
+                }
+                out.edits.push((Edit::SetTrackMonitor(id, true), false));
+                view.monitor_warned = true;
+                view.confirm_monitor = None;
+            }
+            if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                view.confirm_monitor = None;
+            }
+        });
+    });
 }
 
 const INSPECTOR_W: f32 = 300.0;
@@ -161,11 +230,15 @@ pub(crate) fn show(
                 .max_height(height)
                 .show(ui, |ui| {
                     if let Some(t) = mixer.track(view.selected) {
-                        inspector(ui, mixer, automation, t, meters, &plugins, host, &mut out);
+                        inspector(
+                            ui, mixer, automation, t, latency, meters, &plugins, host, view,
+                            &mut out,
+                        );
                     }
                 });
         });
     });
+    monitor_warning(ui.ctx(), host, view, &mut out);
     out
 }
 
@@ -327,6 +400,10 @@ fn strip(
                     );
                 }
             });
+            // Input and monitoring (INP-001, MON-001).
+            if t.input.is_some() {
+                ui.horizontal(|ui| monitor_toggle(ui, t, view, out));
+            }
             // 4. Pan.
             ui.horizontal(|ui| {
                 ui.add_space((width - 26.0) / 2.0);
@@ -543,6 +620,95 @@ fn draw_meter(p: &egui::Painter, r: Rect, (l, rr): (f32, f32), muted: bool) {
     }
 }
 
+/// Input of a track (INP-001/002) with its monitoring and delay (MON-004).
+fn input_ui(
+    ui: &mut egui::Ui,
+    t: &MixerTrack,
+    latency: &LatencyInfo,
+    host: &mut dyn Host,
+    view: &mut MixerView,
+    out: &mut MixerOutput,
+) {
+    let live = host.live_inputs();
+    let (count, names) = live.clone().unwrap_or_default();
+    let label = |i: TrackInput| {
+        let name = |c: u16| names.get(usize::from(c)).filter(|n| !n.is_empty());
+        let base = i.short_label();
+        match i {
+            TrackInput::Mono(c) => name(c).map_or(base.clone(), |n| format!("{base} ({n})")),
+            TrackInput::Stereo(c) => match (name(c), name(c + 1)) {
+                (Some(a), Some(b)) => format!("{base} ({a}/{b})"),
+                _ => base,
+            },
+        }
+    };
+    ui.horizontal(|ui| {
+        ui.label("Input");
+        let missing = t.input.is_some_and(|i| i.needed() > count);
+        let text = match t.input {
+            None => RichText::new("(none)"),
+            Some(i) if missing => RichText::new(format!("{} (not on device)", i.short_label()))
+                .color(crate::theme::WARN),
+            Some(i) => RichText::new(label(i)),
+        };
+        let combo = egui::ComboBox::from_id_salt(("track_input", t.id.0))
+            .width(170.0)
+            .selected_text(text)
+            .show_ui(ui, |ui| {
+                let mut choose = |ui: &mut egui::Ui, v: Option<TrackInput>, text: String| {
+                    if ui.selectable_label(t.input == v, text).clicked() && t.input != v {
+                        out.edits.push((Edit::SetTrackInput(t.id, v), false));
+                    }
+                };
+                choose(ui, None, "(none)".into());
+                for c in (0..count.saturating_sub(1)).step_by(2) {
+                    choose(
+                        ui,
+                        Some(TrackInput::Stereo(c)),
+                        label(TrackInput::Stereo(c)),
+                    );
+                }
+                for c in 0..count {
+                    choose(ui, Some(TrackInput::Mono(c)), label(TrackInput::Mono(c)));
+                }
+            })
+            .response;
+        if live.is_none() {
+            combo.on_hover_text(
+                "No input is open: choose the input device in Options › Recording; tracks use \
+                 its channels",
+            );
+        }
+    });
+    if t.input.is_some() {
+        ui.horizontal(|ui| {
+            monitor_toggle(ui, t, view, out);
+            if t.monitor
+                && let Some(s) = host.stream()
+            {
+                // Input + output of the driver (or two buffers), plus the
+                // track's plugin delay (MON-004).
+                let rate = f64::from(s.info.sample_rate.max(1));
+                let (frames, estimate) = match s.info.latency {
+                    Some((i, o)) => (u64::from(i) + u64::from(o), false),
+                    None => (2 * u64::from(s.stats.last_frames.unwrap_or(0)), true),
+                };
+                let pdc = u64::from(latency.track(t.id).unwrap_or(0));
+                let ms = (frames + pdc) as f64 * 1000.0 / rate;
+                let text = if estimate {
+                    format!("≈ {ms:.1} ms (estimate)")
+                } else {
+                    format!("{ms:.1} ms")
+                };
+                ui.label(RichText::new(text).color(crate::theme::MUTED))
+                    .on_hover_text(
+                        "Delay of what you hear: input, output and this track's plugins",
+                    );
+            }
+        });
+    }
+}
+
 /// Inspector of the selected track (UI-VIS-093): input, effect slots,
 /// output, sends.
 #[allow(clippy::too_many_arguments)]
@@ -551,22 +717,17 @@ fn inspector(
     mixer: &Mixer,
     automation: &[AutomationLane],
     t: &MixerTrack,
+    latency: &LatencyInfo,
     meters: &MeterReadings,
     plugins: &[PluginDescriptor],
     host: &mut dyn Host,
+    view: &mut MixerView,
     out: &mut MixerOutput,
 ) {
     ui.label(RichText::new(format!("Mixer › {}", t.name)).strong());
-    ui.horizontal(|ui| {
-        ui.label("Input");
-        ui.add_enabled_ui(false, |ui| {
-            egui::ComboBox::from_id_salt(("track_input", t.id.0))
-                .selected_text("(none)")
-                .show_ui(ui, |_| {});
-        })
-        .response
-        .on_disabled_hover_text("Recording goes onto Playlist lanes (Options › Recording)");
-    });
+    if !t.is_master() {
+        input_ui(ui, t, latency, host, view, out);
+    }
     ui.separator();
     ui.label(RichText::new("Effects").color(crate::theme::MUTED));
     for (index, ins) in t.inserts.iter().enumerate() {

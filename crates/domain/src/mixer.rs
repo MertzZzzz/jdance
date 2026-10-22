@@ -52,6 +52,41 @@ pub struct MixerTrack {
     /// Display color; `None` = from [`crate::PALETTE`] by position.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<[u8; 3]>,
+    /// Hardware input of the current input device (spec 0.2.3 INP-001);
+    /// never on the master.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<TrackInput>,
+    /// The input sounds through the track (MON-001).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub monitor: bool,
+}
+
+/// Input channels of a mixer track by number, zero-based (INP-002): the
+/// device is the current input device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrackInput {
+    Mono(u16),
+    /// The pair starting at this channel.
+    Stereo(u16),
+}
+
+impl TrackInput {
+    /// Hardware channels the device needs.
+    pub fn needed(self) -> u16 {
+        match self {
+            Self::Mono(c) => c + 1,
+            Self::Stereo(c) => c + 2,
+        }
+    }
+
+    /// "In 1" / "In 1+2".
+    pub fn short_label(self) -> String {
+        match self {
+            Self::Mono(c) => format!("In {}", c + 1),
+            Self::Stereo(c) => format!("In {}+{}", c + 1, c + 2),
+        }
+    }
 }
 
 impl MixerTrack {
@@ -67,6 +102,8 @@ impl MixerTrack {
             sends: Vec::new(),
             inserts: Vec::new(),
             color: None,
+            input: None,
+            monitor: false,
         }
     }
 

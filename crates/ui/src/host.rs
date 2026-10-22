@@ -449,6 +449,12 @@ pub trait Host {
         Err("recording is not available".into())
     }
     fn stop_recording(&mut self) {}
+    /// Channels of the open input that mixer tracks can use, with driver
+    /// names where known (spec 0.2.3 INP-001); `None` when no input is
+    /// open.
+    fn live_inputs(&self) -> Option<(u16, Vec<String>)> {
+        None
+    }
     /// Waveform of the running take since the last call: the largest
     /// absolute sample per few hundred frames (REC-014).
     fn take_recording_peaks(&mut self) -> Vec<f32> {

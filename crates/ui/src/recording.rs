@@ -116,6 +116,31 @@ impl RecordingPanel {
                         ui.label("To track");
                         record_to_box(ui, project, edits);
                         ui.end_row();
+                        // MON-010: record what the target track hears.
+                        if let jdance_domain::RecordTo::Track { track } = project.record_to
+                            && let Some(t) = project.mixer.track(track)
+                            && let Some(input) = t.input
+                        {
+                            let channels = match input {
+                                jdance_domain::TrackInput::Mono(c) => InputChannels::Mono(c),
+                                jdance_domain::TrackInput::Stereo(c) => InputChannels::Stereo(c),
+                            };
+                            ui.label("");
+                            if ui
+                                .add_enabled(
+                                    s.channels != channels,
+                                    egui::Button::new(format!(
+                                        "Use the input of {} ({})",
+                                        t.name,
+                                        input.short_label()
+                                    )),
+                                )
+                                .clicked()
+                            {
+                                s.channels = channels;
+                            }
+                            ui.end_row();
+                        }
                         ui.label("Offset");
                         ui.add(
                             egui::DragValue::new(&mut s.offset_ms)

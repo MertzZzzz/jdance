@@ -86,8 +86,14 @@ impl Signals {
 /// Realtime state of the running session.
 struct Rt {
     frames: usize,
-    /// Recorded input channels: format and the two halves.
+    /// Every opened input channel (up to `MAX_LIVE_INPUTS`): format and
+    /// the two halves.
     inputs: Vec<(Format, [*mut c_void; 2])>,
+    /// Indices into `inputs` of the recorded left and right channels.
+    selection: (usize, usize),
+    /// One input channel, then all of them interleaved (track inputs).
+    chan: Vec<f32>,
+    all: Vec<f32>,
     outputs: [(Format, [*mut c_void; 2]); 2],
     in_l: Vec<f32>,
     in_r: Vec<f32>,
@@ -120,19 +126,29 @@ impl Rt {
         let half = usize::from(index & 1 == 1);
         let n = self.frames;
         let (l, r) = (&mut self.in_l[..n], &mut self.in_r[..n]);
+        let n_in = self.inputs.len();
+        let chan = &mut self.chan[..n];
         for (k, (fmt, bufs)) in self.inputs.iter().enumerate() {
             // SAFETY: the driver's buffer holds `frames` samples of this
             // channel's format while the session runs.
             let src =
                 unsafe { std::slice::from_raw_parts(bufs[half] as *const u8, n * fmt.bytes()) };
-            fmt.read(src, if k == 0 { &mut *l } else { &mut *r });
-        }
-        if let Some(c) = &mut self.capture {
-            match self.inputs.len() {
-                1 => c.capture(l, l),
-                2 => c.capture(l, r),
-                _ => {}
+            fmt.read(src, chan);
+            for (i, v) in chan.iter().enumerate() {
+                self.all[i * n_in + k] = *v;
             }
+            if k == self.selection.0 {
+                l.copy_from_slice(chan);
+            }
+            if k == self.selection.1 {
+                r.copy_from_slice(chan);
+            }
+        }
+        if let Some(c) = &mut self.capture
+            && n_in > 0
+        {
+            c.capture_all(&self.all[..n * n_in], n_in);
+            c.capture(l, r);
         }
         let (ol, or) = (&mut self.out_l[..n], &mut self.out_r[..n]);
         ol.fill(0.0);
@@ -400,17 +416,25 @@ fn prepare(
             )),
         );
     }
-    let input_channels: Vec<i32> = match config.inputs {
-        None => Vec::new(),
-        Some(InputChannels::Mono(c)) => vec![i32::from(c)],
-        Some(InputChannels::Stereo(c)) => vec![i32::from(c), i32::from(c) + 1],
+    // Every input (up to MAX_LIVE_INPUTS) is opened: the recording uses
+    // one or two of them, mixer track inputs any (spec 0.2.3 INP-001).
+    let selection = match config.inputs {
+        None => None,
+        Some(InputChannels::Mono(c)) => Some((i32::from(c), i32::from(c))),
+        Some(InputChannels::Stereo(c)) => Some((i32::from(c), i32::from(c) + 1)),
     };
-    if input_channels.iter().any(|c| *c >= ins) {
+    let live = ins.clamp(0, jdance_audio_api::MAX_LIVE_INPUTS as i32);
+    if selection.is_some_and(|(a, b)| a.max(b) >= live) {
         return fail(
             callbacks,
             DriverError(format!("the driver has {ins} inputs")),
         );
     }
+    let input_channels: Vec<i32> = if selection.is_some() {
+        (0..live).collect()
+    } else {
+        Vec::new()
+    };
     let rate = f64::from(config.sample_rate);
     let current = driver.sample_rate().unwrap_or(0.0);
     if (current - rate).abs() > 0.5 {
@@ -480,9 +504,13 @@ fn prepare(
         (formats[n_in + 1], infos[n_in + 1].buffers),
     ];
     let n = frames as usize;
+    let (sl, sr) = selection.unwrap_or((0, 0));
     let rt = Box::new(Rt {
         frames: n,
         inputs,
+        selection: (sl as usize, sr as usize),
+        chan: vec![0.0; n],
+        all: vec![0.0; n * n_in],
         outputs,
         in_l: vec![0.0; n],
         in_r: vec![0.0; n],

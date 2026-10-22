@@ -782,13 +782,14 @@ mod tests {
         let path = dir.path().join("sig.jdance");
         let mut p = sample_project("a.wav");
         p.time_signature = jdance_domain::TimeSignature::new(7, 8);
+        let mut t = jdance_domain::MixerTrack::new(jdance_domain::TrackId(p.ids.next()), "Mic");
+        t.input = Some(jdance_domain::TrackInput::Stereo(2));
+        t.monitor = true;
+        p.mixer.tracks.push(t);
         save_project(&path, &p).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("\"format_version\": 14"), "{text}");
-        assert_eq!(
-            load_project(&path).unwrap().time_signature,
-            p.time_signature
-        );
+        assert_eq!(load_project(&path).unwrap(), p, "signature and track input");
 
         let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 14, "project": p});
         v["project"]["time_signature"]["denominator"] = serde_json::json!(3);

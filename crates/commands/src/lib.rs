@@ -121,6 +121,10 @@ pub enum Edit {
     SetTrackSolo(TrackId, bool),
     RenameTrack(TrackId, String),
     SetTrackColor(TrackId, Option<[u8; 3]>),
+    /// Hardware input of a track (spec 0.2.3 INP-001); not the master.
+    SetTrackInput(TrackId, Option<jdance_domain::TrackInput>),
+    /// Hear the input through the track (MON-001).
+    SetTrackMonitor(TrackId, bool),
     SetSendLevel(SendId, f32),
     SetInsertBypass(InsertId, bool),
     SetInsertEffect(InsertId, Effect),
@@ -287,6 +291,8 @@ impl Edit {
             Edit::SetTrackSolo(..) => "Solo track",
             Edit::RenameTrack(..) => "Rename track",
             Edit::SetTrackColor(..) => "Change track color",
+            Edit::SetTrackInput(..) => "Change track input",
+            Edit::SetTrackMonitor(..) => "Monitor track input",
             Edit::SetSendLevel(..) => "Change send level",
             Edit::SetInsertBypass(..) => "Bypass effect",
             Edit::SetInsertEffect(..) => "Change effect",
@@ -1426,6 +1432,30 @@ mod tests {
         h.undo(&mut p).unwrap();
         assert_eq!(p.channel(ch).unwrap().volume, orig);
         assert!(!h.is_dirty());
+    }
+
+    #[test]
+    fn track_inputs_and_monitoring_are_undoable_and_not_on_the_master() {
+        let (mut p, mut h, ..) = setup();
+        let t = crate::add_track(&mut h, &mut p, "Mic").unwrap();
+        let input = Some(jdance_domain::TrackInput::Mono(1));
+        h.execute(&mut p, Edit::SetTrackInput(t, input)).unwrap();
+        h.execute(&mut p, Edit::SetTrackMonitor(t, true)).unwrap();
+        let track = p.mixer.track(t).unwrap();
+        assert_eq!((track.input, track.monitor), (input, true));
+        h.undo(&mut p).unwrap();
+        h.undo(&mut p).unwrap();
+        let track = p.mixer.track(t).unwrap();
+        assert_eq!((track.input, track.monitor), (None, false));
+        let master = TrackId::MASTER;
+        assert!(
+            h.execute(&mut p, Edit::SetTrackInput(master, input))
+                .is_err()
+        );
+        assert!(
+            h.execute(&mut p, Edit::SetTrackMonitor(master, true))
+                .is_err()
+        );
     }
 
     #[test]

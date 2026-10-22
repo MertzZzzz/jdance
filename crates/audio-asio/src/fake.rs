@@ -322,7 +322,9 @@ mod tests {
         }
     }
 
-    struct Keep(Arc<Mutex<Vec<f32>>>);
+    /// Keeps the recorded left channel and the channel count of the
+    /// all-inputs block.
+    struct Keep(Arc<Mutex<Vec<f32>>>, Arc<std::sync::atomic::AtomicUsize>);
     impl CaptureCallback for Keep {
         fn capture(&mut self, l: &[f32], _r: &[f32]) {
             if let Ok(mut v) = self.0.lock()
@@ -330,6 +332,11 @@ mod tests {
             {
                 v.extend_from_slice(l);
             }
+        }
+
+        fn capture_all(&mut self, frames: &[f32], channels: usize) {
+            assert_eq!(frames.len() % channels, 0);
+            self.1.store(channels, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
@@ -406,6 +413,7 @@ mod tests {
             "only the active driver"
         );
         let got = Arc::new(Mutex::new(Vec::new()));
+        let all = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let input = b
             .open_input(
                 &dev(),
@@ -413,11 +421,13 @@ mod tests {
                     sample_rate: 48_000,
                     channels: InputChannels::Mono(1),
                 },
-                Box::new(Keep(Arc::clone(&got))),
+                Box::new(Keep(Arc::clone(&got), Arc::clone(&all))),
             )
             .unwrap();
         assert_eq!(input.info().round_trip, Some(300));
         assert!(wait(|| got.lock().unwrap().len() >= 256));
+        // Every input reaches the track inputs (spec 0.2.3 INP-001).
+        assert_eq!(all.load(std::sync::atomic::Ordering::Relaxed), 2);
         let v = got.lock().unwrap().clone();
         // The driver's ramp: consecutive frames step by 1/1000.
         assert!(v.windows(2).take(100).all(|w| {
@@ -446,7 +456,7 @@ mod tests {
                     sample_rate: 48_000,
                     channels: InputChannels::Stereo(0),
                 },
-                Box::new(Keep(Arc::new(Mutex::new(Vec::new())))),
+                Box::new(Keep(Arc::new(Mutex::new(Vec::new())), Arc::default())),
             )
             .unwrap();
         assert!(wait(|| out.stats().read().callbacks > 3));

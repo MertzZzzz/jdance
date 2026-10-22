@@ -243,6 +243,9 @@ pub struct TrackRt {
     pub auto_pan: Option<usize>,
     pub base_volume: f32,
     pub base_pan: f32,
+    /// Live hardware input summed in before the inserts: first device
+    /// channel and stereo; only while monitored (spec 0.2.3 INP-004).
+    pub live_input: Option<(usize, bool)>,
 }
 
 #[derive(Debug, Clone)]
@@ -684,6 +687,13 @@ pub fn compile_full(
             auto_pan: None,
             base_volume: t.volume,
             base_pan: t.pan,
+            live_input: t
+                .input
+                .filter(|_| t.monitor && !t.is_master())
+                .map(|i| match i {
+                    jdance_domain::TrackInput::Mono(c) => (usize::from(c), false),
+                    jdance_domain::TrackInput::Stereo(c) => (usize::from(c), true),
+                }),
         });
     }
 

@@ -75,13 +75,16 @@ impl MeterState {
 struct EngineCallback {
     engine: EngineProcessor,
     monitor: MonitorMix,
+    /// Hardware input for monitored mixer tracks (spec 0.2.3 INP-005).
+    live: recording::LiveInputMix,
     recorder: Arc<Shared>,
     feedback: Arc<jdance_engine::EngineFeedback>,
 }
 
 impl RenderCallback for EngineCallback {
     fn render(&mut self, left: &mut [f32], right: &mut [f32]) {
-        self.engine.render(left, right);
+        let (input, channels) = self.live.take(left.len());
+        self.engine.render_with_input(left, right, input, channels);
         self.monitor.add(left, right);
         if self.recorder.armed.load(Relaxed) && self.feedback.is_playing() {
             self.recorder.recording.store(true, Relaxed);
@@ -109,6 +112,12 @@ struct Recorder {
     project_dir: Option<PathBuf>,
     /// Waveform peaks of the running take (REC-016).
     peaks: Option<rtrb::Consumer<f32>>,
+    /// Live input feed of the open output (INP-005).
+    live_control: Option<recording::LiveInputControl>,
+    /// Input channels the open input delivers to track inputs, and their
+    /// driver names.
+    live_channels: u16,
+    live_names: Vec<String>,
 }
 
 impl Default for Recorder {
@@ -125,6 +134,9 @@ impl Default for Recorder {
             monitor_on: false,
             project_dir: None,
             peaks: None,
+            live_control: None,
+            live_channels: 0,
+            live_names: Vec::new(),
         }
     }
 }
@@ -337,20 +349,31 @@ impl AudioHost {
             ring,
             monitor: mon,
             peaks,
+            live,
         } = outputs;
         let request = jdance_audio_api::InputRequest {
             sample_rate: rate,
             channels: cfg.channels,
         };
-        match backend.open_input(&DeviceId(device), &request, Box::new(capture)) {
+        match backend.open_input(&DeviceId(device.clone()), &request, Box::new(capture)) {
             Ok(stream) => {
                 rec.round_trip = stream.info().round_trip.unwrap_or(0);
+                let channels = usize::from(stream.info().device_channels)
+                    .min(jdance_audio_api::MAX_LIVE_INPUTS);
                 rec.input = Some(stream);
                 rec.ring = Some(ring);
                 rec.peaks = Some(peaks);
                 if let Some(m) = &mut rec.monitor {
                     m.send(mon);
                 }
+                if let Some(l) = &mut rec.live_control {
+                    l.send(live, channels);
+                }
+                rec.live_channels = channels as u16;
+                rec.live_names = backend
+                    .channel_names(&DeviceId(device.clone()))
+                    .map(|n| n.inputs)
+                    .unwrap_or_default();
             }
             Err(e) => {
                 rec.problem = Some(format!(
@@ -374,6 +397,9 @@ impl AudioHost {
         let rec = &mut self.recorder;
         if let Some(m) = &mut rec.monitor {
             m.collect();
+        }
+        if let Some(l) = &mut rec.live_control {
+            l.collect();
         }
         if let Some(input) = &rec.input
             && let StreamState::Failed(e) = input.state()
@@ -736,6 +762,13 @@ impl Host for AudioHost {
         }
         self.project = project.clone();
         self.project_dir = project_dir.map(Path::to_path_buf);
+        // The capture feeds the engine only while a track monitors (INP-004).
+        let live = project
+            .mixer
+            .tracks
+            .iter()
+            .any(|t| t.monitor && t.input.is_some());
+        self.recorder.shared.live.store(live, Relaxed);
         let assets: Vec<SampleRef> = project
             .assets
             .iter()
@@ -1049,6 +1082,12 @@ impl Host for AudioHost {
         self.recorder.finished.take()
     }
 
+    fn live_inputs(&self) -> Option<(u16, Vec<String>)> {
+        let rec = &self.recorder;
+        (rec.input.is_some() && rec.live_channels > 0)
+            .then(|| (rec.live_channels, rec.live_names.clone()))
+    }
+
     fn take_recording_peaks(&mut self) -> Vec<f32> {
         let Some(q) = &mut self.recorder.peaks else {
             return Vec::new();
@@ -1159,6 +1198,7 @@ impl Host for AudioHost {
             .ok_or_else(|| AudioError::Unsupported(format!("backend {}", key.backend)))?;
         let (engine, processor) = create_engine(settings.sample_rate);
         let (mix, control) = recording::monitor_mix();
+        let (live, live_control) = recording::live_input_mix(Arc::clone(&self.recorder.shared));
         let request = jdance_audio_api::StreamRequest {
             sample_rate: settings.sample_rate,
             buffer: settings.buffer,
@@ -1167,6 +1207,7 @@ impl Host for AudioHost {
         let callback = EngineCallback {
             engine: processor,
             monitor: mix,
+            live,
             recorder: Arc::clone(&self.recorder.shared),
             feedback: engine.feedback_arc(),
         };
@@ -1186,6 +1227,7 @@ impl Host for AudioHost {
         self.recompile();
         // The input follows the output's rate and feeds its monitor.
         self.recorder.monitor = Some(control);
+        self.recorder.live_control = Some(live_control);
         self.open_input();
         Ok(())
     }

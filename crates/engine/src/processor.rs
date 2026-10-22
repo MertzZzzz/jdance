@@ -210,6 +210,19 @@ impl EngineProcessor {
     /// Renders `left.len()` frames (any length; RT-020) into the outputs,
     /// overwriting them. `left` and `right` must have equal length.
     pub fn render(&mut self, left: &mut [f32], right: &mut [f32]) {
+        self.render_with_input(left, right, &[], 0);
+    }
+
+    /// [`Self::render`] with the live hardware input of the same frames:
+    /// `input` holds `channels` interleaved channels per frame (mixer track
+    /// inputs, spec 0.2.3 INP-004). Missing frames are silence.
+    pub fn render_with_input(
+        &mut self,
+        left: &mut [f32],
+        right: &mut [f32],
+        input: &[f32],
+        channels: usize,
+    ) {
         let started = Instant::now();
         let frames = left.len().min(right.len());
         self.drain_commands();
@@ -229,7 +242,11 @@ impl EngineProcessor {
                     None => self.metronome.cancel_count_in(),
                 }
             }
-            self.render_block(n);
+            let live = match channels {
+                0 => &[][..],
+                ch => input.get(done * ch..(done + n) * ch).unwrap_or(&[]),
+            };
+            self.render_block(n, live, channels);
             let (ol, or) = self.scratch.get(2, n);
             left[done..done + n].copy_from_slice(ol);
             right[done..done + n].copy_from_slice(or);
@@ -567,7 +584,7 @@ impl EngineProcessor {
         }
     }
 
-    fn render_block(&mut self, n: usize) {
+    fn render_block(&mut self, n: usize, live: &[f32], live_channels: usize) {
         let release = release_len(self.sample_rate);
         let Self {
             snapshot,
@@ -605,6 +622,27 @@ impl EngineProcessor {
         let n_tr = snap.tracks.len();
         channels.zero(n_ch, n);
         inputs.zero(n_tr, n);
+        // Live inputs of monitored tracks, before the inserts (INP-004).
+        if !live.is_empty() {
+            for (ti, t) in snap.tracks.iter().enumerate() {
+                let Some((first, stereo)) = t.live_input else {
+                    continue;
+                };
+                if first >= live_channels {
+                    continue;
+                }
+                let second = if stereo && first + 1 < live_channels {
+                    first + 1
+                } else {
+                    first
+                };
+                let (l, r) = inputs.get_mut(ti, n);
+                for (i, frame) in live.chunks_exact(live_channels).take(n).enumerate() {
+                    l[i] += frame[first];
+                    r[i] += frame[second];
+                }
+            }
+        }
         // Transport for plugins at the block start (PLG-034). Wraps inside
         // the block are not reported; the next block starts right.
         let quarters = |samples: u64| samples as f64 / snap.samples_per_tick / f64::from(PPQ);

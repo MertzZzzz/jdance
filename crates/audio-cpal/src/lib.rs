@@ -14,8 +14,8 @@ use cpal::{FromSample, SizedSample};
 use jdance_audio_api::{
     ActiveInputInfo, ActiveStreamInfo, AudioBackend, AudioError, BackendId, BufferRequest,
     BufferSizeCaps, CaptureCallback, DeviceCapabilities, DeviceId, DeviceInfo, InputRequest,
-    InputStream, OutputStream, RenderCallback, SampleFormat, SampleRates, StreamRequest,
-    StreamState, StreamStats, deinterleave_input, interleave_pair, validate_request,
+    InputStream, MAX_LIVE_INPUTS, OutputStream, RenderCallback, SampleFormat, SampleRates,
+    StreamRequest, StreamState, StreamStats, deinterleave_input, interleave_pair, validate_request,
 };
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::str::FromStr;
@@ -200,7 +200,15 @@ impl AudioBackend for CpalBackend {
             .output_ranges(&device)?
             .into_iter()
             .filter(|r| r.channels() >= needed && r.contains_rate(request.sample_rate))
-            .min_by_key(|r| (format_rank(r.sample_format()), r.channels()))
+            // Every input the device has (up to MAX_LIVE_INPUTS) feeds the
+            // mixer track inputs (spec 0.2.3 INP-001).
+            .min_by_key(|r| {
+                (
+                    format_rank(r.sample_format()),
+                    std::cmp::Reverse(usize::from(r.channels()).min(MAX_LIVE_INPUTS)),
+                    r.channels(),
+                )
+            })
             .ok_or_else(|| {
                 AudioError::InvalidConfig(format!(
                     "no output configuration with {needed} channels at {} Hz",
@@ -351,9 +359,11 @@ where
     f32: FromSample<T>,
 {
     let device_channels = usize::from(config.channels);
+    let live = device_channels.min(MAX_LIVE_INPUTS);
     // Allocated here, before the stream starts; never resized afterwards.
     let mut left = vec![0.0f32; SCRATCH_FRAMES];
     let mut right = vec![0.0f32; SCRATCH_FRAMES];
+    let mut all = vec![0.0f32; SCRATCH_FRAMES * live];
     let rt_stats = Arc::clone(stats);
     let err_stats = Arc::clone(stats);
     let mono = matches!(channels, jdance_audio_api::InputChannels::Mono(_));
@@ -373,6 +383,16 @@ where
                     &mut right,
                     <f32 as FromSample<T>>::from_sample_,
                 );
+                for (frame, out) in chunk
+                    .chunks_exact(device_channels.max(1))
+                    .zip(all.chunks_exact_mut(live.max(1)))
+                    .take(n)
+                {
+                    for (o, v) in out.iter_mut().zip(frame) {
+                        *o = <f32 as FromSample<T>>::from_sample_(*v);
+                    }
+                }
+                callback.capture_all(&all[..n * live], live);
                 if mono {
                     callback.capture(&left[..n], &left[..n]);
                 } else {

@@ -27,6 +27,14 @@ pub const RING_SECONDS: u32 = 20;
 /// Monitor ring length in samples (stereo pairs); more is dropped so the
 /// monitor stays short.
 const MONITOR_SAMPLES: usize = 8_192;
+/// Live input ring for mixer track inputs, in frames of all channels
+/// (spec 0.2.3 INP-005).
+const LIVE_FRAMES: usize = 8_192;
+/// Largest output callback the live input serves, in frames.
+const LIVE_BLOCK: usize = 8_192;
+/// Frames of live input kept beyond one callback; more is dropped so the
+/// monitoring delay stays short when the input clock runs fast.
+const LIVE_SLACK: usize = 1_024;
 /// Frames per waveform peak sent to the UI while recording (REC-016).
 pub const PEAK_FRAMES: usize = 256;
 /// Peak queue length; the UI drains it every frame, more is dropped (only
@@ -47,6 +55,11 @@ pub struct Shared {
     pub armed: AtomicBool,
     pub overflow: AtomicBool,
     pub monitor: AtomicBool,
+    /// Some mixer track monitors its input: the capture feeds the engine
+    /// (INP-004).
+    pub live: AtomicBool,
+    /// Output callbacks that found too little live input (INP-005).
+    pub live_underruns: AtomicU64,
     /// Frames captured in the current take.
     pub captured: AtomicU64,
 }
@@ -70,9 +83,19 @@ pub struct Capture {
     peaks: Producer<f32>,
     peak_acc: f32,
     peak_n: usize,
+    /// All input channels, interleaved, for the engine.
+    live: Producer<f32>,
 }
 
 impl CaptureCallback for Capture {
+    fn capture_all(&mut self, frames: &[f32], _channels: usize) {
+        if self.shared.live.load(Relaxed) && self.live.slots() >= frames.len() {
+            for v in frames {
+                let _ = self.live.push(*v);
+            }
+        }
+    }
+
     fn capture(&mut self, left: &[f32], right: &[f32]) {
         let n = left.len().min(right.len());
         let peak = |s: &[f32]| s.iter().fold(0.0f32, |m, v| m.max(v.abs()));
@@ -122,6 +145,8 @@ pub struct CaptureOutputs {
     pub ring: Consumer<f32>,
     pub monitor: Consumer<f32>,
     pub peaks: Consumer<f32>,
+    /// All channels interleaved, for [`LiveInputMix`].
+    pub live: Consumer<f32>,
 }
 
 /// The capture callback and its readers for an input at `rate`.
@@ -129,6 +154,7 @@ pub fn capture(shared: Arc<Shared>, rate: u32) -> (Capture, CaptureOutputs) {
     let (rec, ring) = RingBuffer::new(2 * (rate * RING_SECONDS) as usize);
     let (mon, monitor) = RingBuffer::new(MONITOR_SAMPLES);
     let (peaks, peaks_out) = RingBuffer::new(PEAK_QUEUE);
+    let (live, live_out) = RingBuffer::new(LIVE_FRAMES * jdance_audio_api::MAX_LIVE_INPUTS);
     let cap = Capture {
         shared,
         rec,
@@ -136,6 +162,7 @@ pub fn capture(shared: Arc<Shared>, rate: u32) -> (Capture, CaptureOutputs) {
         peaks,
         peak_acc: 0.0,
         peak_n: 0,
+        live,
     };
     (
         cap,
@@ -143,8 +170,105 @@ pub fn capture(shared: Arc<Shared>, rate: u32) -> (Capture, CaptureOutputs) {
             ring,
             monitor,
             peaks: peaks_out,
+            live: live_out,
         },
     )
+}
+
+/// Output side of the mixer track inputs (INP-005): takes the frames of
+/// one output callback from the live ring into a preallocated block. A new
+/// ring (with its channel count) arrives through `inbox`; the old one
+/// leaves through `trash`, like [`MonitorMix`].
+pub struct LiveInputMix {
+    inbox: Consumer<(Consumer<f32>, usize)>,
+    trash: Producer<Consumer<f32>>,
+    current: Option<(Consumer<f32>, usize)>,
+    block: Vec<f32>,
+    shared: Arc<Shared>,
+}
+
+/// UI side of [`LiveInputMix`].
+pub struct LiveInputControl {
+    inbox: Producer<(Consumer<f32>, usize)>,
+    trash: Consumer<Consumer<f32>>,
+}
+
+pub fn live_input_mix(shared: Arc<Shared>) -> (LiveInputMix, LiveInputControl) {
+    let (inbox_tx, inbox) = RingBuffer::new(4);
+    let (trash, trash_rx) = RingBuffer::new(8);
+    (
+        LiveInputMix {
+            inbox,
+            trash,
+            current: None,
+            block: vec![0.0; LIVE_BLOCK * jdance_audio_api::MAX_LIVE_INPUTS],
+            shared,
+        },
+        LiveInputControl {
+            inbox: inbox_tx,
+            trash: trash_rx,
+        },
+    )
+}
+
+impl LiveInputControl {
+    /// Hands the output callback a new input ring of `channels` channels.
+    pub fn send(&mut self, ring: Consumer<f32>, channels: usize) {
+        let _ = self.inbox.push((ring, channels));
+    }
+
+    /// Frees rings the output callback is done with.
+    pub fn collect(&mut self) {
+        while self.trash.pop().is_ok() {}
+    }
+}
+
+impl LiveInputMix {
+    /// The live input for an output callback of `frames` frames and its
+    /// channel count; silence fills what the input has not delivered.
+    /// Realtime-safe.
+    pub fn take(&mut self, frames: usize) -> (&[f32], usize) {
+        if let Ok(next) = self.inbox.pop()
+            && let Some((old, _)) = self.current.replace(next)
+        {
+            let _ = self.trash.push(old);
+        }
+        let Some((ring, ch)) = &mut self.current else {
+            return (&[], 0);
+        };
+        let ch = (*ch).clamp(1, jdance_audio_api::MAX_LIVE_INPUTS);
+        if !self.shared.live.load(Relaxed) {
+            // Nothing monitored: drop what came in so a later start is
+            // not late.
+            let n = ring.slots();
+            if let Ok(c) = ring.read_chunk(n) {
+                c.commit_all();
+            }
+            return (&[], 0);
+        }
+        let frames = frames.min(LIVE_BLOCK);
+        let need = frames * ch;
+        // Clock drift: keep at most one callback plus some slack queued.
+        let excess = ring.slots().saturating_sub(need + LIVE_SLACK * ch) / ch * ch;
+        if excess > 0
+            && let Ok(c) = ring.read_chunk(excess)
+        {
+            c.commit_all();
+        }
+        let got = ring.slots().min(need) / ch * ch;
+        let block = &mut self.block[..need];
+        if let Ok(c) = ring.read_chunk(got) {
+            let (a, b) = c.as_slices();
+            block[..a.len()].copy_from_slice(a);
+            block[a.len()..a.len() + b.len()].copy_from_slice(b);
+            c.commit_all();
+        }
+        if got < need {
+            block[got..].fill(0.0);
+            self.shared.live_underruns.fetch_add(1, Relaxed);
+        }
+        (&self.block[..need], ch)
+    }
 }
 
 /// Output-side monitor: adds the input to the rendered block. A new ring
@@ -465,6 +589,37 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_input_reaches_the_output_callback_with_bounded_delay() {
+        let shared = Arc::new(Shared::default());
+        let (mut cap, out) = capture(Arc::clone(&shared), 48_000);
+        let (mut mix, mut control) = live_input_mix(Arc::clone(&shared));
+        control.send(out.live, 3);
+        // Nothing monitored: no feed, and stale input is dropped.
+        cap.capture_all(&[0.5; 30], 3);
+        assert_eq!(mix.take(10), (&[][..], 0));
+        shared.live.store(true, Relaxed);
+        let frames: Vec<f32> = (0..300).map(|i| i as f32).collect();
+        cap.capture_all(&frames, 3);
+        let (block, ch) = mix.take(100);
+        assert_eq!((ch, block.len()), (3, 300));
+        assert_eq!(&block[..6], &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0]);
+        // Too little input: the rest is silence and counted.
+        cap.capture_all(&frames[..30], 3);
+        let (block, _) = mix.take(100);
+        assert_eq!(block[29], 29.0);
+        assert!(block[30..].iter().all(|v| *v == 0.0));
+        assert_eq!(shared.live_underruns.load(Relaxed), 1);
+        // A fast input clock: what exceeds one callback plus the slack
+        // is dropped, oldest first.
+        let lots: Vec<f32> = (0..3 * 4_000).map(|i| i as f32).collect();
+        cap.capture_all(&lots, 3);
+        let (block, _) = mix.take(100);
+        let first = block[0] as usize / 3;
+        assert_eq!(first, 4_000 - 100 - LIVE_SLACK);
+        control.collect();
+    }
 
     #[test]
     fn takes_send_waveform_peaks_while_recording() {

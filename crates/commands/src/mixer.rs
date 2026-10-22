@@ -126,6 +126,30 @@ pub(crate) fn apply(edit: &Edit, p: &mut Project) -> Result<Edit, EditError> {
                 std::mem::replace(&mut t.solo, *solo),
             ))
         }
+        Edit::SetTrackInput(id, input) => {
+            let t = track_mut(p, *id)?;
+            if t.is_master() && input.is_some() {
+                return Err(EditError::Routing(RoutingError::InvalidValue(
+                    "the master track has no input".into(),
+                )));
+            }
+            Ok(Edit::SetTrackInput(
+                *id,
+                std::mem::replace(&mut t.input, *input),
+            ))
+        }
+        Edit::SetTrackMonitor(id, on) => {
+            let t = track_mut(p, *id)?;
+            if t.is_master() && *on {
+                return Err(EditError::Routing(RoutingError::InvalidValue(
+                    "the master track has no input".into(),
+                )));
+            }
+            Ok(Edit::SetTrackMonitor(
+                *id,
+                std::mem::replace(&mut t.monitor, *on),
+            ))
+        }
         Edit::SetTrackColor(id, color) => {
             let t = track_mut(p, *id)?;
             Ok(Edit::SetTrackColor(

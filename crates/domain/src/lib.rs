@@ -38,7 +38,7 @@ pub use ids::{
 pub use meter::{COMMON_SIGNATURES, DENOMINATORS, MAX_NUMERATOR, TimeSignature, WHOLE_NOTE};
 pub use mixer::{
     Insert, MAX_INSERTS_PER_TRACK, MAX_SEND_LEVEL, MAX_SENDS_PER_TRACK, MAX_TRACKS, Mixer,
-    MixerTrack, RoutingError, Send, Sidechain, Tap,
+    MixerTrack, RoutingError, Send, Sidechain, Tap, TrackInput,
 };
 pub use playlist::{
     AutomationClip, LANE_COLORS, Lane, MAX_CLIP_TICKS, MAX_REPEAT, MAX_START_TICKS, PatternClip,
