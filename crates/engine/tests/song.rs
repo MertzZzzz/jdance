@@ -331,3 +331,49 @@ fn the_end_returns_to_the_caret_unless_held() {
     run(&mut p, 10);
     assert_eq!(h.feedback().read().position, BAR / 4);
 }
+
+/// Pattern mode keeps its own caret (spec 0.2.4 PCR-001, PCR-006/007):
+/// playback starts there, the next passes start at the top, Stop goes
+/// back to the caret.
+#[test]
+fn pattern_mode_plays_from_its_caret_and_stop_returns_there() {
+    let s = Song::new();
+    let snap = {
+        let sample = Arc::clone(&s.sample);
+        compile_with(&s.p, SR, PlayMode::Pattern(s.pat), move |_| {
+            Some(Arc::clone(&sample))
+        })
+    };
+    let (mut h, mut p) = create_engine(SR);
+    h.set_snapshot(snap).unwrap();
+    // Half a bar into the one-bar pattern.
+    h.seek(BAR / 2).unwrap();
+    run(&mut p, 1);
+    assert_eq!(h.feedback().read().position, BAR / 2);
+    h.play().unwrap();
+    // Up to the end of the first pass: the click on step 0 is not heard.
+    let mut l = vec![0.0; 1000];
+    let mut r = vec![0.0; 1000];
+    let mut first_click = None;
+    for b in 0..96 {
+        p.render(&mut l, &mut r);
+        if first_click.is_none()
+            && let Some(i) = l.iter().position(|v| v.abs() > 1e-6)
+        {
+            first_click = Some(b * 1000 + i);
+        }
+    }
+    // The pass from the caret is half a bar; then the pattern starts over.
+    let at = first_click.expect("the second pass plays step 0");
+    assert!(
+        (BAR as usize / 2..BAR as usize / 2 + 1000).contains(&at),
+        "step 0 at {at}, after half a bar"
+    );
+    h.stop().unwrap();
+    run(&mut p, 10);
+    assert_eq!(
+        h.feedback().read().position,
+        BAR / 2,
+        "Stop returns to the caret"
+    );
+}

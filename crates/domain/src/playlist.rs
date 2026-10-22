@@ -82,6 +82,39 @@ impl PatternClip {
         (self.start, self.start + self.duration)
     }
 
+    /// Pattern position, in ticks, heard at timeline tick `t` (spec 0.2.4
+    /// PCR-010); `None` outside the clip. `len` is the pattern length.
+    pub fn pattern_tick_at(&self, len: u64, t: u64) -> Option<u64> {
+        let (a, b) = self.interval();
+        if t < a || t >= b {
+            return None;
+        }
+        let p = t - a + self.offset;
+        Some(if self.looped { p % len.max(1) } else { p })
+    }
+
+    /// Timeline tick of pattern position `pos` in the pass of the pattern
+    /// that `near` (a timeline tick) falls in, or the clip's first pass;
+    /// kept inside the clip (PCR-012).
+    pub fn timeline_tick_of(&self, len: u64, near: Option<u64>, pos: u64) -> u64 {
+        let len = len.max(1);
+        let (a, b) = self.interval();
+        // Timeline tick where pattern position 0 of the first pass lies.
+        let zero = a as i64 - self.offset as i64;
+        let pass = match near.filter(|t| (a..b).contains(t)) {
+            Some(t) if self.looped => (t as i64 - zero).div_euclid(len as i64),
+            _ => {
+                if self.looped {
+                    (self.offset / len) as i64
+                } else {
+                    0
+                }
+            }
+        };
+        let t = zero + pass * len as i64 + pos as i64;
+        t.clamp(a as i64, b as i64 - 1) as u64
+    }
+
     /// Pattern repetitions the clip touches (whole or partial).
     pub fn repetitions(&self, pattern: &Pattern) -> u64 {
         let len = pattern.length_ticks().max(1);
@@ -215,6 +248,24 @@ impl Playlist {
     /// Right edge of all pattern clips in ticks, muted clips included.
     /// Audio clips: [`crate::Project::arrangement_end_ticks`]. Automation
     /// clips make no sound and do not extend the song.
+    /// The clip of `pattern` playing at timeline tick `t` and the pattern
+    /// position there (PCR-010): on several lanes, the topmost; muted
+    /// clips count. `len` is the pattern length.
+    pub fn pattern_position(&self, pattern: PatternId, len: u64, t: u64) -> Option<(ClipId, u64)> {
+        let row = |l: LaneId| {
+            self.lanes
+                .iter()
+                .position(|x| x.id == l)
+                .unwrap_or(usize::MAX)
+        };
+        self.clips
+            .iter()
+            .filter(|c| c.pattern == pattern)
+            .filter_map(|c| c.pattern_tick_at(len, t).map(|p| (row(c.lane), c.id, p)))
+            .min_by_key(|(r, _, _)| *r)
+            .map(|(_, id, p)| (id, p))
+    }
+
     pub fn arrangement_end(&self) -> u64 {
         self.clips.iter().map(|c| c.interval().1).max().unwrap_or(0)
     }
@@ -256,6 +307,70 @@ impl Playlist {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pclip(
+        id: u64,
+        lane: LaneId,
+        start: u64,
+        offset: u64,
+        duration: u64,
+        looped: bool,
+    ) -> PatternClip {
+        PatternClip {
+            id: ClipId(id),
+            lane,
+            pattern: PatternId(1),
+            start,
+            offset,
+            duration,
+            looped,
+            muted: false,
+        }
+    }
+
+    #[test]
+    fn pattern_position_follows_clips_and_restarts_each_pass() {
+        let mut pl = Playlist::with_lanes(2, {
+            let mut n = 0;
+            move || {
+                n += 1;
+                n
+            }
+        });
+        let (l0, l1) = (pl.lanes[0].id, pl.lanes[1].id);
+        // Pattern of 100 ticks; looped clip from 1000, starting 30 in.
+        pl.clips.push(pclip(1, l1, 1000, 30, 250, true));
+        let at = |pl: &Playlist, t| pl.pattern_position(PatternId(1), 100, t);
+        assert_eq!(at(&pl, 999), None);
+        assert_eq!(at(&pl, 1000), Some((ClipId(1), 30)));
+        assert_eq!(at(&pl, 1069), Some((ClipId(1), 99)));
+        assert_eq!(at(&pl, 1070), Some((ClipId(1), 0)), "back to the start");
+        assert_eq!(at(&pl, 1249), Some((ClipId(1), 79)));
+        assert_eq!(at(&pl, 1250), None, "between clips");
+        assert_eq!(pl.pattern_position(PatternId(2), 100, 1100), None);
+        // Not looped.
+        pl.clips.push(pclip(2, l1, 2000, 10, 50, false));
+        assert_eq!(at(&pl, 2049), Some((ClipId(2), 59)));
+        // Overlap on the lane above wins; muted clips count.
+        let mut top = pclip(3, l0, 1000, 0, 100, true);
+        top.muted = true;
+        pl.clips.push(top);
+        assert_eq!(at(&pl, 1010), Some((ClipId(3), 10)));
+    }
+
+    #[test]
+    fn timeline_tick_of_a_pattern_position_stays_in_the_pass() {
+        let c = pclip(1, LaneId(1), 1000, 30, 250, true);
+        // First pass: position 50 at 1020; position 10 is before the clip.
+        assert_eq!(c.timeline_tick_of(100, None, 50), 1020);
+        assert_eq!(c.timeline_tick_of(100, None, 10), 1000);
+        // The pass of tick 1100 (positions 0..100 at 1070..1170).
+        assert_eq!(c.timeline_tick_of(100, Some(1100), 10), 1080);
+        // Last, partial pass ends at 1249.
+        assert_eq!(c.timeline_tick_of(100, Some(1200), 99), 1249);
+        let n = pclip(2, LaneId(1), 2000, 10, 50, false);
+        assert_eq!(n.timeline_tick_of(100, Some(2040), 20), 2010);
+    }
 
     fn setup() -> (Playlist, Vec<Pattern>) {
         let mut n = 100;

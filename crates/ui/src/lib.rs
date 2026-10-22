@@ -124,6 +124,10 @@ pub struct JdanceApp<H: Host, S: ProjectStore> {
     /// Song caret in ticks: where Play and Record start and Stop returns
     /// (spec 0.2.3 CUR-001).
     caret: u64,
+    /// Pattern caret in ticks from the pattern start (spec 0.2.4 PCR-001),
+    /// for `pattern_caret_of`; back to 0 for another pattern (PCR-003).
+    pattern_caret: u64,
+    pattern_caret_of: Option<PatternId>,
     /// Drag on the position display, in pixels not yet turned into beats.
     caret_drag: f32,
     mode_sent: Option<TransportMode>,
@@ -229,6 +233,8 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             current_pattern,
             song_mode,
             caret: 0,
+            pattern_caret: 0,
+            pattern_caret_of: None,
             caret_drag: 0.0,
             mode_sent: None,
             playlist_view: playlist::PlaylistView::default(),
@@ -712,11 +718,9 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             }
             self.host.stop();
         } else {
-            if self.song_mode {
-                // The engine keeps the caret in samples; a tempo change
-                // since the last seek moves it, so start from the ticks.
-                self.host.seek_ticks(self.caret);
-            }
+            // The engine keeps the caret in samples; a tempo change since
+            // the last seek moves it, so start from the ticks.
+            self.host.seek_ticks(self.mode_caret());
             self.host.play();
         }
     }
@@ -726,6 +730,123 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
         self.caret = ticks;
         if self.song_mode {
             self.host.seek_ticks(ticks);
+        }
+    }
+
+    /// Moves the pattern caret (and the playhead in pattern mode).
+    fn set_pattern_caret(&mut self, ticks: u64) {
+        self.pattern_caret = ticks;
+        if !self.song_mode {
+            self.host.seek_ticks(ticks);
+        }
+    }
+
+    /// The caret of the current mode.
+    fn mode_caret(&self) -> u64 {
+        if self.song_mode {
+            self.caret
+        } else {
+            self.pattern_caret
+        }
+    }
+
+    /// Moves the caret of the current mode; while playing the playhead
+    /// moves only when `seek` (a released gesture, CUR-012).
+    fn move_mode_caret(&mut self, ticks: u64, seek: bool) {
+        if self.song_mode {
+            self.caret = ticks;
+        } else {
+            self.pattern_caret = ticks;
+        }
+        if seek || !self.host.transport().playing {
+            self.host.seek_ticks(ticks);
+        }
+    }
+
+    /// Playhead and caret of `pattern` as pattern positions: the pattern
+    /// caret in Pattern mode, the song's mapped through the clip of the
+    /// pattern under them in Song mode (spec 0.2.4 PCR-001, PCR-010/011).
+    fn pattern_marks(&self, pattern: &jdance_domain::Pattern) -> rack::PatternMarks {
+        let t = self.host.transport();
+        let len = pattern.length_ticks();
+        if self.song_mode {
+            let pl = &self.project.playlist;
+            let at = |tick: u64| pl.pattern_position(pattern.id, len, tick).map(|(_, p)| p);
+            rack::PatternMarks {
+                playhead: t.position_ticks.filter(|_| t.playing).and_then(at),
+                caret: at(self.caret),
+            }
+        } else {
+            rack::PatternMarks {
+                playhead: t
+                    .loop_pos
+                    .filter(|_| t.playing)
+                    .map(|p| (p * len as f32) as u64),
+                caret: Some(self.pattern_caret),
+            }
+        }
+    }
+
+    /// A caret gesture on the Piano Roll ruler (PCR-005, PCR-012).
+    fn piano_caret(&mut self, request: piano::CaretRequest, now: f64) {
+        let (pos, seek) = match request {
+            piano::CaretRequest::Preview(p) => (p, false),
+            piano::CaretRequest::Seek(p) => (p, true),
+        };
+        if !self.song_mode {
+            self.move_mode_caret(pos, seek);
+            return;
+        }
+        let Some(pattern) = self.project.pattern(self.current_pattern) else {
+            return;
+        };
+        let len = pattern.length_ticks();
+        let pl = &self.project.playlist;
+        let t = self.host.transport();
+        // The clip under the song caret; else, playing, the one under the
+        // playhead; else the first one on the timeline.
+        let under = |tick: u64| {
+            pl.pattern_position(pattern.id, len, tick)
+                .map(|(id, _)| (id, tick))
+        };
+        let row = |c: &jdance_domain::PatternClip| pl.lanes.iter().position(|l| l.id == c.lane);
+        let reference = under(self.caret)
+            .or_else(|| t.position_ticks.filter(|_| t.playing).and_then(under))
+            .map(|(id, tick)| (id, Some(tick)))
+            .or_else(|| {
+                pl.clips
+                    .iter()
+                    .filter(|c| c.pattern == pattern.id)
+                    .min_by_key(|c| (c.start, row(c)))
+                    .map(|c| (c.id, None))
+            });
+        match reference.and_then(|(id, near)| pl.clip(id).map(|c| (c, near))) {
+            Some((clip, near)) => {
+                let tick = clip.timeline_tick_of(len, near, pos);
+                self.move_mode_caret(tick, seek);
+            }
+            None if seek => {
+                self.notify(Notice::info("This pattern is not in the playlist"), now);
+            }
+            None => {}
+        }
+    }
+
+    /// The pattern caret belongs to one pattern and stays inside it
+    /// (PCR-003).
+    fn keep_pattern_caret(&mut self) {
+        let len = self
+            .project
+            .pattern(self.current_pattern)
+            .map_or(0, |p| p.length_ticks());
+        if self.pattern_caret_of != Some(self.current_pattern) || self.pattern_caret >= len {
+            self.pattern_caret_of = Some(self.current_pattern);
+            if self.pattern_caret != 0 {
+                self.pattern_caret = 0;
+                if !self.song_mode && !self.host.transport().playing {
+                    self.host.seek_ticks(0);
+                }
+            }
         }
     }
 
@@ -894,7 +1015,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 self.toggle_play();
             }
             if theme::icon_button(ui, theme::Icon::Stop, false, "Stop")
-                .on_hover_text("Stop and return to the caret; when already stopped, the caret goes to the song start")
+                .on_hover_text("Stop and return to the caret; when already stopped, the caret goes to the start")
                 .clicked()
             {
                 if self.record_target.is_some() {
@@ -903,8 +1024,10 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 }
                 if playing || transport.count_in > 0 {
                     self.host.stop();
-                } else {
+                } else if self.song_mode {
                     self.set_caret(0);
+                } else {
+                    self.set_pattern_caret(0);
                 }
             }
             let rec_state = self.host.recording_state();
@@ -948,8 +1071,8 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             // Also the caret while it is dragged on the ruler (CUR-014).
             let ticks = match transport.position_ticks {
                 Some(_) if self.song_mode && self.playlist_view.caret_dragging() => self.caret,
-                Some(p) if transport.playing || !self.song_mode => p,
-                _ => self.caret,
+                Some(p) if transport.playing => p,
+                _ => self.mode_caret(),
             };
             let text = if counting {
                 format!("— {} —", transport.count_in)
@@ -977,8 +1100,18 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 if beats != 0.0 {
                     self.caret_drag -= beats * PX_PER_BEAT;
                     let beat = i64::from(self.project.time_signature.beat_ticks());
-                    let at = (self.caret as i64 / beat + beats as i64).max(0) * beat;
-                    self.set_caret(at as u64);
+                    let at = ((self.mode_caret() as i64 / beat + beats as i64).max(0) * beat) as u64;
+                    if self.song_mode {
+                        self.set_caret(at);
+                    } else {
+                        // Inside the pattern (PCR-005).
+                        let len = self
+                            .project
+                            .pattern(self.current_pattern)
+                            .map_or(1, |p| p.length_ticks());
+                        let last = (len.saturating_sub(1) / beat as u64) * beat as u64;
+                        self.set_pattern_caret(at.min(last));
+                    }
                 }
             } else {
                 self.caret_drag = 0.0;
@@ -2936,7 +3069,11 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
                 .default_size(230.0)
                 .min_size(60.0)
                 .show(ui, |ui| {
-                    let pattern_mode = !self.song_mode;
+                    let marks = self
+                        .project
+                        .pattern(self.current_pattern)
+                        .map(|p| self.pattern_marks(p))
+                        .unwrap_or_default();
                     let dir = self.path.as_deref().and_then(Path::parent);
                     out = self.rack_view.show(
                         ui,
@@ -2944,7 +3081,7 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
                         self.current_pattern,
                         &self.host,
                         dir,
-                        pattern_mode,
+                        marks,
                     );
                 });
         }
@@ -2962,16 +3099,16 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
             self.piano = None;
         }
         let piano_docked = !self.layout.is_undocked(dock::Panel::PianoRoll);
+        let marks = self
+            .project
+            .pattern(self.current_pattern)
+            .map(|p| self.pattern_marks(p))
+            .unwrap_or_default();
         let browser_docked = !self.layout.is_undocked(dock::Panel::ProjectBrowser);
         if !piano_docked
             && let (Some(roll), Some(pattern)) =
                 (&mut self.piano, self.project.pattern(self.current_pattern))
         {
-            let transport = self.host.transport();
-            let playhead = transport
-                .loop_pos
-                .filter(|_| transport.playing && !self.song_mode)
-                .map(|p| p * pattern.length_ticks() as f32);
             let title = format!(
                 "Piano Roll · {}",
                 self.project
@@ -2982,7 +3119,7 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
             let event = self
                 .layout
                 .window(&ctx, dock::Panel::PianoRoll, 0, &title, &mut |ui| {
-                    piano_out = roll.show(ui, project, pattern, host, playhead, snap);
+                    piano_out = roll.show(ui, project, pattern, host, marks, snap);
                 });
             if event == dock::WindowEvent::Closed {
                 piano_out.close = true;
@@ -3012,13 +3149,14 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
             let transport = self.host.transport();
             match (&mut self.piano, self.project.pattern(self.current_pattern)) {
                 (Some(roll), Some(pattern)) if piano_docked => {
-                    // The playhead shows when this pattern loops.
-                    let playhead = transport
-                        .loop_pos
-                        .filter(|_| transport.playing && !self.song_mode)
-                        .map(|p| p * pattern.length_ticks() as f32);
-                    piano_out =
-                        roll.show(ui, &self.project, pattern, &mut self.host, playhead, self.snap);
+                    piano_out = roll.show(
+                        ui,
+                        &self.project,
+                        pattern,
+                        &mut self.host,
+                        marks,
+                        self.snap,
+                    );
                 }
                 _ if !self.show_playlist => {
                     ui.centered_and_justified(|ui| {
@@ -3082,6 +3220,9 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
         self.lfo_window(&ctx, now);
         if let Some(snap) = piano_out.snap {
             self.snap = snap;
+        }
+        if let Some(request) = piano_out.caret {
+            self.piano_caret(request, now);
         }
         for (edit, merging) in piano_out.edits {
             self.apply(edit, merging, now);
@@ -3282,6 +3423,7 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
         self.length_dialog(&ctx, now);
         self.export_dialog(&ctx);
         self.export_progress_window(&ctx);
+        self.keep_pattern_caret();
         let mode = if self.song_mode {
             TransportMode::Song
         } else {
@@ -3291,12 +3433,11 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
             let to_song = mode == TransportMode::Song && self.mode_sent.is_some();
             self.mode_sent = Some(mode);
             self.host.set_mode(mode);
-            // Song resumes at the caret; a pattern starts at its top
-            // (CUR-007).
+            // Each mode resumes at its caret (PCR-002).
             if to_song {
                 self.host.seek_ticks(self.caret);
             } else if self.mode_sent != Some(TransportMode::Song) {
-                self.host.seek_ticks(0);
+                self.host.seek_ticks(self.pattern_caret);
             }
         }
         self.confirm_dialog(&ctx, now);
@@ -3357,4 +3498,95 @@ pub(crate) fn metronome_settings_ui(ui: &mut egui::Ui, m: &mut MetronomeSettings
         &mut m.count_in,
         format!("Count {COUNT_IN_BARS} bars before recording (Ctrl+P)"),
     );
+}
+
+#[cfg(test)]
+mod pattern_caret_tests {
+    use super::*;
+    use crate::test_ui::StubHost;
+    use jdance_domain::{ClipId, PatternClip};
+
+    struct NoStore;
+
+    impl ProjectStore for NoStore {
+        fn load(&self, _: &Path) -> Result<Project, String> {
+            Err("none".into())
+        }
+        fn save(&self, _: &Path, _: &Project) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// A one-bar pattern in a two-bar looped clip from bar 5.
+    fn app() -> JdanceApp<StubHost, NoStore> {
+        let mut p = Project::new();
+        let pat = p.patterns[0].id;
+        let lane = p.playlist.lanes[0].id;
+        let len = p.patterns[0].length_ticks();
+        let mut clip = PatternClip::repeating(ClipId(900), lane, &p.patterns[0], 5 * len, 2);
+        clip.pattern = pat;
+        p.playlist.clips.push(clip);
+        JdanceApp::new(StubHost::default(), NoStore, p, None)
+    }
+
+    #[test]
+    fn song_mode_maps_the_caret_and_playhead_into_the_pattern() {
+        let mut a = app();
+        a.song_mode = true;
+        let pat = a.project.patterns[0].clone();
+        let len = pat.length_ticks();
+        a.caret = 5 * len + 100;
+        assert_eq!(a.pattern_marks(&pat).caret, Some(100));
+        a.host.transport.playing = true;
+        // Second pass of the clip: back at the pattern start (PCR-010).
+        a.host.transport.position_ticks = Some(6 * len + 7);
+        assert_eq!(a.pattern_marks(&pat).playhead, Some(7));
+        a.host.transport.position_ticks = Some(7 * len);
+        assert_eq!(a.pattern_marks(&pat).playhead, None, "past the clip");
+        a.caret = 0;
+        assert_eq!(a.pattern_marks(&pat).caret, None, "caret outside the clip");
+    }
+
+    #[test]
+    fn the_piano_ruler_moves_the_song_caret_inside_the_clip() {
+        let mut a = app();
+        a.song_mode = true;
+        let len = a.project.patterns[0].length_ticks();
+        // Caret in the second pass: stays in that pass (PCR-012).
+        a.caret = 6 * len + 10;
+        a.piano_caret(piano::CaretRequest::Seek(240), 0.0);
+        assert_eq!(a.caret, 6 * len + 240);
+        assert_eq!(a.host.seeks.last(), Some(&(6 * len + 240)));
+        // Caret elsewhere: the first clip's first pass.
+        a.caret = 0;
+        a.piano_caret(piano::CaretRequest::Seek(480), 0.0);
+        assert_eq!(a.caret, 5 * len + 480);
+        // While playing, a preview does not move the playhead.
+        a.host.transport.playing = true;
+        let seeks = a.host.seeks.len();
+        a.piano_caret(piano::CaretRequest::Preview(720), 0.0);
+        assert_eq!(a.caret, 5 * len + 720);
+        assert_eq!(a.host.seeks.len(), seeks);
+    }
+
+    #[test]
+    fn the_pattern_caret_resets_for_another_pattern_and_stop() {
+        let mut a = app();
+        a.song_mode = false;
+        a.keep_pattern_caret();
+        a.piano_caret(piano::CaretRequest::Seek(480), 0.0);
+        assert_eq!(a.pattern_caret, 480);
+        assert_eq!(a.mode_caret(), 480);
+        a.keep_pattern_caret();
+        assert_eq!(a.pattern_caret, 480, "same pattern: kept");
+        // Another pattern: back to 0 (PCR-003).
+        let other = PatternId(a.project.ids.next());
+        a.project
+            .patterns
+            .push(jdance_domain::Pattern::new(other, "B"));
+        a.current_pattern = other;
+        a.keep_pattern_caret();
+        assert_eq!(a.pattern_caret, 0);
+        assert_eq!(a.host.seeks.last(), Some(&0));
+    }
 }

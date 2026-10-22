@@ -24,7 +24,7 @@ use egui::{CornerRadius, Rect, RichText, Sense, Stroke, StrokeKind, pos2, vec2};
 use jdance_commands::Edit;
 use jdance_domain::{
     ChannelId, MAX_VOLUME, Pattern, PatternId, PluginTarget, Project, SampleRef, Step,
-    color_or_default,
+    TICKS_PER_STEP, color_or_default,
 };
 use jdance_plugin_api::PluginDescriptor;
 use std::collections::{BTreeMap, BTreeSet};
@@ -134,7 +134,7 @@ impl RackView {
         pattern: PatternId,
         host: &dyn Host,
         dir: Option<&Path>,
-        pattern_mode: bool,
+        marks: PatternMarks,
     ) -> RackOutput {
         let mut out = RackOutput::default();
         self.retain_existing(project);
@@ -145,12 +145,12 @@ impl RackView {
             ui.label("No pattern");
             return out;
         };
-        let transport = host.transport();
-        // The step playhead is shown when this pattern is what plays.
-        let current_step = transport
-            .loop_pos
-            .filter(|_| transport.playing && pattern_mode)
-            .map(|p| ((p * pattern.length_steps as f32) as u32).min(pattern.length_steps - 1));
+        // The step playhead and the caret of this pattern, in Pattern and
+        // in Song mode (spec 0.2.4 PCR-004, PCR-013).
+        let step_of =
+            |t: u64| ((t / u64::from(TICKS_PER_STEP)) as u32).min(pattern.length_steps - 1);
+        let current_step = marks.playhead.map(step_of);
+        let caret_step = marks.caret.map(step_of);
 
         let dropped: Vec<std::path::PathBuf> = ui.ctx().input(|i| {
             i.raw
@@ -262,7 +262,7 @@ impl RackView {
                                     ui,
                                     pattern,
                                     ch.id,
-                                    current_step,
+                                    (current_step, caret_step),
                                     pointer,
                                     primary_down,
                                     &mut out,
@@ -751,7 +751,7 @@ impl RackView {
         ui: &mut egui::Ui,
         pattern: &Pattern,
         channel: ChannelId,
-        current_step: Option<u32>,
+        (current_step, caret_step): (Option<u32>, Option<u32>),
         pointer: Option<egui::Pos2>,
         primary_down: bool,
         out: &mut RackOutput,
@@ -819,6 +819,15 @@ impl RackView {
             }
             if ui.is_rect_visible(rect) {
                 draw_step(ui, rect, step, i, current_step == Some(i), resp.hovered());
+                if caret_step == Some(i) {
+                    ui.painter().line_segment(
+                        [
+                            rect.left_top() + vec2(2.0, -2.0),
+                            rect.right_top() + vec2(-2.0, -2.0),
+                        ],
+                        Stroke::new(2.0, theme::AMBER),
+                    );
+                }
             }
             resp.on_hover_text(format!(
                 "Step {} · velocity {:.0}%",
@@ -827,6 +836,13 @@ impl RackView {
             ));
         }
     }
+}
+
+/// Playhead and caret of the shown pattern as pattern positions in ticks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct PatternMarks {
+    pub playhead: Option<u64>,
+    pub caret: Option<u64>,
 }
 
 fn draw_step(ui: &egui::Ui, rect: Rect, step: Step, index: u32, playhead: bool, hovered: bool) {

@@ -153,6 +153,17 @@ pub(crate) struct PianoRoll {
     scripts: Vec<jdance_commands::note_tools::ScriptInfo>,
     /// Right-button delete gesture.
     rmb: crate::widgets::RightSweep,
+    /// Caret gestures on the ruler (spec 0.2.4 PCR-005).
+    ruler: crate::ruler::Ruler,
+}
+
+/// The caret moved on the Piano Roll ruler, as a pattern position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CaretRequest {
+    /// During the gesture.
+    Preview(u64),
+    /// On release.
+    Seek(u64),
 }
 
 #[derive(Debug, Default)]
@@ -166,6 +177,8 @@ pub(crate) struct PianoOutput {
     pub lfo: Option<jdance_commands::note_tools::Range>,
     /// Tools > Scripts.
     pub script: Option<crate::scripts::ScriptRequest>,
+    /// The caret was moved on the ruler.
+    pub caret: Option<CaretRequest>,
 }
 
 fn is_black(key: u8) -> bool {
@@ -266,6 +279,7 @@ impl PianoRoll {
             last_grid: TICKS_PER_STEP,
             script_dialog: None,
             scripts: Vec::new(),
+            ruler: crate::ruler::Ruler::default(),
             rmb: crate::widgets::RightSweep::default(),
         }
     }
@@ -559,9 +573,11 @@ impl PianoRoll {
         project: &Project,
         pattern: &Pattern,
         host: &mut dyn Host,
-        playhead_tick: Option<f32>,
+        marks: crate::rack::PatternMarks,
         snap: Snap,
     ) -> PianoOutput {
+        let playhead_tick = marks.playhead.map(|t| t as f32);
+        let caret = marks.caret;
         self.sig = project.time_signature;
         let snap = snap.ticks(self.sig);
         self.snap = snap;
@@ -834,6 +850,56 @@ impl PianoRoll {
                 CornerRadius::ZERO,
                 theme::PANEL,
             );
+
+            // The caret: set and dragged on the ruler (spec 0.2.4 PCR-004/005).
+            let frame = crate::ruler::RulerFrame {
+                rect: Rect::from_min_max(
+                    pos2(grid.left().max(kb_left + KEYBOARD_W), ruler_top),
+                    pos2(grid.right().min(clip.right()), ruler_top + RULER_H),
+                ),
+                origin_x: grid.left(),
+                px_per_tick: px_tick,
+                grids: crate::ruler::Grids::new(
+                    u64::from(snap.max(1)),
+                    u64::from(self.sig.beat_ticks()),
+                ),
+                caret: caret.unwrap_or(0),
+                selection: None,
+                select: false,
+                limit: Some(u64::from(pattern_end.max(1))),
+            };
+            let (_, r) = self.ruler.ui(
+                ui,
+                egui::Id::unique(("piano_ruler", self.channel.0)),
+                &frame,
+            );
+            if let Some(c) = r.preview {
+                out.caret = Some(CaretRequest::Preview(c));
+            }
+            if let Some(end) = r.end {
+                out.caret = Some(CaretRequest::Seek(end.caret));
+            }
+            let shown = self.ruler.active().map(|d| d.caret()).or(caret);
+            if let Some(c) = shown {
+                let x = grid.left() + c as f32 * px_tick;
+                if x >= kb_left + KEYBOARD_W {
+                    painter.add(egui::Shape::convex_polygon(
+                        vec![
+                            pos2(x - 6.0, ruler_top + RULER_H - 9.0),
+                            pos2(x + 6.0, ruler_top + RULER_H - 9.0),
+                            pos2(x, ruler_top + RULER_H),
+                        ],
+                        theme::AMBER,
+                        Stroke::NONE,
+                    ));
+                    painter.add(egui::Shape::dashed_line(
+                        &[pos2(x, ruler_top + RULER_H), pos2(x, grid.bottom())],
+                        Stroke::new(1.0, theme::AMBER.gamma_multiply(0.7)),
+                        4.0,
+                        4.0,
+                    ));
+                }
+            }
 
             // Selection summary in the corner of the view.
             if !self.selection.is_empty() {
@@ -1541,5 +1607,61 @@ mod tests {
         assert_eq!((a.start, a.length, b.start, b.length), (240, 240, 480, 720));
         assert_eq!((a.key, b.key, a.velocity, b.velocity), (60, 60, 0.7, 0.7));
         assert!(slice_note(n, 240).is_none() && slice_note(n, 1200).is_none());
+    }
+}
+
+#[cfg(test)]
+mod caret_tests {
+    use super::*;
+    use crate::test_ui::{Driver, StubHost};
+    use egui::Pos2;
+
+    /// PCR-005: the ruler takes the caret along, inside the pattern.
+    #[test]
+    fn the_ruler_drags_the_pattern_caret() {
+        let mut p = Project::new();
+        let ch = ChannelId(p.ids.next());
+        p.channels
+            .push(jdance_domain::Channel::new_sampler(ch, "c"));
+        let pattern = p.patterns[0].clone();
+        let len = pattern.length_ticks();
+        let mut roll = PianoRoll::new(ch);
+        let mut host = StubHost::default();
+        let mut d = Driver::new();
+        let mut requests = Vec::new();
+        let marks = crate::rack::PatternMarks {
+            playhead: None,
+            caret: Some(0),
+        };
+        let mut ui = |ui: &mut egui::Ui| {
+            let out = roll.show(ui, &p, &pattern, &mut host, marks, Snap::Step);
+            requests.extend(out.caret);
+        };
+        d.frame(vec![], &mut ui);
+        d.frame(vec![], &mut ui);
+        let ruler = d.find_rect("Timeline ruler").expect("ruler");
+        // 28 px per step (240 ticks) at the default zoom; the ruler starts
+        // right of the keyboard, at tick 0.
+        let at = |t: u64| {
+            Pos2::new(
+                ruler.left() + t as f32 * 28.0 / 240.0 + 0.1,
+                ruler.center().y,
+            )
+        };
+        d.frame(vec![d.moved(at(480))], &mut ui);
+        d.frame(vec![d.button(at(480), true)], &mut ui);
+        d.frame(vec![d.moved(at(960))], &mut ui);
+        d.frame(vec![d.moved(at(len + 2000))], &mut ui);
+        d.frame(vec![d.button(at(len + 2000), false)], &mut ui);
+        assert_eq!(
+            requests,
+            [
+                CaretRequest::Preview(480),
+                CaretRequest::Preview(960),
+                CaretRequest::Preview(len - 240),
+                CaretRequest::Seek(len - 240),
+            ],
+            "kept inside the pattern"
+        );
     }
 }

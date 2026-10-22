@@ -245,7 +245,7 @@ impl RulerFrame {
 }
 
 /// Ruler input kept between frames.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct Ruler {
     drag: Option<RulerDrag>,
 }
