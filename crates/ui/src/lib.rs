@@ -1836,7 +1836,8 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                     self.sync_needed = true;
                     self.new_channels.extend(plan.created());
                     self.playlist_view.select_only(&[cid]);
-                    self.playlist_view.source = Some(playlist::Source::Asset(asset.id));
+                    // A file from the library places a clip; the active
+                    // source stays (spec 0.2.7 §2 item 10).
                 }
                 Err(e) => self.notify(Notice::error(format!("Import failed: {e}")), now),
             }
@@ -4003,6 +4004,11 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
         }
         if pl_out.end_gesture {
             self.history.end_gesture();
+        }
+        if let Some(id) = pl_out.select_pattern.take() {
+            // The clicked clip's pattern is the current one: the Piano
+            // Roll and the pattern selector follow (§2 item 3).
+            self.current_pattern = id;
         }
         if let Some(h) = pl_out.hint.take() {
             self.notify(Notice::info(h), now);

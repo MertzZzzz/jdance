@@ -50,6 +50,9 @@ pub(crate) enum ProjectAction {
 pub(crate) struct ProjectBrowser {
     pub tab: Tab,
     query: String,
+    /// The source shown last frame: a new one is scrolled to (spec 0.2.7
+    /// §2 item 2).
+    last_source: Option<Source>,
 }
 
 impl Default for ProjectBrowser {
@@ -57,6 +60,7 @@ impl Default for ProjectBrowser {
         Self {
             tab: Tab::Patterns,
             query: String::new(),
+            last_source: None,
         }
     }
 }
@@ -72,6 +76,17 @@ impl ProjectBrowser {
     ) -> Vec<ProjectAction> {
         let mut out = Vec::new();
         ui.set_width(WIDTH);
+        // A new active source (a clip clicked in the Playlist): its tab
+        // opens and its row scrolls into view.
+        let reveal = source.is_some() && source != self.last_source;
+        if reveal {
+            self.tab = match source {
+                Some(Source::Pattern(_)) => Tab::Patterns,
+                Some(Source::Automation(_)) => Tab::Automations,
+                _ => Tab::Samples,
+            };
+        }
+        self.last_source = source;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
             for (tab, label) in [
@@ -99,7 +114,7 @@ impl ProjectBrowser {
                     for p in project.patterns.iter().filter(|p| matches(&p.name)) {
                         let uses = project.playlist.clips.iter().filter(|c| c.pattern == p.id).count();
                         let src = Source::Pattern(p.id);
-                        let resp = item(ui, &p.name, &format!("{uses}"), source == Some(src));
+                        let resp = item(ui, &p.name, &format!("{uses}"), source == Some(src), reveal);
                         // The pattern's colour (spec 0.2.5 §9).
                         let c = p.color.unwrap_or(jdance_domain::color::DEFAULT_PATTERN_COLOR);
                         ui.painter().rect_filled(
@@ -159,7 +174,7 @@ impl ProjectBrowser {
                     for a in project.assets.iter().filter(|a| matches(&a.name)) {
                         let uses = project.asset_usage(a.id);
                         let src = Source::Asset(a.id);
-                        let resp = item(ui, &a.name, &format!("{uses}"), source == Some(src));
+                        let resp = item(ui, &a.name, &format!("{uses}"), source == Some(src), reveal);
                         let resp = resp.on_hover_text(format!(
                             "{:.2} s · {} Hz · used by {uses} clip(s)\n{}\nClick: place with Draw/Paint · drag into the Playlist · double-click: Sample Editor",
                             a.seconds(),
@@ -206,12 +221,9 @@ impl ProjectBrowser {
                             let src = Source::Channel(ch.id);
                             ui.horizontal(|ui| {
                                 ui.add_space(14.0);
-                                let resp = item(
-                                    ui,
-                                    &ch.name,
+                                let resp = item(ui, &ch.name,
                                     &format!("{n}"),
-                                    source == Some(src),
-                                )
+                                    source == Some(src), reveal)
                                 .on_hover_text(format!(
                                     "Audio channel · {n} clip(s) · mixer track {}\nClick: place with Draw/Paint · drag into the Playlist",
                                     crate::rack::track_number(project, ch.track)
@@ -260,7 +272,7 @@ impl ProjectBrowser {
                         } else {
                             format!("{uses}")
                         };
-                        let resp = item(ui, &a.name, &count, source == Some(src));
+                        let resp = item(ui, &a.name, &count, source == Some(src), reveal);
                         let resp = resp.on_hover_text(format!(
                             "{target} · {} bars · used by {uses} clip(s)\nClick: place with Draw/Paint · drag into the Playlist · double-click: Automation Editor",
                             a.length.div_ceil(u64::from(project.time_signature.bar_ticks()))
@@ -298,7 +310,7 @@ impl ProjectBrowser {
 }
 
 /// A list row: name, usage count; highlighted when it is the source.
-fn item(ui: &mut egui::Ui, name: &str, count: &str, on: bool) -> egui::Response {
+fn item(ui: &mut egui::Ui, name: &str, count: &str, on: bool, reveal: bool) -> egui::Response {
     let (rect, resp) =
         ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click_and_drag());
     let p = ui.painter();
@@ -324,5 +336,8 @@ fn item(ui: &mut egui::Ui, name: &str, count: &str, on: bool) -> egui::Response 
         theme::TEXT,
         count.left() - 6.0 - (rect.left() + 8.0),
     );
+    if on && reveal {
+        resp.scroll_to_me(Some(egui::Align::Center));
+    }
     resp.on_hover_text(name)
 }

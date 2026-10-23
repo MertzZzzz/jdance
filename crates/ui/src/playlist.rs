@@ -300,6 +300,8 @@ pub(crate) struct PlaylistOutput {
     pub actions: Vec<PlaylistAction>,
     /// A short message for the user (nothing to place, …).
     pub hint: Option<String>,
+    /// A clicked pattern clip made its pattern the current one.
+    pub select_pattern: Option<PatternId>,
 }
 
 fn color(c: [u8; 3]) -> Color32 {
@@ -339,6 +341,16 @@ impl Item {
             Item::Pattern(c) => c.id,
             Item::Audio(c) => c.id,
             Item::Automation(c) => c.id,
+        }
+    }
+
+    /// What Draw and Paint place after a click on this clip (spec 0.2.7
+    /// §2): its pattern, its audio channel (the sample) or its source.
+    fn source(&self) -> Source {
+        match self {
+            Item::Pattern(c) => Source::Pattern(c.pattern),
+            Item::Audio(c) => Source::Channel(c.channel),
+            Item::Automation(c) => Source::Automation(c.source),
         }
     }
 }
@@ -466,6 +478,16 @@ impl PlaylistView {
         }
     }
 
+    /// Makes the source of a clicked clip the active one (§2 items 1–3).
+    fn activate(&mut self, item: &Item, out: &mut PlaylistOutput) {
+        let source = item.source();
+        self.source = Some(source);
+        if let Source::Pattern(id) = source {
+            self.last_pattern = Some(id);
+            out.select_pattern = Some(id);
+        }
+    }
+
     pub(crate) fn retain_existing(&mut self, project: &Project) {
         let pl = &project.playlist;
         self.selection.retain(|id| pl.has_clip(*id));
@@ -477,7 +499,9 @@ impl PlaylistView {
             None => true,
         };
         if !valid {
-            self.source = None;
+            // The active source was removed: the first pattern, if any
+            // (§2 item 12).
+            self.source = project.patterns.first().map(|p| Source::Pattern(p.id));
         }
         if self.armed.is_some_and(|l| pl.lane(l).is_none()) {
             self.armed = None;
@@ -985,6 +1009,7 @@ impl PlaylistView {
                     (_, Tool::Slice) => None,
                     (Some((k, edge)), _) => {
                         let id = items[k].item.id();
+                        self.activate(&items[k].item, out);
                         if !self.selection.contains(&id) {
                             if !shift {
                                 self.selection.clear();
@@ -1185,7 +1210,20 @@ impl PlaylistView {
                         out.edits.push(delete_edits(project, &erased));
                     }
                 }
-                DragKind::Move | DragKind::Frame { .. } => {}
+                DragKind::Frame { .. } => {
+                    // A frame over clips of one source makes it active;
+                    // of several, the active source stays (§2 item 8).
+                    let mut sources = items
+                        .iter()
+                        .filter(|g| self.selection.contains(&g.item.id()))
+                        .map(|g| (g.item.source(), g.item));
+                    if let Some((first, item)) = sources.next()
+                        && sources.all(|(s, _)| s == first)
+                    {
+                        self.activate(&item, out);
+                    }
+                }
+                DragKind::Move => {}
             }
         }
 
@@ -1247,6 +1285,7 @@ impl PlaylistView {
                         out.edits.push(delete_edits(project, &BTreeSet::from([id])));
                     }
                     (Some((k, _)), Tool::Slice) => {
+                        self.activate(&items[k].item, out);
                         out.actions.push(PlaylistAction::Slice {
                             clip: items[k].item.id(),
                             tick: snapped(p.x) as u64,
@@ -1254,6 +1293,9 @@ impl PlaylistView {
                     }
                     (Some((k, _)), _) => {
                         let id = items[k].item.id();
+                        // A click on a clip places nothing: it selects
+                        // the clip and makes its source active (§2).
+                        self.activate(&items[k].item, out);
                         if shift {
                             if !self.selection.remove(&id) {
                                 self.selection.insert(id);
@@ -1272,7 +1314,8 @@ impl PlaylistView {
                             });
                         }
                         (_, None) => {
-                            out.hint = Some("Choose a pattern or a file to place first".into());
+                            out.hint =
+                                Some("No source to place: choose a pattern or a file".into());
                         }
                         _ => {}
                     },
@@ -2670,5 +2713,159 @@ mod key_tests {
             hint.is_some_and(|h| h.contains("duplicate")),
             "the move is pointed out"
         );
+    }
+}
+
+/// Spec 0.2.7 §2: the active source follows a left click on a clip.
+#[cfg(test)]
+mod source_tests {
+    use super::*;
+    use crate::test_ui::{Driver, StubHost};
+    use egui::{Event, Key, Modifiers};
+
+    struct Env {
+        p: Project,
+        view: PlaylistView,
+        d: Driver,
+        host: StubHost,
+        current: PatternId,
+        actions: Vec<PlaylistAction>,
+    }
+
+    const BAR: u64 = WHOLE_NOTE as u64;
+
+    impl Env {
+        /// Two patterns; a clip of the second one on lane 0, bar 1.
+        fn new() -> Self {
+            let mut p = Project::new();
+            p.playlist = jdance_domain::Playlist::with_lanes(3, || 0);
+            let second = PatternId(p.ids.next());
+            p.patterns
+                .push(jdance_domain::Pattern::new(second, "Pattern 2"));
+            let lane = p.playlist.lanes[0].id;
+            let id = ClipId(p.ids.next());
+            p.playlist.clips.push(PatternClip {
+                id,
+                lane,
+                pattern: second,
+                start: BAR,
+                offset: 0,
+                duration: BAR,
+                looped: true,
+                muted: false,
+            });
+            let current = p.patterns[0].id;
+            let mut e = Self {
+                p,
+                view: PlaylistView::default(),
+                d: Driver::new(),
+                host: StubHost::default(),
+                current,
+                actions: Vec::new(),
+            };
+            e.frame(vec![]);
+            e.frame(vec![]);
+            e
+        }
+
+        fn frame(&mut self, events: Vec<Event>) {
+            let (view, p, host, current) = (&mut self.view, &self.p, &mut self.host, self.current);
+            let mut out = PlaylistOutput::default();
+            let mut ui = |ui: &mut egui::Ui| {
+                out = view.show(ui, p, None, TICKS_PER_STEP, current, host, None);
+            };
+            self.d.frame(events, &mut ui);
+            if let Some(id) = out.select_pattern {
+                self.current = id;
+            }
+            self.actions.extend(out.actions);
+        }
+
+        /// Screen point of `tick` on `lane`.
+        fn at(&self, lane: usize, tick: u64) -> egui::Pos2 {
+            let v = self.view.view.unwrap();
+            egui::pos2(
+                v.left + tick as f32 * self.view.px_per_tick() - v.offset,
+                v.rect.top() + RULER_H + ROW_H * lane as f32 + ROW_H / 2.0,
+            )
+        }
+
+        fn click(&mut self, p: egui::Pos2) {
+            let mut ui_events = vec![
+                vec![self.d.moved(p)],
+                vec![self.d.button(p, true)],
+                vec![self.d.button(p, false)],
+                vec![],
+            ];
+            for e in ui_events.drain(..) {
+                self.frame(e);
+            }
+        }
+
+        fn placed(&mut self) -> Vec<Source> {
+            self.actions
+                .drain(..)
+                .filter_map(|a| match a {
+                    PlaylistAction::Place { source, .. } => Some(source),
+                    _ => None,
+                })
+                .collect()
+        }
+    }
+
+    #[test]
+    fn a_click_on_a_clip_makes_its_pattern_the_one_that_draw_places() {
+        let mut e = Env::new();
+        let first = e.p.patterns[0].id;
+        let second = e.p.patterns[1].id;
+        assert_eq!(e.view.source, Some(Source::Pattern(first)));
+        // Draw is the default tool: a click on the clip only selects it.
+        let on_clip = e.at(0, BAR + BAR / 2);
+        e.click(on_clip);
+        assert!(e.placed().is_empty(), "a click on a clip places nothing");
+        assert_eq!(e.view.source, Some(Source::Pattern(second)));
+        assert_eq!(e.current, second, "the current pattern follows");
+        assert_eq!(e.view.selection.len(), 1);
+        // Esc clears the outline, not the source.
+        e.frame(vec![Event::Key {
+            key: Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        }]);
+        assert!(e.view.selection.is_empty());
+        // Draw on an empty spot of another lane: pattern 2.
+        let empty = e.at(2, 3 * BAR);
+        e.click(empty);
+        assert_eq!(e.placed(), [Source::Pattern(second)]);
+    }
+
+    #[test]
+    fn a_removed_source_falls_back_to_the_first_pattern() {
+        let mut e = Env::new();
+        let second = e.p.patterns[1].id;
+        e.view.source = Some(Source::Pattern(second));
+        e.p.patterns.retain(|p| p.id != second);
+        e.p.playlist.clips.clear();
+        e.view.retain_existing(&e.p);
+        assert_eq!(e.view.source, Some(Source::Pattern(e.p.patterns[0].id)));
+    }
+
+    #[test]
+    fn audio_and_automation_clips_give_their_sources() {
+        let c = jdance_domain::AudioClip {
+            id: ClipId(1),
+            lane: LaneId(2),
+            channel: ChannelId(7),
+            start: 0,
+            source_in: 0,
+            source_out: 10,
+            gain: 1.0,
+            muted: false,
+            fade_in: 0,
+            fade_out: 0,
+        };
+        assert_eq!(Item::Audio(c).source(), Source::Channel(ChannelId(7)));
     }
 }
