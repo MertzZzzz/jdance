@@ -467,7 +467,7 @@ Linux), clippy `-D warnings`, `cargo xtask check`. Открытые вопрос
 | §1 Ctrl+Z повтор/отмена, Ctrl+Alt+Z | PASS | код (`keys`, `JdanceApp`); headless-теста нет |
 | §1 Модификаторы мыши (Ctrl-выделение, Alt, Shift-копия, фиксация осей, средняя кнопка) | PASS | код; ручная проверка не проводилась |
 | §2 Клик по клипу делает источник активным, вставка, Esc, удалённый источник | PASS | `playlist` тесты `a_click_on_a_clip_makes_its_pattern_the_one_that_draw_places`, `a_removed_source_falls_back_to_the_first_pattern`, `audio_and_automation_clips_give_their_sources` |
-| Windows MSI 0.2.7 | — | сборка в workflow `Release` после слияния |
+| Windows MSI 0.2.7 | PASS | сборка, установка, проверка версии в workflow `Release`; https://github.com/MertzZzzz/jdance/releases/tag/v0.2.7 |
 
 Отступления от спецификации 0.2.7:
 
