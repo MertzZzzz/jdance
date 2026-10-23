@@ -7,8 +7,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// Default scanner timeout per module (PLG-022 step 4).
-pub const SCAN_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default scanner timeout per module (PLG-022 step 4). Large plugins
+/// (sample libraries, license checks) can take well over half a minute
+/// the first time.
+pub const SCAN_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Standard VST3 folders for this OS (PLG-020).
 pub fn default_search_paths() -> Vec<PathBuf> {

@@ -6,6 +6,8 @@ use crate::uid;
 use jdance_plugin_api::{PluginDescriptor, PluginError, PluginFormat, PluginKind, PluginRef};
 use std::ffi::c_void;
 use std::mem::ManuallyDrop;
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use vst3::Steinberg::*;
 use vst3::{ComPtr, ComWrapper};
@@ -75,6 +77,8 @@ pub fn binary_path(bundle: &Path) -> Result<PathBuf, PluginError> {
     let path = bundle.join(rel);
     if path.is_file() {
         Ok(path)
+    } else if let Some(other) = path.parent().and_then(|dir| renamed_binary(dir, &path)) {
+        Ok(other)
     } else if bundle.join("Contents").is_dir() {
         Err(PluginError::Unsupported(format!(
             "incompatible architecture: no {}",
@@ -85,6 +89,23 @@ pub fn binary_path(bundle: &Path) -> Result<PathBuf, PluginError> {
             "{} is not a VST3 bundle",
             bundle.display()
         )))
+    }
+}
+
+/// The binary of a bundle whose folder was renamed (the binary keeps its
+/// own name): the only file with the binary's extension in the
+/// architecture folder. Several candidates: none is guessed.
+fn renamed_binary(dir: &Path, expected: &Path) -> Option<PathBuf> {
+    let ext = expected.extension();
+    let candidates: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && p.extension() == ext)
+        .collect();
+    match candidates.as_slice() {
+        [one] => Some(one.clone()),
+        _ => None,
     }
 }
 
@@ -303,16 +324,78 @@ fn open_library(path: &Path) -> Result<(libloading::Library, *mut c_void), Plugi
     use libloading::os::windows::{
         LOAD_LIBRARY_SEARCH_DEFAULT_DIRS, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR, Library,
     };
+    use windows_sys::Win32::System::Diagnostics::Debug::{
+        SEM_FAILCRITICALERRORS, SEM_NOOPENFILEERRORBOX, SetThreadErrorMode,
+    };
+    use windows_sys::Win32::System::LibraryLoader::{AddDllDirectory, RemoveDllDirectory};
     // PLG-101: search the module's own folder for its dependencies, never
     // the current directory.
+    let flags = LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS;
+    let load = || unsafe { Library::load_with_flags(path, flags) };
+    // A missing dependency fails the call instead of showing a system
+    // dialog that blocks the app (or the scanner).
+    let mut old_mode = 0;
     unsafe {
-        Library::load_with_flags(
-            path,
-            LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS,
+        SetThreadErrorMode(
+            SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX,
+            &mut old_mode,
         )
+    };
+    let mut result = load();
+    if result.is_err() {
+        // Some plugins find their own DLLs through PATH (shared runtimes
+        // installed next to them): try again with the PATH folders added
+        // to the search, still without the current directory.
+        let dirs: Vec<_> = std::env::var_os("PATH")
+            .map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|d| d.is_absolute() && d.is_dir())
+            .filter_map(|d| {
+                let wide: Vec<u16> = d
+                    .as_os_str()
+                    .encode_wide()
+                    .chain(std::iter::once(0))
+                    .collect();
+                let cookie = unsafe { AddDllDirectory(wide.as_ptr()) };
+                (!cookie.is_null()).then_some(cookie)
+            })
+            .collect();
+        if !dirs.is_empty() {
+            result = load();
+        }
+        for c in dirs {
+            unsafe { RemoveDllDirectory(c) };
+        }
     }
-    .map(|l| (l.into(), std::ptr::null_mut()))
-    .map_err(|e| PluginError::Load(e.to_string()))
+    unsafe { SetThreadErrorMode(old_mode, std::ptr::null_mut()) };
+    result
+        .map(|l| (l.into(), std::ptr::null_mut()))
+        .map_err(|e| PluginError::Load(explain_load_error(&e)))
+}
+
+/// What a failed load means to a user (the Windows error code says it).
+#[cfg(windows)]
+fn explain_load_error(e: &libloading::Error) -> String {
+    use std::error::Error;
+    let code = e
+        .source()
+        .and_then(|s| s.downcast_ref::<std::io::Error>())
+        .and_then(std::io::Error::raw_os_error);
+    match code {
+        Some(126) => "a library the plugin needs is missing (reinstall the plugin or the \
+                      Microsoft Visual C++ Redistributable it uses)"
+            .to_owned(),
+        Some(193 | 216) => "not a 64-bit Windows plugin".to_owned(),
+        Some(1114) => "the plugin failed to initialize (its installer or license may be \
+                       incomplete)"
+            .to_owned(),
+        // "LoadLibraryExW failed" alone says nothing: add the reason.
+        _ => match e.source() {
+            Some(s) => format!("{e}: {s}"),
+            None => e.to_string(),
+        },
+    }
 }
 
 #[cfg(target_os = "macos")]

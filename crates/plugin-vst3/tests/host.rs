@@ -397,3 +397,34 @@ fn a_picky_plugin_gets_what_it_needs_from_the_host() {
     assert!(c.poll().contains(&PluginEvent::LatencyChanged));
     assert_eq!(c.latency(), 32);
 }
+
+fn copy_dir(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for e in std::fs::read_dir(from).unwrap().flatten() {
+        let p = e.path();
+        let dest = to.join(e.file_name());
+        if p.is_dir() {
+            copy_dir(&p, &dest);
+        } else {
+            std::fs::copy(&p, &dest).unwrap();
+        }
+    }
+}
+
+/// A bundle folder renamed by the user (the binary inside keeps its own
+/// name) still loads.
+#[test]
+fn a_renamed_bundle_loads() {
+    let dir = std::env::temp_dir().join(format!("jdance-renamed-{}", std::process::id()));
+    let renamed = dir.join("Renamed Effect.vst3");
+    if bundle().is_dir() {
+        copy_dir(bundle(), &renamed);
+    } else {
+        // Windows single-file module: nothing to rename inside.
+        return;
+    }
+    let m = Vst3Module::load(&renamed).unwrap();
+    assert_eq!(m.descriptors().len(), 8);
+    drop(m);
+    let _ = std::fs::remove_dir_all(&dir);
+}

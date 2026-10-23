@@ -83,7 +83,14 @@ pub struct Catalog {
     /// automatically until the user asks (PLG-025). Class id → name.
     #[serde(default)]
     pub crashed: BTreeMap<String, String>,
+    /// Version of jdance that made the scan: a newer one scans the
+    /// blocklisted modules again, since it may load them now.
+    #[serde(default)]
+    pub scanned_by: String,
 }
+
+/// This build, as recorded in [`Catalog::scanned_by`].
+const SCANNER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 impl Catalog {
     pub fn cache_path() -> Option<PathBuf> {
@@ -141,8 +148,10 @@ impl Catalog {
     ) -> Self {
         let mut out = Catalog {
             crashed: self.crashed.clone(),
+            scanned_by: SCANNER_VERSION.to_owned(),
             ..Catalog::default()
         };
+        let newer = self.scanned_by != SCANNER_VERSION;
         let modules = find_modules(roots);
         let total = modules.len();
         for (i, path) in modules.into_iter().enumerate() {
@@ -158,6 +167,7 @@ impl Catalog {
                 && let Some(old) = self.modules.get(&path)
                 && old.key.is_some()
                 && old.key == key
+                && !(newer && matches!(old.result, ModuleResult::Blocked(_)))
             {
                 out.modules.insert(path, old.clone());
                 continue;
@@ -227,6 +237,10 @@ struct Live {
     /// The plugin asked for a restart (bus change or reload): recreate it
     /// with its current state.
     restart: bool,
+    /// After a latency change notice, the latency is read again until
+    /// then: some plugins announce it before their processor has the new
+    /// value.
+    latency_check: Option<std::time::Instant>,
 }
 
 /// Live instances of the open project's plugin inserts.
@@ -376,6 +390,7 @@ impl PluginHost {
                             processor: Some(processor),
                             generation,
                             restart: false,
+                            latency_check: None,
                         },
                     );
                 }
@@ -460,25 +475,31 @@ impl PluginHost {
     /// recreates the instance.
     pub fn poll(&mut self) -> bool {
         use jdance_plugin_api::PluginEvent::{LatencyChanged, ReloadRequested};
+        const LATENCY_CHECK: std::time::Duration = std::time::Duration::from_secs(2);
         let mut recompile = false;
+        let now = std::time::Instant::now();
         for l in self.live.values_mut() {
             for e in l.controller.poll() {
                 match e {
                     // The same instance with its new latency: its editor
                     // stays open and its sound is not interrupted. Some
                     // plugins report a latency change on every edit.
-                    LatencyChanged => {
-                        let latency = l.controller.latency();
-                        if latency != l.latency {
-                            l.latency = latency;
-                            recompile = true;
-                        }
-                    }
+                    LatencyChanged => l.latency_check = Some(now + LATENCY_CHECK),
                     ReloadRequested => {
                         l.restart = true;
                         recompile = true;
                     }
                     _ => {}
+                }
+            }
+            if let Some(until) = l.latency_check {
+                let latency = l.controller.latency();
+                if latency != l.latency {
+                    l.latency = latency;
+                    recompile = true;
+                }
+                if now >= until {
+                    l.latency_check = None;
                 }
             }
         }
@@ -681,5 +702,104 @@ mod instrument_tests {
         assert!(host.controller(PluginTarget::Channel(id)).is_some());
         let rt = host.supply(PluginTarget::Channel(id), 1);
         assert!(rt.has_instance());
+    }
+}
+
+#[cfg(test)]
+mod compat_tests {
+    use super::*;
+    use jdance_domain::{Effect, Insert};
+
+    fn bundle() -> &'static Path {
+        jdance_test_support::test_plugin_bundle(jdance_plugin_vst3::bundle_binary)
+    }
+
+    #[test]
+    fn an_upgrade_scans_blocklisted_modules_again() {
+        let mut catalog = Catalog::default();
+        catalog.modules.insert(
+            bundle().to_path_buf(),
+            ModuleEntry {
+                key: ModuleKey::of(bundle()),
+                result: ModuleResult::Blocked("old reason".into()),
+            },
+        );
+        let roots = [bundle().parent().unwrap().to_path_buf()];
+        // A scanner that cannot start: a rescan shows in the new reason.
+        let scanner = Path::new("/nonexistent/jdance-scanner");
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let reason = |c: &Catalog| match &c.modules[bundle()].result {
+            ModuleResult::Blocked(r) => r.clone(),
+            ModuleResult::Ok(_) => String::new(),
+        };
+        catalog.scanned_by = SCANNER_VERSION.to_owned();
+        let same = catalog.rescan(&roots, scanner, false, &|_, _, _| {}, &cancel);
+        assert_eq!(reason(&same), "old reason", "same version: cached");
+        catalog.scanned_by = "0.2.7".into();
+        let newer = catalog.rescan(&roots, scanner, false, &|_, _, _| {}, &cancel);
+        assert_ne!(reason(&newer), "old reason", "newer version: scanned again");
+        assert_eq!(newer.scanned_by, SCANNER_VERSION);
+    }
+
+    #[test]
+    fn a_latency_change_keeps_the_instance() {
+        let descriptors = jdance_plugin_vst3::scan_in_process(bundle()).unwrap();
+        let strict = descriptors
+            .iter()
+            .find(|d| d.plugin.name == "JD Test Strict")
+            .unwrap()
+            .clone();
+        let mut catalog = Catalog::default();
+        catalog.modules.insert(
+            bundle().to_path_buf(),
+            ModuleEntry {
+                key: None,
+                result: ModuleResult::Ok(descriptors),
+            },
+        );
+        let mut host = PluginHost::with_catalog(catalog);
+        let mut p = Project::new();
+        let insert = jdance_domain::InsertId(p.ids.next());
+        let id = PluginTarget::Insert(insert);
+        p.mixer.master.inserts.push(Insert {
+            id: insert,
+            bypass: false,
+            wet: 1.0,
+            effect: Effect::plugin(PluginSlot {
+                format: "vst3".into(),
+                class_id: strict.plugin.class_id.clone(),
+                name: strict.plugin.name.clone(),
+                vendor: strict.plugin.vendor.clone(),
+                version: strict.plugin.version.clone(),
+                category: strict.category.clone(),
+                component_state: Vec::new(),
+                controller_state: Vec::new(),
+            }),
+            sidechain: None,
+        });
+        assert!(host.sync(&p, 48_000, 1).is_empty());
+        // The engine's half, run here.
+        let mut processor = host.live.get_mut(&id).unwrap().processor.take().unwrap();
+        host.live.get_mut(&id).unwrap().generation = 1;
+        assert_eq!(host.latency_only(id).latency(), 64);
+        // The plugin announces the change before its processor has it.
+        host.controller(id).unwrap().set_param_normalized(0, 0.25);
+        assert!(!host.poll());
+        let (mut l, mut r) = (vec![0.0f32; 64], vec![0.0f32; 64]);
+        jdance_plugin_api::PluginProcessor::process(
+            &mut processor,
+            &mut l,
+            &mut r,
+            None,
+            &jdance_plugin_api::Transport::default(),
+        );
+        assert!(host.poll(), "a recompile for the new latency");
+        assert_eq!(host.latency_only(id).latency(), 32);
+        // Not recreated: the next sync keeps the instance the engine has.
+        assert!(host.sync(&p, 48_000, 1).is_empty());
+        assert!(
+            host.live.get(&id).is_some_and(|l| l.processor.is_none()),
+            "the instance in the engine is kept"
+        );
     }
 }
