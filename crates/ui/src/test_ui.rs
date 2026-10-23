@@ -115,6 +115,8 @@ pub(crate) struct StubHost {
     pub seeks: Vec<u64>,
     /// Stop requests (spec 0.2.9 §5).
     pub stops: u32,
+    /// Files previewed, in order.
+    pub previews: Vec<std::path::PathBuf>,
     pub live_inputs: Option<(u16, Vec<String>)>,
     pub plugins: Vec<jdance_plugin_api::PluginDescriptor>,
     pub plugin_prefs: jdance_plugin_api::search::PluginPrefs,
@@ -149,6 +151,9 @@ impl crate::Host for StubHost {
     fn stop(&mut self) {
         self.transport.playing = false;
         self.stops += 1;
+    }
+    fn preview_file(&mut self, path: Option<&std::path::Path>) {
+        self.previews.extend(path.map(std::path::Path::to_path_buf));
     }
     fn set_mode(&mut self, _: crate::host::TransportMode) {}
     fn seek_ticks(&mut self, ticks: u64) {

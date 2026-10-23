@@ -13,7 +13,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 /// Extensions shown in the Browser; only WAV loads today.
-const AUDIO: [&str; 7] = ["wav", "wave", "flac", "aif", "aiff", "mp3", "ogg"];
+const AUDIO: [&str; 9] = [
+    "wav", "wave", "flac", "aif", "aiff", "mp3", "ogg", "mid", "midi",
+];
 /// Search limits: results and folder depth.
 const MAX_RESULTS: usize = 500;
 const MAX_DEPTH: usize = 16;

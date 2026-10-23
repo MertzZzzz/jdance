@@ -18,6 +18,8 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone)]
 pub(crate) enum BrowserItem {
     Sample(PathBuf),
+    /// A MIDI file: its notes go into the Piano Roll (spec 0.2.9 §6.5).
+    Midi(PathBuf),
     Instrument(PluginDescriptor),
 }
 
@@ -56,6 +58,17 @@ pub(crate) struct BrowserView {
     open: BTreeSet<Section>,
     selected: Option<PathBuf>,
     auto_preview: bool,
+    /// Files in the order drawn, this frame and the last: the arrows walk
+    /// them (spec 0.2.9 §7).
+    visible: Vec<PathBuf>,
+    shown: Vec<PathBuf>,
+    /// Scroll the selected file into view once.
+    reveal: bool,
+    /// The arrow keys go to the Browser (it was clicked last; the app
+    /// sets it).
+    pub keys_active: bool,
+    /// Where the Browser was drawn, for the app's key focus.
+    pub area: Option<egui::Rect>,
 }
 
 impl BrowserView {
@@ -76,6 +89,9 @@ impl BrowserView {
         host: &mut dyn Host,
     ) -> Vec<BrowserAction> {
         let mut out = Vec::new();
+        self.area = Some(ui.max_rect());
+        self.arrows(ui, host);
+        self.shown = std::mem::take(&mut self.visible);
         ui.add(
             egui::TextEdit::singleline(&mut self.query)
                 .hint_text("Search samples")
@@ -176,6 +192,53 @@ impl BrowserView {
             self.details(ui, host, &path, &favorites);
         }
         out
+    }
+
+    /// ↓ and ↑ select the next and previous file drawn and preview it,
+    /// as a click does (spec 0.2.9 §7).
+    fn arrows(&mut self, ui: &egui::Ui, host: &mut dyn Host) {
+        if !self.keys_active || ui.ctx().egui_wants_keyboard_input() || self.shown.is_empty() {
+            return;
+        }
+        let step = ui.input_mut(|i| {
+            if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
+                1
+            } else if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
+                -1
+            } else {
+                0
+            }
+        });
+        if step == 0 {
+            return;
+        }
+        let at = self
+            .selected
+            .as_ref()
+            .and_then(|s| self.shown.iter().position(|p| p == s));
+        let next = match at {
+            Some(k) => (k as i64 + step).clamp(0, self.shown.len() as i64 - 1) as usize,
+            None if step > 0 => 0,
+            None => self.shown.len() - 1,
+        };
+        if at == Some(next) {
+            return;
+        }
+        let path = self.shown[next].clone();
+        self.select_file(host, &path);
+        self.reveal = true;
+    }
+
+    /// Selects `path`; a sample is inspected and, with auto preview,
+    /// played.
+    fn select_file(&mut self, host: &mut dyn Host, path: &Path) {
+        self.selected = Some(path.to_path_buf());
+        if is_wav(path) {
+            host.inspect_file(path);
+            if self.auto_preview {
+                host.preview_file(Some(path));
+            }
+        }
     }
 
     fn project(
@@ -379,6 +442,8 @@ impl BrowserView {
     ) {
         let selected = self.selected.as_deref() == Some(e.path.as_path());
         let supported = is_wav(&e.path);
+        let midi = is_midi(&e.path);
+        self.visible.push(e.path.clone());
         let (rect, resp) =
             ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::click_and_drag());
         if selected {
@@ -408,10 +473,19 @@ impl BrowserView {
             egui::Align2::LEFT_CENTER,
             &e.name,
             egui::FontId::proportional(12.5),
-            if supported { theme::TEXT } else { theme::MUTED },
+            if supported || midi {
+                theme::TEXT
+            } else {
+                theme::MUTED
+            },
             right - x,
         );
-        let resp = resp.on_hover_text(if supported {
+        let resp = resp.on_hover_text(if midi {
+            format!(
+                "{}\nMIDI file: drag onto the Piano Roll to put its notes there (or Ctrl+M in the Piano Roll)",
+                e.path.display()
+            )
+        } else if supported {
             format!(
                 "{}\nClick: select and preview · double-click: Sample Editor · middle click: into the selected channel\nDrag onto the Channel Rack or the Playlist (a sampler and its clip)",
                 e.path.display()
@@ -424,15 +498,14 @@ impl BrowserView {
         });
         if supported {
             resp.dnd_set_drag_payload(BrowserItem::Sample(e.path.clone()));
+        } else if midi {
+            resp.dnd_set_drag_payload(BrowserItem::Midi(e.path.clone()));
+        }
+        if selected && std::mem::take(&mut self.reveal) {
+            resp.scroll_to_me(None);
         }
         if resp.clicked() {
-            self.selected = Some(e.path.clone());
-            if supported {
-                host.inspect_file(&e.path);
-                if self.auto_preview {
-                    host.preview_file(Some(&e.path));
-                }
-            }
+            self.select_file(host, &e.path);
         }
         if resp.double_clicked() && supported {
             out.push(BrowserAction::OpenFile(e.path.clone()));
@@ -550,6 +623,13 @@ pub(crate) fn is_wav(path: &Path) -> bool {
         .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "wav" | "wave" | "mp3"))
 }
 
+/// Standard MIDI files (spec 0.2.9 §6.6).
+pub(crate) fn is_midi(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "mid" | "midi"))
+}
+
 /// "16-bit" for a WAV, the MP3 description as is.
 pub(crate) fn format_label(format: &str) -> String {
     if format.chars().all(|c| c.is_ascii_digit()) && !format.is_empty() {
@@ -661,4 +741,49 @@ fn item(ui: &mut egui::Ui, label: &str, depth: usize) -> egui::Response {
         rect.right() - 8.0 - x,
     );
     resp
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_ui::{Driver, StubHost};
+
+    #[test]
+    fn arrows_walk_the_files_and_preview_them() {
+        let mut v = BrowserView::new();
+        v.keys_active = true;
+        v.shown = ["a.wav", "b.mid", "c.wav"].map(PathBuf::from).to_vec();
+        let mut host = StubHost::default();
+        let mut d = Driver::new();
+        let key = |k| egui::Event::Key {
+            key: k,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let mut press = |v: &mut BrowserView, host: &mut StubHost, k| {
+            d.frame(vec![key(k)], &mut |ui| v.arrows(ui, host));
+        };
+        press(&mut v, &mut host, egui::Key::ArrowDown);
+        assert_eq!(v.selected.as_deref(), Some(Path::new("a.wav")));
+        press(&mut v, &mut host, egui::Key::ArrowDown);
+        assert_eq!(v.selected.as_deref(), Some(Path::new("b.mid")));
+        press(&mut v, &mut host, egui::Key::ArrowDown);
+        press(&mut v, &mut host, egui::Key::ArrowDown);
+        assert_eq!(
+            v.selected.as_deref(),
+            Some(Path::new("c.wav")),
+            "stays at the end"
+        );
+        press(&mut v, &mut host, egui::Key::ArrowUp);
+        assert_eq!(v.selected.as_deref(), Some(Path::new("b.mid")));
+        // Samples play as they are reached; a MIDI file does not.
+        assert_eq!(host.previews, ["a.wav", "c.wav"].map(PathBuf::from));
+        assert!(v.reveal, "the list scrolls to it");
+        // Without the key focus the arrows are the editors'.
+        v.keys_active = false;
+        press(&mut v, &mut host, egui::Key::ArrowDown);
+        assert_eq!(v.selected.as_deref(), Some(Path::new("b.mid")));
+    }
 }

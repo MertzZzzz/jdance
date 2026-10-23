@@ -139,6 +139,8 @@ struct ColorWindow {
 enum KeyFocus {
     Playlist,
     PianoRoll,
+    /// The arrows walk the Browser's files (spec 0.2.9 §7).
+    Browser,
 }
 
 /// The plugin picker window: which plugins, and the mixer track an
@@ -3959,14 +3961,19 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
                 self.key_focus = KeyFocus::PianoRoll;
             } else if self.playlist_view.area.contains(press) {
                 self.key_focus = KeyFocus::Playlist;
+            } else if self.browser_view.area.is_some_and(|a| a.contains(press)) {
+                self.key_focus = KeyFocus::Browser;
             }
         }
-        let piano_keys = self.piano.is_some()
+        let browser_keys = self.key_focus == KeyFocus::Browser;
+        self.browser_view.keys_active = browser_keys;
+        let piano_keys = !browser_keys
+            && self.piano.is_some()
             && (piano_docked || self.key_focus == KeyFocus::PianoRoll || !self.show_playlist);
         if let Some(roll) = &mut self.piano {
             roll.keys_active = piano_keys;
         }
-        self.playlist_view.keys_active = !piano_keys;
+        self.playlist_view.keys_active = !piano_keys && !browser_keys;
         let marks = self
             .project
             .pattern(self.current_pattern)

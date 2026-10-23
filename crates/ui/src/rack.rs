@@ -289,8 +289,11 @@ impl RackView {
                         dropped_on_row = true;
                         match &*item {
                             // An audio channel keeps its file: a new sampler.
+                            // A sampler with clips keeps its file too.
                             crate::browser::BrowserItem::Sample(p)
-                                if ch.instrument().is_none() && !ch.is_audio() =>
+                                if ch.instrument().is_none()
+                                    && !ch.is_audio()
+                                    && project.channel_clips(ch.id).next().is_none() =>
                             {
                                 out.edits.push((
                                     Edit::SetChannelSample(ch.id, Some(sample_ref(p))),
@@ -303,6 +306,7 @@ impl RackView {
                             crate::browser::BrowserItem::Instrument(d) => {
                                 out.new_instruments.push(d.clone())
                             }
+                            crate::browser::BrowserItem::Midi(_) => {}
                         }
                     }
                     if (hovering_files || dragging_in) && pointer.is_some_and(|p| rect.contains(p))
@@ -348,6 +352,7 @@ impl RackView {
                     out.new_channels.push((stem(p), Some(sample_ref(p))));
                 }
                 crate::browser::BrowserItem::Instrument(d) => out.new_instruments.push(d.clone()),
+                crate::browser::BrowserItem::Midi(_) => {}
             }
         }
 
