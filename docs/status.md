@@ -488,4 +488,4 @@ Windows Installer не сравнивает).
 | Пункт | Статус | Артефакт / комментарий |
 |---|---|---|
 | Ctrl+C / Ctrl+X / Ctrl+V в Piano Roll в настоящем окне | PASS | `piano` тест `clipboard_events_copy_and_paste` подаёт события так, как их шлёт оконная система (Copy, Cut, Paste с текстом, без нажатий клавиш). Причина: Ctrl+V доходил до программы только при тексте в системном буфере, а копирование нот туда ничего не писало; тесты 0.2.7 подавали нажатия клавиш и этого не видели |
-| Windows MSI 0.2.7.1 | — | сборка в workflow `Release` после слияния |
+| Windows MSI 0.2.7.1 | PASS | сборка, установка, проверка версии в workflow `Release`; https://github.com/MertzZzzz/jdance/releases/tag/v0.2.7.1 |
