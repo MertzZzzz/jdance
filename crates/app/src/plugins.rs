@@ -224,8 +224,8 @@ struct Live {
     processor: Option<Vst3Processor>,
     /// Engine generation the processor was sent to.
     generation: u64,
-    /// The plugin asked for a restart (latency or bus change): recreate
-    /// it with its current state.
+    /// The plugin asked for a restart (bus change or reload): recreate it
+    /// with its current state.
     restart: bool,
 }
 
@@ -455,21 +455,34 @@ impl PluginHost {
     }
 
     /// Forwards plugin events (GUI edits, output parameters). Returns
-    /// whether a plugin needs a restart, which needs a recompile: a new
-    /// latency is read after reactivation and applied through a new
-    /// snapshot (PLG-035, PLG-051).
+    /// whether a recompile is needed: a new latency goes into a new
+    /// snapshot with the same instance (PLG-035, PLG-051); a reload
+    /// recreates the instance.
     pub fn poll(&mut self) -> bool {
         use jdance_plugin_api::PluginEvent::{LatencyChanged, ReloadRequested};
-        let mut restart = false;
+        let mut recompile = false;
         for l in self.live.values_mut() {
             for e in l.controller.poll() {
-                if matches!(e, LatencyChanged | ReloadRequested) {
-                    l.restart = true;
-                    restart = true;
+                match e {
+                    // The same instance with its new latency: its editor
+                    // stays open and its sound is not interrupted. Some
+                    // plugins report a latency change on every edit.
+                    LatencyChanged => {
+                        let latency = l.controller.latency();
+                        if latency != l.latency {
+                            l.latency = latency;
+                            recompile = true;
+                        }
+                    }
+                    ReloadRequested => {
+                        l.restart = true;
+                        recompile = true;
+                    }
+                    _ => {}
                 }
             }
         }
-        restart
+        recompile
     }
 
     /// Opens or closes the plugin's own editor window. `Err` explains

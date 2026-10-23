@@ -4,8 +4,8 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_void};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::{Mutex, MutexGuard};
 use vst3::Steinberg::Vst::*;
 use vst3::Steinberg::*;
 use vst3::{Class, ComWrapper, Interface};
@@ -28,11 +28,46 @@ unsafe fn query<C: Class + 'static>(
     unsafe { ((*(*ptr).vtbl).queryInterface)(ptr, iid as *const TUID, obj) }
 }
 
-/// `IHostApplication`: host name and message/attribute-list factory.
+/// `IHostApplication`: host name and message/attribute-list factory;
+/// `IPlugInterfaceSupport`: which optional interfaces the host offers
+/// (JUCE and others ask before using them).
 pub struct HostApp;
 
 impl Class for HostApp {
-    type Interfaces = (IHostApplication,);
+    type Interfaces = (IHostApplication, IPlugInterfaceSupport);
+}
+
+/// Host-side interfaces a plugin may ask about through
+/// `IPlugInterfaceSupport`.
+fn host_supports(iid: &vst3::com_scrape_types::Guid) -> bool {
+    [
+        IComponent::IID,
+        IAudioProcessor::IID,
+        IEditController::IID,
+        IConnectionPoint::IID,
+        IComponentHandler::IID,
+        IComponentHandler2::IID,
+        IUnitHandler::IID,
+        IProgress::IID,
+        IPlugView::IID,
+        IPlugFrame::IID,
+        IPlugViewContentScaleSupport::IID,
+    ]
+    .contains(iid)
+}
+
+impl IPlugInterfaceSupportTrait for HostApp {
+    unsafe fn isPlugInterfaceSupported(&self, iid: *const TUID) -> tresult {
+        if iid.is_null() {
+            return kInvalidArgument;
+        }
+        let id = unsafe { (*iid).map(|b| b as u8) };
+        if host_supports(&id) {
+            kResultTrue
+        } else {
+            kResultFalse
+        }
+    }
 }
 
 impl IHostApplicationTrait for HostApp {
@@ -121,7 +156,67 @@ impl ComponentHandler {
 }
 
 impl Class for ComponentHandler {
-    type Interfaces = (IComponentHandler,);
+    type Interfaces = (
+        IComponentHandler,
+        IComponentHandler2,
+        IUnitHandler,
+        IProgress,
+    );
+}
+
+/// Accepted and ignored: some plugins stop when the host does not offer
+/// these.
+impl IComponentHandler2Trait for ComponentHandler {
+    unsafe fn setDirty(&self, _state: TBool) -> tresult {
+        kResultOk
+    }
+
+    unsafe fn requestOpenEditor(&self, _name: FIDString) -> tresult {
+        kResultFalse
+    }
+
+    unsafe fn startGroupEdit(&self) -> tresult {
+        kResultOk
+    }
+
+    unsafe fn finishGroupEdit(&self) -> tresult {
+        kResultOk
+    }
+}
+
+impl IUnitHandlerTrait for ComponentHandler {
+    unsafe fn notifyUnitSelection(&self, _unit: UnitID) -> tresult {
+        kResultOk
+    }
+
+    unsafe fn notifyProgramListChange(&self, _list: ProgramListID, _program: i32) -> tresult {
+        // Program names may have changed: refresh like a title change.
+        self.restart
+            .fetch_or(RestartFlags_::kParamTitlesChanged as i32, Ordering::AcqRel);
+        kResultOk
+    }
+}
+
+impl IProgressTrait for ComponentHandler {
+    unsafe fn start(
+        &self,
+        _kind: IProgress_::ProgressType,
+        _description: *const tchar,
+        id: *mut IProgress_::ID,
+    ) -> tresult {
+        if !id.is_null() {
+            unsafe { *id = 1 };
+        }
+        kResultOk
+    }
+
+    unsafe fn update(&self, _id: IProgress_::ID, _value: ParamValue) -> tresult {
+        kResultOk
+    }
+
+    unsafe fn finish(&self, _id: IProgress_::ID) -> tresult {
+        kResultOk
+    }
 }
 
 impl IComponentHandlerTrait for ComponentHandler {
@@ -145,19 +240,25 @@ impl IComponentHandlerTrait for ComponentHandler {
 }
 
 /// `IMessage` for `IConnectionPoint` traffic between component and
-/// controller.
+/// controller. Locked rather than borrowed: plugins send messages from
+/// any thread, and a failed borrow would abort the program.
 pub struct Message {
-    id: RefCell<CString>,
+    id: Mutex<CString>,
     attributes: ComWrapper<AttributeList>,
 }
 
 impl Default for Message {
     fn default() -> Self {
         Self {
-            id: RefCell::new(CString::default()),
+            id: Mutex::new(CString::default()),
             attributes: ComWrapper::new(AttributeList::default()),
         }
     }
+}
+
+/// The guard even after a panic elsewhere: these are plain data.
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 impl Class for Message {
@@ -166,12 +267,13 @@ impl Class for Message {
 
 impl IMessageTrait for Message {
     unsafe fn getMessageID(&self) -> FIDString {
-        self.id.borrow().as_ptr()
+        // Stays valid until the ID is replaced (the CString's heap buffer).
+        lock(&self.id).as_ptr()
     }
 
     unsafe fn setMessageID(&self, id: FIDString) {
         if !id.is_null() {
-            *self.id.borrow_mut() = unsafe { CStr::from_ptr(id) }.to_owned();
+            *lock(&self.id) = unsafe { CStr::from_ptr(id) }.to_owned();
         }
     }
 
@@ -191,7 +293,7 @@ enum Attr {
 
 #[derive(Default)]
 pub struct AttributeList {
-    map: RefCell<HashMap<CString, Attr>>,
+    map: Mutex<HashMap<CString, Attr>>,
 }
 
 impl Class for AttributeList {
@@ -207,12 +309,12 @@ impl IAttributeListTrait for AttributeList {
         let Some(k) = (unsafe { key(id) }) else {
             return kInvalidArgument;
         };
-        self.map.borrow_mut().insert(k, Attr::Int(value));
+        lock(&self.map).insert(k, Attr::Int(value));
         kResultOk
     }
 
     unsafe fn getInt(&self, id: IAttributeList_::AttrID, value: *mut i64) -> tresult {
-        match unsafe { key(id) }.and_then(|k| match self.map.borrow().get(&k) {
+        match unsafe { key(id) }.and_then(|k| match lock(&self.map).get(&k) {
             Some(Attr::Int(v)) => Some(*v),
             _ => None,
         }) {
@@ -228,12 +330,12 @@ impl IAttributeListTrait for AttributeList {
         let Some(k) = (unsafe { key(id) }) else {
             return kInvalidArgument;
         };
-        self.map.borrow_mut().insert(k, Attr::Float(value));
+        lock(&self.map).insert(k, Attr::Float(value));
         kResultOk
     }
 
     unsafe fn getFloat(&self, id: IAttributeList_::AttrID, value: *mut f64) -> tresult {
-        match unsafe { key(id) }.and_then(|k| match self.map.borrow().get(&k) {
+        match unsafe { key(id) }.and_then(|k| match lock(&self.map).get(&k) {
             Some(Attr::Float(v)) => Some(*v),
             _ => None,
         }) {
@@ -262,7 +364,7 @@ impl IAttributeListTrait for AttributeList {
             }
             i += 1;
         }
-        self.map.borrow_mut().insert(k, Attr::Str(s));
+        lock(&self.map).insert(k, Attr::Str(s));
         kResultOk
     }
 
@@ -275,7 +377,7 @@ impl IAttributeListTrait for AttributeList {
         let Some(k) = (unsafe { key(id) }) else {
             return kInvalidArgument;
         };
-        let map = self.map.borrow();
+        let map = lock(&self.map);
         let Some(Attr::Str(s)) = map.get(&k) else {
             return kResultFalse;
         };
@@ -305,7 +407,7 @@ impl IAttributeListTrait for AttributeList {
         } else {
             unsafe { std::slice::from_raw_parts(data as *const u8, size as usize) }.to_vec()
         };
-        self.map.borrow_mut().insert(k, Attr::Bin(bytes));
+        lock(&self.map).insert(k, Attr::Bin(bytes));
         kResultOk
     }
 
@@ -318,7 +420,7 @@ impl IAttributeListTrait for AttributeList {
         let Some(k) = (unsafe { key(id) }) else {
             return kInvalidArgument;
         };
-        let map = self.map.borrow();
+        let map = lock(&self.map);
         let Some(Attr::Bin(b)) = map.get(&k) else {
             return kResultFalse;
         };

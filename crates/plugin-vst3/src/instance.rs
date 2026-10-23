@@ -315,7 +315,7 @@ pub fn instantiate(
         component_initialized: false,
         component,
         handler: ComWrapper::new(ComponentHandler::default()),
-        host: ComWrapper::new(HostApp),
+        host: module.host().clone(),
         module: Arc::clone(module),
     };
     unsafe {
@@ -352,6 +352,11 @@ pub fn instantiate(
             }
         };
         core.controller = Some(controller.clone());
+        // The handler before any state: plugins report edits and restarts
+        // while they load, and some keep a null handler otherwise.
+        if let Some(h) = core.handler.as_com_ref::<IComponentHandler>() {
+            controller.setComponentHandler(h.as_ptr());
+        }
 
         // State: component first, then its copy to the controller.
         let component_state = match state {
@@ -377,9 +382,6 @@ pub fn instantiate(
             let st = stream(&s.controller);
             controller.setState(stream_ptr(&st));
         }
-        if let Some(h) = core.handler.as_com_ref::<IComponentHandler>() {
-            controller.setComponentHandler(h.as_ptr());
-        }
 
         let processor = core
             .component
@@ -387,7 +389,9 @@ pub fn instantiate(
             .ok_or_else(|| PluginError::Unsupported("no IAudioProcessor".into()))?;
         core.processor = Some(processor.clone());
         let buses = configure_buses(&core.component, &processor)?;
-        if processor.canProcessSampleSize(SymbolicSampleSizes_::kSample32 as i32) != kResultOk {
+        // Only a clear "no" counts: some plugins answer kNotImplemented
+        // and process 32-bit floats all the same.
+        if processor.canProcessSampleSize(SymbolicSampleSizes_::kSample32 as i32) == kResultFalse {
             return Err(PluginError::Unsupported(
                 "no 32-bit float processing".into(),
             ));
@@ -403,7 +407,12 @@ pub fn instantiate(
             maxSamplesPerBlock: max_block as i32,
             sampleRate: setup.sample_rate,
         };
-        check(processor.setupProcessing(&mut ps), "setupProcessing")?;
+        // Some plugins answer kNotImplemented or kResultFalse and work;
+        // a plugin that really cannot run refuses `setActive` next.
+        let setup_result = processor.setupProcessing(&mut ps);
+        if setup_result == kInvalidArgument {
+            check(setup_result, "setupProcessing")?;
+        }
         check(core.component.setActive(1), "setActive")?;
         core.active = true;
         let latency = processor.getLatencySamples();
@@ -496,6 +505,9 @@ pub struct Vst3Processor {
     in_changes: ComWrapper<ParamChanges>,
     out_changes: ComWrapper<ParamChanges>,
     events: ComWrapper<EventList>,
+    /// Events the plugin sends (ignored); some plugins write here without
+    /// checking for null.
+    out_events: ComWrapper<EventList>,
     context: ProcessContext,
     continuous: i64,
     from_ui: rtrb::Consumer<(u32, f64)>,
@@ -552,6 +564,7 @@ impl Vst3Processor {
             in_changes: ComWrapper::new(ParamChanges::new()),
             out_changes: ComWrapper::new(ParamChanges::new()),
             events: ComWrapper::new(EventList::new()),
+            out_events: ComWrapper::new(EventList::new()),
             context: unsafe { std::mem::zeroed() },
             continuous: 0,
             from_ui,
@@ -695,12 +708,16 @@ impl Vst3Processor {
                 .events
                 .as_com_ref::<IEventList>()
                 .map_or(std::ptr::null_mut(), |r| r.as_ptr()),
-            outputEvents: std::ptr::null_mut(),
+            outputEvents: self
+                .out_events
+                .as_com_ref::<IEventList>()
+                .map_or(std::ptr::null_mut(), |r| r.as_ptr()),
             processContext: &mut self.context,
         };
         let ok = unsafe { self.processor.process(&mut data) } == kResultOk;
         self.in_changes.clear();
         self.events.clear();
+        self.out_events.clear();
         let to_ui = &mut self.to_ui;
         self.out_changes.for_each_last(|id, v| {
             // A full queue drops the update (RT-011); the next one wins.
@@ -835,6 +852,16 @@ impl Vst3Controller {
     pub fn open_editor(&self, title: &str) -> Result<Option<crate::Vst3Editor>, PluginError> {
         crate::Vst3Editor::open(&self.controller, self.core.clone(), title)
     }
+
+    /// The plugin's latency now. After `LatencyChanged` the host reads it
+    /// here and keeps the instance (and its open editor) instead of
+    /// recreating it; plugins report the new value at once.
+    pub fn latency(&self) -> u32 {
+        self.core
+            .processor
+            .as_ref()
+            .map_or(0, |p| unsafe { p.getLatencySamples() })
+    }
 }
 
 impl PluginController for Vst3Controller {
@@ -889,6 +916,10 @@ impl PluginController for Vst3Controller {
 
     fn poll(&mut self) -> Vec<PluginEvent> {
         let mut out = self.core.handler.take_events();
+        if out.contains(&PluginEvent::ParamsChanged) {
+            // Titles, ranges or the parameter list itself changed.
+            self.params = unsafe { read_params(&self.controller) };
+        }
         for e in &out {
             // Edits in the plugin's GUI go to the processor (PLG-042).
             if let PluginEvent::ParamChanged { id, value } = *e {

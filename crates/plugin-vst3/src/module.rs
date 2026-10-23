@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Loading a VST3 module and reading its factory (PLG-021, PLG-030 step 1).
 
-use crate::com::cstring;
+use crate::com::{HostApp, cstring};
 use crate::uid;
 use jdance_plugin_api::{PluginDescriptor, PluginError, PluginFormat, PluginKind, PluginRef};
 use std::ffi::c_void;
 use std::mem::ManuallyDrop;
 use std::path::{Path, PathBuf};
-use vst3::ComPtr;
 use vst3::Steinberg::*;
+use vst3::{ComPtr, ComWrapper};
 
 /// Category of processor classes (`kVstAudioEffectClass`).
 pub const AUDIO_EFFECT_CLASS: &str = "Audio Module Class";
@@ -93,6 +93,9 @@ pub fn binary_path(bundle: &Path) -> Result<PathBuf, PluginError> {
 /// instance created from it (PLG-030 step 12): instances hold an `Arc`.
 pub struct Vst3Module {
     factory: ManuallyDrop<ComPtr<IPluginFactory>>,
+    /// Given to the factory (`IPluginFactory3::setHostContext`) and to
+    /// every instance; outlives the factory.
+    host: ComWrapper<HostApp>,
     exit: Option<ExitFn>,
     #[cfg(target_os = "macos")]
     bundle_ref: *mut c_void,
@@ -164,8 +167,18 @@ impl Vst3Module {
         let get = unsafe { library.get::<GetFactory>(b"GetPluginFactory\0") }.map_err(load_err)?;
         let factory = unsafe { ComPtr::from_raw(get()) }
             .ok_or_else(|| PluginError::Load("GetPluginFactory returned null".into()))?;
+        // Plugins built with JUCE and others take the host from the
+        // factory before creating anything.
+        let host = ComWrapper::new(HostApp);
+        if let (Some(f3), Some(h)) = (
+            factory.cast::<IPluginFactory3>(),
+            host.as_com_ref::<FUnknown>(),
+        ) {
+            unsafe { f3.setHostContext(h.as_ptr()) };
+        }
         Ok(Self {
             factory: ManuallyDrop::new(factory),
+            host,
             exit,
             #[cfg(target_os = "macos")]
             bundle_ref,
@@ -180,6 +193,10 @@ impl Vst3Module {
 
     pub(crate) fn factory(&self) -> &ComPtr<IPluginFactory> {
         &self.factory
+    }
+
+    pub(crate) fn host(&self) -> &ComWrapper<HostApp> {
+        &self.host
     }
 
     /// Processor classes of the module (PLG-022 step 3).
@@ -255,6 +272,10 @@ impl Vst3Module {
 impl Drop for Vst3Module {
     fn drop(&mut self) {
         unsafe {
+            // The factory lets go of the host before either is released.
+            if let Some(f3) = self.factory.cast::<IPluginFactory3>() {
+                f3.setHostContext(std::ptr::null_mut());
+            }
             ManuallyDrop::drop(&mut self.factory);
             if let Some(exit) = self.exit {
                 exit();

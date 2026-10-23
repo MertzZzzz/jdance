@@ -75,7 +75,8 @@ fn scan_lists_classes_and_kinds() {
             "JD Test Logger",
             "JD Test Synth",
             "JD Test Drums",
-            "JD Test Mono"
+            "JD Test Mono",
+            "JD Test Strict"
         ]
     );
     for x in &d {
@@ -100,7 +101,7 @@ fn scan_lists_classes_and_kinds() {
 fn out_of_process_scan_and_blocklist_reasons() {
     let scanner = Path::new(env!("CARGO_BIN_EXE_jdance-plugin-scanner"));
     match scan_out_of_process(scanner, bundle(), Duration::from_secs(30)) {
-        ScanOutcome::Ok(d) => assert_eq!(d.len(), 7),
+        ScanOutcome::Ok(d) => assert_eq!(d.len(), 8),
         f => panic!("{f:?}"),
     }
     let missing = bundle().with_file_name("Missing.vst3");
@@ -370,4 +371,29 @@ fn a_mono_effect_takes_the_mix_and_feeds_both_sides() {
         assert!((a - mix).abs() < 1e-6, "{i}: {a} vs {mix}");
         assert_eq!(a, b);
     }
+}
+
+/// A plugin that asks a lot of its host (as JUCE plugins and others do)
+/// opens, processes and keeps its instance when its latency changes.
+#[test]
+fn a_picky_plugin_gets_what_it_needs_from_the_host() {
+    let (mut p, mut c) = open("JD Test Strict", None);
+    let report = String::from_utf8(c.state().unwrap().controller).unwrap();
+    assert_eq!(
+        report, "factory=1 host=1 iface=1 handler2=1 handler_first=1 message=1",
+        "host context for factory and instance, IPlugInterfaceSupport, \
+         IComponentHandler2, the handler before the state, a message sent \
+         from another thread"
+    );
+    // It refuses to process without an output event list: the gain shows
+    // that it ran.
+    c.set_param_normalized(0, 0.25);
+    let input = ramp(256);
+    let (l, _) = run(&mut p, &input, None);
+    let half: Vec<f32> = input.iter().map(|x| x * 0.5).collect();
+    assert_eq!(l, half);
+    // Its latency follows the gain; the change is reported and read from
+    // the same instance.
+    assert!(c.poll().contains(&PluginEvent::LatencyChanged));
+    assert_eq!(c.latency(), 32);
 }

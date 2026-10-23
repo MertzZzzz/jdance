@@ -18,6 +18,14 @@
 //!   instruments; it accepts only its own bus arrangement.
 //! - **JD Test Mono**: gain with one mono input and one mono output; it
 //!   refuses stereo.
+//! - **JD Test Strict**: gain that behaves like picky real plugins: it
+//!   needs the host context (factory and `initialize`), checks
+//!   `IPlugInterfaceSupport` and `IComponentHandler2`, sends a message
+//!   from another thread when activated, refuses to process without an
+//!   output event list, reports a latency that follows the gain (and asks
+//!   for a restart when it changes), and has a resizable editor with
+//!   content scaling that changes its size while attaching without
+//!   asking. Its controller state is a report of what the host did.
 //!
 //! `JDANCE_TEST_FX_FAULT=crash|hang` makes `GetPluginFactory` abort or
 //! never return, for scanner blocklist and timeout tests.
@@ -37,7 +45,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use vst3::Steinberg::Vst::*;
 use vst3::Steinberg::*;
-use vst3::{Class, ComPtr, ComRef, ComWrapper, uid};
+use vst3::{Class, ComPtr, ComRef, ComWrapper, Interface, uid};
 
 /// Latency of the latency class, in samples.
 pub const LATENCY: usize = 64;
@@ -60,9 +68,10 @@ enum Mode {
     Synth = 4,
     Drums = 5,
     Mono = 6,
+    Strict = 7,
 }
 
-const MODES: [Mode; 7] = [
+const MODES: [Mode; 8] = [
     Mode::Gain,
     Mode::Latency,
     Mode::Sidechain,
@@ -70,7 +79,19 @@ const MODES: [Mode; 7] = [
     Mode::Synth,
     Mode::Drums,
     Mode::Mono,
+    Mode::Strict,
 ];
+
+/// The factory got a host context that is an `IHostApplication`.
+static FACTORY_HOST: AtomicBool = AtomicBool::new(false);
+
+/// Latency of the strict class for a gain value.
+pub fn strict_latency(gain: f64) -> u32 {
+    (gain * 128.0).round() as u32
+}
+
+/// Message the strict component sends its controller when activated.
+const HELLO: &std::ffi::CStr = c"jd-hello";
 
 /// Output buses of the drums class.
 const DRUM_OUTS: [SpeakerArrangement; 5] = [
@@ -91,6 +112,7 @@ impl Mode {
             Mode::Synth => "JD Test Synth",
             Mode::Drums => "JD Test Drums",
             Mode::Mono => "JD Test Mono",
+            Mode::Strict => "JD Test Strict",
         }
     }
 
@@ -106,7 +128,12 @@ impl Mode {
         match self {
             Mode::Gain => &[P_GAIN, P_BYPASS],
             Mode::Logger => &[P_GAIN, P_FIXED, P_OUT],
-            Mode::Latency | Mode::Sidechain | Mode::Synth | Mode::Drums | Mode::Mono => &[P_GAIN],
+            Mode::Latency
+            | Mode::Sidechain
+            | Mode::Synth
+            | Mode::Drums
+            | Mode::Mono
+            | Mode::Strict => &[P_GAIN],
         }
     }
 }
@@ -181,6 +208,10 @@ struct Processor {
     bypass: AtomicBool,
     sidechain_active: AtomicBool,
     dsp: Mutex<Dsp>,
+    /// Strict class: the host from `initialize` and the controller's
+    /// connection point.
+    host: Mutex<Option<ComPtr<IHostApplication>>>,
+    peer: Mutex<Option<ComPtr<IConnectionPoint>>>,
 }
 
 impl Class for Processor {
@@ -201,7 +232,49 @@ impl Processor {
                 voices: Vec::with_capacity(32),
                 sample_rate: 48_000.0,
             }),
+            host: Mutex::new(None),
+            peer: Mutex::new(None),
         }
+    }
+
+    /// Strict class: a message made by the host, sent from another
+    /// thread (as plugins do from their worker threads).
+    fn send_hello(&self) {
+        let host = self.host.lock().ok().and_then(|h| h.clone());
+        let peer = self.peer.lock().ok().and_then(|p| p.clone());
+        let (Some(host), Some(peer)) = (host, peer) else {
+            return;
+        };
+        struct Send2(ComPtr<IHostApplication>, ComPtr<IConnectionPoint>);
+        unsafe impl Send for Send2 {}
+        let both = Send2(host, peer);
+        let t = std::thread::spawn(move || {
+            let Send2(host, peer) = both;
+            let mut cid = IMessage::IID;
+            let mut iid = IMessage::IID;
+            let mut obj: *mut c_void = std::ptr::null_mut();
+            let r = unsafe {
+                host.createInstance(
+                    &mut cid as *mut _ as *mut TUID,
+                    &mut iid as *mut _ as *mut TUID,
+                    &mut obj,
+                )
+            };
+            if r != kResultOk {
+                return;
+            }
+            let Some(msg) = (unsafe { ComPtr::from_raw(obj as *mut IMessage) }) else {
+                return;
+            };
+            unsafe {
+                msg.setMessageID(HELLO.as_ptr());
+                if let Some(a) = ComRef::from_raw(msg.getAttributes()) {
+                    a.setInt(c"n".as_ptr(), 7);
+                }
+                peer.notify(msg.as_ptr());
+            }
+        });
+        let _ = t.join();
     }
 
     fn gain(&self) -> f64 {
@@ -322,7 +395,17 @@ impl Processor {
 }
 
 impl IPluginBaseTrait for Processor {
-    unsafe fn initialize(&self, _context: *mut FUnknown) -> tresult {
+    unsafe fn initialize(&self, context: *mut FUnknown) -> tresult {
+        if self.mode == Mode::Strict {
+            let host =
+                unsafe { ComRef::from_raw(context) }.and_then(|c| c.cast::<IHostApplication>());
+            let Some(host) = host else {
+                return kResultFalse;
+            };
+            if let Ok(mut h) = self.host.lock() {
+                *h = Some(host);
+            }
+        }
         kResultOk
     }
 
@@ -333,14 +416,21 @@ impl IPluginBaseTrait for Processor {
 
 impl IConnectionPointTrait for Processor {
     unsafe fn connect(&self, other: *mut IConnectionPoint) -> tresult {
-        if other.is_null() {
-            kInvalidArgument
-        } else {
-            kResultOk
+        let Some(other) = (unsafe { ComRef::from_raw(other) }) else {
+            return kInvalidArgument;
+        };
+        if self.mode == Mode::Strict
+            && let Ok(mut p) = self.peer.lock()
+        {
+            *p = Some(other.to_com_ptr());
         }
+        kResultOk
     }
 
     unsafe fn disconnect(&self, _other: *mut IConnectionPoint) -> tresult {
+        if let Ok(mut p) = self.peer.lock() {
+            p.take();
+        }
         kResultOk
     }
 
@@ -447,10 +537,13 @@ impl IComponentTrait for Processor {
         kResultOk
     }
 
-    unsafe fn setActive(&self, _state: TBool) -> tresult {
+    unsafe fn setActive(&self, state: TBool) -> tresult {
         if let Ok(mut d) = self.dsp.lock() {
             d.delay = [[0.0; LATENCY]; 2];
             d.pos = 0;
+        }
+        if self.mode == Mode::Strict && state != 0 {
+            self.send_hello();
         }
         kResultOk
     }
@@ -535,10 +628,10 @@ impl IAudioProcessorTrait for Processor {
     }
 
     unsafe fn getLatencySamples(&self) -> u32 {
-        if self.mode == Mode::Latency {
-            LATENCY as u32
-        } else {
-            0
+        match self.mode {
+            Mode::Latency => LATENCY as u32,
+            Mode::Strict => strict_latency(self.gain()),
+            _ => 0,
         }
     }
 
@@ -559,6 +652,9 @@ impl IAudioProcessorTrait for Processor {
 
     unsafe fn process(&self, data: *mut ProcessData) -> tresult {
         let data = unsafe { &*data };
+        if self.mode == Mode::Strict && data.outputEvents.is_null() {
+            return kResultFalse;
+        }
         let Ok(mut dsp) = self.dsp.lock() else {
             return kInternalError;
         };
@@ -658,6 +754,33 @@ struct Controller {
     values: RefCell<[f64; 4]>,
     handler: RefCell<Option<ComPtr<IComponentHandler>>>,
     connected: Cell<bool>,
+    /// What the host did, for the strict class's report.
+    report: Mutex<Report>,
+}
+
+/// Strict class: what the host did, as its controller state.
+#[derive(Default, Clone, Copy)]
+struct Report {
+    host: bool,
+    interface_support: bool,
+    handler2: bool,
+    handler_before_state: bool,
+    message: bool,
+}
+
+impl Report {
+    fn text(self) -> String {
+        let b = |x: bool| u8::from(x);
+        format!(
+            "factory={} host={} iface={} handler2={} handler_first={} message={}",
+            b(FACTORY_HOST.load(Ordering::Relaxed)),
+            b(self.host),
+            b(self.interface_support),
+            b(self.handler2),
+            b(self.handler_before_state),
+            b(self.message)
+        )
+    }
 }
 
 impl Class for Controller {
@@ -671,6 +794,13 @@ impl Controller {
             values: RefCell::new([0.5, 0.25, 0.0, 0.0]),
             handler: RefCell::new(None),
             connected: Cell::new(false),
+            report: Mutex::new(Report::default()),
+        }
+    }
+
+    fn note(&self, f: impl FnOnce(&mut Report)) {
+        if let Ok(mut r) = self.report.lock() {
+            f(&mut r);
         }
     }
 
@@ -680,7 +810,24 @@ impl Controller {
 }
 
 impl IPluginBaseTrait for Controller {
-    unsafe fn initialize(&self, _context: *mut FUnknown) -> tresult {
+    unsafe fn initialize(&self, context: *mut FUnknown) -> tresult {
+        if self.mode == Mode::Strict {
+            let Some(ctx) = (unsafe { ComRef::from_raw(context) }) else {
+                return kResultFalse;
+            };
+            let host = ctx.cast::<IHostApplication>().is_some();
+            let iface = ctx.cast::<IPlugInterfaceSupport>().is_some_and(|s| unsafe {
+                s.isPlugInterfaceSupported(&IComponentHandler2::IID as *const _ as *const TUID)
+                    == kResultTrue
+            });
+            self.note(|r| {
+                r.host = host;
+                r.interface_support = iface;
+            });
+            if !host {
+                return kResultFalse;
+            }
+        }
         kResultOk
     }
 
@@ -701,13 +848,27 @@ impl IConnectionPointTrait for Controller {
         kResultOk
     }
 
-    unsafe fn notify(&self, _message: *mut IMessage) -> tresult {
+    unsafe fn notify(&self, message: *mut IMessage) -> tresult {
+        let Some(m) = (unsafe { ComRef::from_raw(message) }) else {
+            return kInvalidArgument;
+        };
+        let id = unsafe { m.getMessageID() };
+        if !id.is_null() && unsafe { std::ffi::CStr::from_ptr(id) } == HELLO {
+            let mut n = 0;
+            let attrs = unsafe { ComRef::from_raw(m.getAttributes()) };
+            if let Some(a) = attrs {
+                unsafe { a.getInt(c"n".as_ptr(), &mut n) };
+            }
+            self.note(|r| r.message = n == 7);
+        }
         kResultOk
     }
 }
 
 impl IEditControllerTrait for Controller {
     unsafe fn setComponentState(&self, state: *mut IBStream) -> tresult {
+        let has_handler = self.handler.borrow().is_some();
+        self.note(|r| r.handler_before_state = has_handler);
         match unsafe { read_component_gain(state) } {
             Some(g) => {
                 self.values.borrow_mut()[P_GAIN as usize] = g;
@@ -718,6 +879,9 @@ impl IEditControllerTrait for Controller {
     }
 
     unsafe fn setState(&self, state: *mut IBStream) -> tresult {
+        if self.mode == Mode::Strict {
+            return kResultOk;
+        }
         let mut buf = [0u8; 12];
         if !unsafe { read_exact(state, &mut buf) } || &buf[..4] != CTRL_MAGIC {
             return kResultFalse;
@@ -728,6 +892,14 @@ impl IEditControllerTrait for Controller {
     }
 
     unsafe fn getState(&self, state: *mut IBStream) -> tresult {
+        if self.mode == Mode::Strict {
+            let text = self.report.lock().map(|r| r.text()).unwrap_or_default();
+            return if unsafe { write_all(state, text.as_bytes()) } {
+                kResultOk
+            } else {
+                kResultFalse
+            };
+        }
         let mut out = CTRL_MAGIC.to_vec();
         out.extend_from_slice(&self.values.borrow()[P_FIXED as usize].to_le_bytes());
         if unsafe { write_all(state, &out) } {
@@ -826,21 +998,39 @@ impl IEditControllerTrait for Controller {
         if !self.has(id) {
             return kInvalidArgument;
         }
-        self.values.borrow_mut()[id as usize] = value;
+        let old = std::mem::replace(&mut self.values.borrow_mut()[id as usize], value);
+        // The strict class's latency follows the gain.
+        if self.mode == Mode::Strict && id == P_GAIN && strict_latency(old) != strict_latency(value)
+        {
+            let handler = self.handler.borrow().clone();
+            if let Some(h) = handler {
+                unsafe { h.restartComponent(RestartFlags_::kLatencyChanged as i32) };
+            }
+        }
         kResultOk
     }
 
     unsafe fn setComponentHandler(&self, handler: *mut IComponentHandler) -> tresult {
-        *self.handler.borrow_mut() = unsafe { ComRef::from_raw(handler) }.map(|h| h.to_com_ptr());
+        let handler = unsafe { ComRef::from_raw(handler) }.map(|h| h.to_com_ptr());
+        let h2 = handler
+            .as_ref()
+            .is_some_and(|h| h.cast::<IComponentHandler2>().is_some());
+        if handler.is_some() {
+            self.note(|r| r.handler2 = h2);
+        }
+        *self.handler.borrow_mut() = handler;
         kResultOk
     }
 
-    /// Only the gain class has an editor.
+    /// Only the gain and strict classes have an editor.
     unsafe fn createView(&self, _name: FIDString) -> *mut IPlugView {
-        if self.mode != Mode::Gain {
+        if !matches!(self.mode, Mode::Gain | Mode::Strict) {
             return std::ptr::null_mut();
         }
-        let view = ComWrapper::new(View::default());
+        let view = ComWrapper::new(View {
+            strict: self.mode == Mode::Strict,
+            ..View::default()
+        });
         let Some(ptr) = view.to_com_ptr::<IPlugView>() else {
             return std::ptr::null_mut();
         };
@@ -855,6 +1045,11 @@ impl IEditControllerTrait for Controller {
 pub const INITIAL_SIZE: (i32, i32) = (400, 300);
 pub const ATTACHED_SIZE: (i32, i32) = (480, 320);
 pub const TIMER_SIZE: (i32, i32) = (500, 330);
+/// Strict editor: its size at scale 1 once attached (it changes to it
+/// without `resizeView`, as some plugins do), and the smallest size it
+/// accepts from a user resize.
+pub const STRICT_SIZE: (i32, i32) = (520, 340);
+pub const STRICT_MIN: (i32, i32) = (260, 170);
 
 /// Test editor: draws nothing; exercises attach, resize requests and the
 /// Linux run loop.
@@ -863,6 +1058,8 @@ struct View {
     size: Cell<(i32, i32)>,
     frame: RefCell<Option<ComPtr<IPlugFrame>>>,
     attached: Cell<bool>,
+    strict: bool,
+    scale: Cell<f32>,
 }
 
 impl Default for View {
@@ -872,18 +1069,46 @@ impl Default for View {
             size: Cell::new(INITIAL_SIZE),
             frame: RefCell::new(None),
             attached: Cell::new(false),
+            strict: false,
+            scale: Cell::new(1.0),
         }
     }
 }
 
 #[cfg(not(target_os = "linux"))]
 impl Class for View {
-    type Interfaces = (IPlugView,);
+    type Interfaces = (IPlugView, IPlugViewContentScaleSupport);
 }
 
 #[cfg(target_os = "linux")]
 impl Class for View {
-    type Interfaces = (IPlugView, Linux::ITimerHandler);
+    type Interfaces = (
+        IPlugView,
+        IPlugViewContentScaleSupport,
+        Linux::ITimerHandler,
+    );
+}
+
+fn scaled((w, h): (i32, i32), s: f32) -> (i32, i32) {
+    ((w as f32 * s).round() as i32, (h as f32 * s).round() as i32)
+}
+
+/// Only the strict editor scales; the gain editor answers as a view
+/// without scaling would.
+impl IPlugViewContentScaleSupportTrait for View {
+    unsafe fn setContentScaleFactor(
+        &self,
+        factor: IPlugViewContentScaleSupport_::ScaleFactor,
+    ) -> tresult {
+        if !self.strict || factor.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
+            return kResultFalse;
+        }
+        self.scale.set(factor);
+        if self.attached.get() {
+            self.request(scaled(STRICT_SIZE, factor));
+        }
+        kResultOk
+    }
 }
 
 impl View {
@@ -925,6 +1150,11 @@ impl IPlugViewTrait for View {
             return kInvalidArgument;
         }
         self.attached.set(true);
+        if self.strict {
+            // A new size without asking the frame.
+            self.size.set(scaled(STRICT_SIZE, self.scale.get()));
+            return kResultOk;
+        }
         self.request(ATTACHED_SIZE);
         #[cfg(target_os = "linux")]
         {
@@ -1005,18 +1235,29 @@ impl IPlugViewTrait for View {
     }
 
     unsafe fn canResize(&self) -> tresult {
-        kResultFalse
+        if self.strict {
+            kResultTrue
+        } else {
+            kResultFalse
+        }
     }
 
-    unsafe fn checkSizeConstraint(&self, _rect: *mut ViewRect) -> tresult {
-        kResultFalse
+    unsafe fn checkSizeConstraint(&self, rect: *mut ViewRect) -> tresult {
+        if !self.strict || rect.is_null() {
+            return kResultFalse;
+        }
+        let r = unsafe { &mut *rect };
+        let (mw, mh) = scaled(STRICT_MIN, self.scale.get());
+        r.right = r.left + (r.right - r.left).max(mw);
+        r.bottom = r.top + (r.bottom - r.top).max(mh);
+        kResultTrue
     }
 }
 
 struct Factory;
 
 impl Class for Factory {
-    type Interfaces = (IPluginFactory2,);
+    type Interfaces = (IPluginFactory3,);
 }
 
 /// Class index → (mode, is_controller).
@@ -1116,6 +1357,42 @@ impl IPluginFactory2Trait for Factory {
         copy_cstring("jdance tests", &mut info.vendor);
         copy_cstring("1.0.0", &mut info.version);
         copy_cstring("VST 3.8.0", &mut info.sdkVersion);
+        kResultOk
+    }
+}
+
+impl IPluginFactory3Trait for Factory {
+    unsafe fn getClassInfoUnicode(&self, index: i32, info: *mut PClassInfoW) -> tresult {
+        let mut i2: PClassInfo2 = unsafe { std::mem::zeroed() };
+        if unsafe { self.getClassInfo2(index, &mut i2) } != kResultOk {
+            return kInvalidArgument;
+        }
+        let Some((mode, _)) = class_at(index) else {
+            return kInvalidArgument;
+        };
+        let info = unsafe { &mut *info };
+        info.cid = i2.cid;
+        info.cardinality = i2.cardinality;
+        info.category = i2.category;
+        copy_wstring(mode.name(), &mut info.name);
+        info.classFlags = i2.classFlags;
+        info.subCategories = i2.subCategories;
+        copy_wstring("jdance tests", &mut info.vendor);
+        copy_wstring("1.0.0", &mut info.version);
+        copy_wstring("VST 3.8.0", &mut info.sdkVersion);
+        kResultOk
+    }
+
+    unsafe fn setHostContext(&self, context: *mut FUnknown) -> tresult {
+        let host = unsafe { ComRef::from_raw(context) }
+            .is_some_and(|c| c.cast::<IHostApplication>().is_some());
+        // Cleared again (null) before the module is released.
+        if host || context.is_null() {
+            FACTORY_HOST.store(
+                host || FACTORY_HOST.load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+        }
         kResultOk
     }
 }
