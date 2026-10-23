@@ -41,9 +41,9 @@ mod widgets;
 
 pub use host::{
     COUNT_IN_BARS, DirEntry, FinishedTake, Host, ImportedAudio, IndexStatus, InputDevice,
-    LatencyInfo, LibraryRoot, Listing, MeterReadings, MetronomeSettings, Notice, NoticeLevel,
-    PluginParamView, PluginPath, RecordingSettings, RecordingState, Recovery, SampleStatus,
-    StreamStatus, TransportMode, TransportStatus,
+    LatencyInfo, LibraryRoot, Listing, MeterReadings, MetronomeSettings, MidiNotes, Notice,
+    NoticeLevel, PluginParamView, PluginPath, RecordingSettings, RecordingState, Recovery,
+    SampleStatus, StreamStatus, TransportMode, TransportStatus,
 };
 
 use egui::Key;
@@ -134,11 +134,17 @@ struct ColorWindow {
     title: String,
 }
 
+/// Where an imported file's clip goes: lane (`None` = a new one), start
+/// tick, and the sampler that takes the file (spec 0.2.9 §1.2).
+type ImportTarget = (Option<LaneId>, u64, Option<ChannelId>);
+
 /// Which editor takes the editor keys (Ctrl+B, Ctrl+D, tools…).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KeyFocus {
     Playlist,
     PianoRoll,
+    /// The arrows walk the Browser's files (spec 0.2.9 §7).
+    Browser,
 }
 
 /// The plugin picker window: which plugins, and the mixer track an
@@ -274,8 +280,9 @@ pub struct JdanceApp<H: Host, S: ProjectStore> {
     /// Project path whose folders were checked for unfinished takes.
     recovery_checked: Option<Option<PathBuf>>,
     /// Audio imports in flight: ticket → where the clip goes (`None` =
-    /// add the file only).
-    pending_imports: std::collections::BTreeMap<u64, Option<(Option<LaneId>, u64)>>,
+    /// add the file only) and the sampler that gets the file as its clip
+    /// file (spec 0.2.9 §1.2; `None` = a new or found sampler).
+    pending_imports: std::collections::BTreeMap<u64, Option<ImportTarget>>,
     /// Audio channels just created by putting samples on the Playlist;
     /// the Channel Rack reveals them (ACH-018).
     new_channels: Vec<ChannelId>,
@@ -950,6 +957,102 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
         }
     }
 
+    /// A MIDI file's notes into the Piano Roll's channel and pattern
+    /// (spec 0.2.9 §6): at the caret for Ctrl+M, where it was dropped
+    /// otherwise; one undo step.
+    fn import_midi(&mut self, request: piano::MidiRequest, now: f64) {
+        let Some(roll) = &self.piano else {
+            return;
+        };
+        let (path, at) = match request {
+            piano::MidiRequest::Pick => {
+                let Some(p) = rfd::FileDialog::new()
+                    .add_filter("MIDI file", &["mid", "midi"])
+                    .pick_file()
+                else {
+                    return;
+                };
+                (p, roll.caret())
+            }
+            piano::MidiRequest::Drop { path, tick } => (path, tick),
+        };
+        let file = match self.host.read_midi(&path) {
+            Ok(f) => f,
+            Err(e) => {
+                self.notify(
+                    Notice::error(format!("Cannot read {}: {e}", path.display())),
+                    now,
+                );
+                return;
+            }
+        };
+        if file.notes.is_empty() {
+            self.notify(Notice::info("The MIDI file has no notes"), now);
+            return;
+        }
+        let Some(pattern) = self.project.pattern(self.current_pattern).cloned() else {
+            return;
+        };
+        let Some(roll) = &mut self.piano else {
+            return;
+        };
+        let channel = roll.channel;
+        let before = pattern.row(channel).map_or(0, |r| r.notes.len());
+        let Some(edit) = roll.insert_notes(&pattern, &file.notes, at) else {
+            self.notify(
+                Notice::info("The MIDI file's notes start past the longest pattern"),
+                now,
+            );
+            return;
+        };
+        self.apply(edit, false, now);
+        let after = self
+            .project
+            .pattern(pattern.id)
+            .and_then(|p| p.row(channel))
+            .map_or(0, |r| r.notes.len());
+        let dropped = file.dropped + file.notes.len().saturating_sub(after - before.min(after));
+        let mut text = format!(
+            "{} note(s) from {}",
+            after.saturating_sub(before),
+            playlist::display_name(&path)
+        );
+        if dropped > 0 {
+            text.push_str(&format!("; {dropped} past the longest pattern left out"));
+        }
+        if let Some(bpm) = file.tempo_bpm {
+            text.push_str(&format!(
+                " · the file's tempo ({bpm:.1} BPM) is not applied"
+            ));
+        }
+        self.notify(
+            if dropped > 0 {
+                Notice::warning(text)
+            } else {
+                Notice::info(text)
+            },
+            now,
+        );
+    }
+
+    /// The Stop button: ends a recording, playback, the Browser preview
+    /// and every tail, also when the transport already stands (spec 0.2.9
+    /// §5); stopped, it puts the caret at the start.
+    fn stop_pressed(&mut self, playing: bool, count_in: u32) {
+        if self.record_target.is_some() {
+            self.record_cancelled = count_in > 0;
+            self.host.stop_recording();
+        }
+        self.host.stop();
+        if !(playing || count_in > 0) {
+            if self.song_mode {
+                self.set_caret(0);
+            } else {
+                self.set_pattern_caret(0);
+            }
+        }
+    }
+
     /// Moves the caret (and the playhead in song mode) to `ticks`.
     fn set_caret(&mut self, ticks: u64) {
         self.caret = ticks;
@@ -1266,17 +1369,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 .on_hover_text("Stop and return to the caret; when already stopped, the caret goes to the start")
                 .clicked()
             {
-                if self.record_target.is_some() {
-                    self.record_cancelled = transport.count_in > 0;
-                    self.host.stop_recording();
-                }
-                if playing || transport.count_in > 0 {
-                    self.host.stop();
-                } else if self.song_mode {
-                    self.set_caret(0);
-                } else {
-                    self.set_pattern_caret(0);
-                }
+                self.stop_pressed(playing, transport.count_in);
             }
             let rec_state = self.host.recording_state();
             let counting = transport.count_in > 0;
@@ -1626,7 +1719,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 let dir = self.project_dir().map(Path::to_path_buf);
                 match self.host.import_audio(&path, dir.as_deref()) {
                     Some(t) => {
-                        self.pending_imports.insert(t, Some((lane, start)));
+                        self.pending_imports.insert(t, Some((lane, start, None)));
                         Ok(())
                     }
                     None => Err(jdance_commands::EditError::Arrangement(
@@ -1636,7 +1729,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             }
             A::Slice { clip, tick } => self.slice_clip(clip, tick),
             A::Open(id) => {
-                self.open_clip(id);
+                self.open_clip(id, now);
                 Ok(())
             }
             A::AutomateGain(id) => {
@@ -1710,16 +1803,44 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 // places its own instances (ACH-043).
                 let (asset, channel) = match source {
                     playlist::Source::Channel(ch) => {
-                        let a = p
-                            .channel(ch)
-                            .and_then(|c| c.audio_asset())
-                            .ok_or_else(gone)?;
+                        let c = p.channel(ch).ok_or_else(gone)?;
+                        let Some(a) = c.clip_asset_id() else {
+                            // A sampler without a clip file: its sample is
+                            // imported first, then placed (§1.2).
+                            let sample = c.sample().cloned().ok_or_else(|| {
+                                jdance_commands::EditError::Arrangement(
+                                    "only a sampler with a sample goes onto the Playlist".into(),
+                                )
+                            })?;
+                            let dir = self.project_dir().map(Path::to_path_buf);
+                            let path = match &dir {
+                                Some(d) if !Path::new(&sample.path).is_absolute() => {
+                                    d.join(&sample.path)
+                                }
+                                _ => PathBuf::from(&sample.path),
+                            };
+                            let lane = match edits.is_empty() {
+                                true => Some(lane),
+                                // The new lane comes with the import.
+                                false => None,
+                            };
+                            return match self.host.import_audio(&path, dir.as_deref()) {
+                                Some(t) => {
+                                    self.pending_imports
+                                        .insert(t, Some((lane, start, Some(ch))));
+                                    Ok(())
+                                }
+                                None => Err(jdance_commands::EditError::Arrangement(
+                                    "audio import is not available".into(),
+                                )),
+                            };
+                        };
                         (p.asset(a).cloned().ok_or_else(gone)?, ch)
                     }
                     playlist::Source::Asset(id) => {
                         let asset = p.asset(id).cloned().ok_or_else(gone)?;
                         let mut plan = audio_channels::ChannelPlan::new();
-                        let ch = plan.channel_for(p, &asset, &mut edits);
+                        let ch = plan.sampler_for(p, &asset, &mut edits);
                         self.new_channels.extend(plan.created());
                         (asset, ch)
                     }
@@ -1731,7 +1852,10 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                     let cid = ClipId(p.ids.next());
                     ids.push(cid);
                     let mut clip = audio_channels::audio_clip(cid, lane, channel, &asset, 0);
-                    clip.start = first + k * clip.length(&asset, p.timebase_rate);
+                    let len = p
+                        .audio_clip_len(&clip)
+                        .unwrap_or_else(|| clip.length(&asset, p.timebase_rate, 1.0));
+                    clip.start = first + k * len;
                     edits.push(Edit::AddAudioClip(clip));
                 }
             }
@@ -1810,7 +1934,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 }
                 continue;
             };
-            let (lane, start) = target;
+            let (lane, start, sampler) = target;
             let lane = match lane {
                 Some(l) => l,
                 None => {
@@ -1821,7 +1945,29 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             };
             let fpt = jdance_domain::frames_per_tick(p.tempo_bpm, p.timebase_rate);
             let mut plan = audio_channels::ChannelPlan::new();
-            let channel = plan.channel_for(p, &asset, &mut edits);
+            // A sampler dropped on the Playlist gets the file as its clip
+            // file (§1.2); a file goes into a sampler (§3.1).
+            let channel = match sampler.filter(|ch| {
+                p.channel(*ch)
+                    .is_some_and(|c| c.sample().is_some() && c.clip_asset_id().is_none())
+            }) {
+                Some(ch) => {
+                    edits.push(Edit::SetChannelSample(
+                        ch,
+                        Some(jdance_domain::SampleRef {
+                            path: asset.path.clone(),
+                        }),
+                    ));
+                    edits.push(Edit::SetChannelClipAsset(ch, Some(asset.id)));
+                    ch
+                }
+                None => match sampler
+                    .filter(|ch| p.channel(*ch).and_then(|c| c.clip_asset_id()).is_some())
+                {
+                    Some(ch) => ch,
+                    None => plan.sampler_for(p, &asset, &mut edits),
+                },
+            };
             let cid = ClipId(p.ids.next());
             let clip = audio_channels::audio_clip(
                 cid,
@@ -1869,9 +2015,14 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             };
             let fpt = jdance_domain::frames_per_tick(p.tempo_bpm, p.timebase_rate);
             let at = (tick as f64 * fpt).round() as u64;
-            let Some((l, r)) =
-                jdance_commands::slice_audio_clip(&c, &asset, p.timebase_rate, at, new_id)
-            else {
+            let Some((l, r)) = jdance_commands::slice_audio_clip(
+                &c,
+                &asset,
+                p.timebase_rate,
+                p.channel(c.channel).map_or(1.0, |ch| p.channel_stretch(ch)),
+                at,
+                new_id,
+            ) else {
                 return Ok(());
             };
             vec![Edit::SetAudioClip(l), Edit::AddAudioClip(r)]
@@ -1901,9 +2052,19 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
         self.history.execute(&mut self.project, Edit::Batch(edits))
     }
 
+    /// The Sample Editor of an audio clip (spec 0.2.0 §3), from the
+    /// audio channel's strip and settings.
+    fn open_sample_editor(&mut self, id: ClipId) {
+        if let Some(c) = self.project.playlist.audio_clip(id) {
+            self.sample_editor = Some(sample_editor::SampleEditor::for_clip(c));
+        }
+    }
+
     /// Double-click on a clip: the Piano Roll of its pattern, or the
-    /// Sample Editor of an audio clip (spec 0.2.0 §3).
-    fn open_clip(&mut self, id: ClipId) {
+    /// sampler of an audio clip (spec 0.2.9 §2). An audio channel becomes
+    /// a sampler with the same file first (one undo step; it sounds the
+    /// same).
+    fn open_clip(&mut self, id: ClipId, now: f64) {
         if let Some(c) = self.project.playlist.clip(id) {
             self.current_pattern = c.pattern;
             let channel = self
@@ -1929,7 +2090,26 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 self.piano = Some(piano::PianoRoll::new(ch));
             }
         } else if let Some(c) = self.project.playlist.audio_clip(id) {
-            self.sample_editor = Some(sample_editor::SampleEditor::for_clip(c));
+            let ch = c.channel;
+            if let Some(asset) = self
+                .project
+                .channel(ch)
+                .and_then(|c| c.audio_asset())
+                .and_then(|a| self.project.asset(a))
+            {
+                let edit = Edit::SetChannelSource {
+                    channel: ch,
+                    source: jdance_domain::ChannelSource::Sampler {
+                        sample: Some(jdance_domain::SampleRef {
+                            path: asset.path.clone(),
+                        }),
+                    },
+                    clip_asset: Some(asset.id),
+                };
+                self.apply(edit, false, now);
+            }
+            self.rack_view.selection = std::iter::once(ch).collect();
+            self.channel_settings = Some(channel_settings::ChannelSettingsWindow::sample(ch));
         } else if let Some(c) = self.project.playlist.automation_clip(id) {
             self.open_automation(c.source);
         }
@@ -3072,6 +3252,12 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
         match jdance_commands::sampler::replace_sample(&self.project, ch, sample) {
             Ok(Some(edit)) => self.apply(edit, false, now),
             Ok(None) => {}
+            Err(jdance_commands::sampler::ReplaceRefusal::HasClips) => self.notify(
+                Notice::info(
+                    "This sampler's clips are in the Playlist: delete them first, or drop the file into another channel",
+                ),
+                now,
+            ),
             Err(_) => self.notify(
                 Notice::info("The selected channel does not take samples"),
                 now,
@@ -3856,14 +4042,19 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
                 self.key_focus = KeyFocus::PianoRoll;
             } else if self.playlist_view.area.contains(press) {
                 self.key_focus = KeyFocus::Playlist;
+            } else if self.browser_view.area.is_some_and(|a| a.contains(press)) {
+                self.key_focus = KeyFocus::Browser;
             }
         }
-        let piano_keys = self.piano.is_some()
+        let browser_keys = self.key_focus == KeyFocus::Browser;
+        self.browser_view.keys_active = browser_keys;
+        let piano_keys = !browser_keys
+            && self.piano.is_some()
             && (piano_docked || self.key_focus == KeyFocus::PianoRoll || !self.show_playlist);
         if let Some(roll) = &mut self.piano {
             roll.keys_active = piano_keys;
         }
-        self.playlist_view.keys_active = !piano_keys;
+        self.playlist_view.keys_active = !piano_keys && !browser_keys;
         let marks = self
             .project
             .pattern(self.current_pattern)
@@ -3993,6 +4184,9 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
         for (edit, merging) in piano_out.edits {
             self.apply(edit, merging, now);
         }
+        if let Some(request) = piano_out.midi {
+            self.import_midi(request, now);
+        }
         if piano_out.end_gesture {
             self.history.end_gesture();
         }
@@ -4095,7 +4289,7 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
             .take()
             .and_then(|ch| self.project.channel_clips(ch).next().map(|c| c.id));
         if let Some(id) = first_clip {
-            self.open_clip(id);
+            self.open_sample_editor(id);
         }
         if std::mem::take(&mut out.remove_unused)
             && let Some((n, edit)) = audio_channels::remove_unused_audio_channels(&self.project)
@@ -4183,7 +4377,7 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
             if o.open_clip_editor
                 && let Some(id) = first
             {
-                self.open_clip(id);
+                self.open_sample_editor(id);
             }
             if let Some(p) = o.pick {
                 self.sample_picker = Some(library::SamplePicker::new(p));
@@ -4299,6 +4493,197 @@ mod pattern_caret_tests {
         clip.pattern = pat;
         p.playlist.clips.push(clip);
         JdanceApp::new(StubHost::default(), NoStore, p, None)
+    }
+
+    #[test]
+    fn a_midi_file_goes_into_the_piano_roll_at_the_drop_in_one_step() {
+        let mut a = app();
+        let ch =
+            jdance_commands::add_sampler_channel(&mut a.history, &mut a.project, "Keys").unwrap();
+        a.current_pattern = a.project.patterns[0].id;
+        a.piano = Some(piano::PianoRoll::new(ch));
+        let note = |start, key| jdance_domain::Note {
+            id: 0,
+            start,
+            length: 480,
+            key,
+            velocity: 0.5,
+            muted: false,
+        };
+        a.host.midi = Some(MidiNotes {
+            notes: vec![note(0, 60), note(480, 64), note(960, 67)],
+            dropped: 0,
+            tempo_bpm: Some(100.0),
+        });
+        let steps = a.history.undo_labels().count();
+        a.import_midi(
+            piano::MidiRequest::Drop {
+                path: "riff.mid".into(),
+                tick: 3_840,
+            },
+            0.0,
+        );
+        let row = a.project.patterns[0].row(ch).unwrap();
+        let starts: Vec<(u32, u8)> = row.notes.iter().map(|n| (n.start, n.key)).collect();
+        assert_eq!(starts, [(3_840, 60), (4_320, 64), (4_800, 67)]);
+        assert_eq!(a.history.undo_labels().count(), steps + 1, "one undo step");
+        a.undo(0.0);
+        assert!(
+            a.project.patterns[0]
+                .row(ch)
+                .is_none_or(|r| r.notes.is_empty())
+        );
+        // A file that cannot be read changes nothing.
+        a.host.midi = None;
+        a.import_midi(
+            piano::MidiRequest::Drop {
+                path: "bad.mid".into(),
+                tick: 0,
+            },
+            0.0,
+        );
+        assert_eq!(a.history.undo_labels().count(), steps);
+    }
+
+    fn imported(path: &str) -> ImportedAudio {
+        ImportedAudio {
+            source: path.into(),
+            path: path.into(),
+            name: "loop".into(),
+            hash: 7,
+            size: 100,
+            sample_rate: 48_000,
+            channels: 2,
+            frames: 96_000,
+        }
+    }
+
+    #[test]
+    fn a_file_on_the_playlist_becomes_a_sampler_and_its_clip() {
+        let mut a = app();
+        let lane = a.project.playlist.lanes[0].id;
+        let drop = |a: &mut JdanceApp<StubHost, NoStore>, start| {
+            a.playlist_action(
+                playlist::PlaylistAction::ImportAudio {
+                    path: "/lib/loop.wav".into(),
+                    lane: Some(lane),
+                    start,
+                },
+                0.0,
+            );
+            let t = a.host.import_requests.len() as u64;
+            a.host.imported.push((t, Ok(imported("/lib/loop.wav"))));
+            a.finish_imports(0.0);
+        };
+        drop(&mut a, 0);
+        let ch = &a.project.channels[0];
+        assert!(!ch.is_audio(), "a sampler (spec 0.2.9 §3.1)");
+        assert_eq!(ch.clip_asset, Some(a.project.assets[0].id));
+        assert_eq!(ch.sample().unwrap().path, "/lib/loop.wav");
+        assert_eq!(a.project.playlist.audio_clips.len(), 1);
+        // The same file again: another clip of the same sampler (§3.2).
+        drop(&mut a, 7_680);
+        assert_eq!(a.project.channels.len(), 1);
+        assert_eq!(a.project.playlist.audio_clips.len(), 2);
+        // One drop, one undo step (§3.4).
+        a.undo(0.0);
+        a.undo(0.0);
+        assert!(a.project.channels.is_empty() && a.project.assets.is_empty());
+    }
+
+    #[test]
+    fn a_sampler_from_the_rack_gets_its_sample_imported_then_placed() {
+        let mut a = app();
+        let ch = jdance_commands::add_sample_channel(
+            &mut a.history,
+            &mut a.project,
+            "Kick",
+            Some(jdance_domain::SampleRef {
+                path: "/lib/kick.wav".into(),
+            }),
+        )
+        .unwrap();
+        let lane = a.project.playlist.lanes[1].id;
+        a.playlist_action(
+            playlist::PlaylistAction::Place {
+                source: playlist::Source::Channel(ch),
+                lane: Some(lane),
+                start: 960,
+                count: 1,
+            },
+            0.0,
+        );
+        assert_eq!(a.host.import_requests, [PathBuf::from("/lib/kick.wav")]);
+        a.host
+            .imported
+            .push((1, Ok(imported("/project/assets/kick.wav"))));
+        a.finish_imports(0.0);
+        assert_eq!(a.project.channels.len(), 1, "no new channel");
+        let c = a.project.channel(ch).unwrap();
+        assert_eq!(c.clip_asset, Some(a.project.assets[0].id));
+        assert_eq!(c.sample().unwrap().path, "/project/assets/kick.wav");
+        let clip = a.project.playlist.audio_clips[0];
+        assert_eq!((clip.channel, clip.lane), (ch, lane));
+        // Now it places at once, no import.
+        a.playlist_action(
+            playlist::PlaylistAction::Place {
+                source: playlist::Source::Channel(ch),
+                lane: Some(lane),
+                start: 7_680,
+                count: 2,
+            },
+            0.0,
+        );
+        assert_eq!(a.host.import_requests.len(), 1);
+        assert_eq!(a.project.playlist.audio_clips.len(), 3);
+        // Double-click: the sampler's window.
+        a.open_clip(clip.id, 0.0);
+        assert!(a.channel_settings.is_some());
+    }
+
+    #[test]
+    fn a_double_click_turns_an_audio_channel_into_a_sampler_in_one_step() {
+        let mut a = app();
+        let asset = jdance_domain::AudioAsset {
+            id: jdance_domain::AssetId(a.project.ids.next()),
+            name: "take".into(),
+            path: "/rec/take.wav".into(),
+            hash: 1,
+            size: 1,
+            sample_rate: 48_000,
+            channels: 1,
+            frames: 4_800,
+        };
+        let mut edits = vec![Edit::AddAsset(asset.clone())];
+        let ch = audio_channels::ChannelPlan::new().channel_for(&mut a.project, &asset, &mut edits);
+        let id = ClipId(a.project.ids.next());
+        let lane = a.project.playlist.lanes[0].id;
+        edits.push(Edit::AddAudioClip(audio_channels::audio_clip(
+            id, lane, ch, &asset, 0,
+        )));
+        a.apply(Edit::Batch(edits), false, 0.0);
+        a.open_clip(id, 0.0);
+        let c = a.project.channel(ch).unwrap();
+        assert!(!c.is_audio() && c.clip_asset == Some(asset.id));
+        assert!(a.channel_settings.is_some());
+        a.undo(0.0);
+        assert!(a.project.channel(ch).unwrap().is_audio());
+    }
+
+    #[test]
+    fn stop_ends_the_preview_also_when_stopped() {
+        let mut a = app();
+        a.song_mode = true;
+        a.caret = 960;
+        a.stop_pressed(true, 0);
+        assert_eq!(
+            (a.host.stops, a.caret),
+            (1, 960),
+            "playing: back to the caret"
+        );
+        a.stop_pressed(false, 0);
+        assert_eq!(a.host.stops, 2, "stopped: Stop still reaches the engine");
+        assert_eq!(a.caret, 0, "and the caret goes to the start");
     }
 
     #[test]

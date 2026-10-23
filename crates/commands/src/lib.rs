@@ -58,7 +58,14 @@ pub enum EditError {
 /// A reversible change to a [`Project`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum Edit {
+    /// Tempo; audio clips move so they keep their bar (spec 0.2.9 §8).
     SetTempo(f64),
+    /// Inverse of [`Edit::SetTempo`]: the tempo and the exact clip starts
+    /// before it, so undo does not round.
+    RestoreTempo {
+        bpm: f64,
+        starts: Vec<(ClipId, u64)>,
+    },
     /// Project time signature (spec 0.2.3 SIG-011).
     SetTimeSignature(jdance_domain::TimeSignature),
     /// Mixer track for the channels of recorded takes (REC-003).
@@ -113,6 +120,16 @@ pub enum Edit {
     /// Sample playback settings (markers, loop, envelope, root key).
     SetSampler(ChannelId, SamplerSettings),
     SetChannelSample(ChannelId, Option<SampleRef>),
+    /// The file a sampler's Playlist clips play (spec 0.2.9 §1).
+    SetChannelClipAsset(ChannelId, Option<AssetId>),
+    /// Replaces what a channel plays and its clip file, keeping its clips
+    /// (an audio channel becomes a sampler, spec 0.2.9 §2.2). Steps and
+    /// notes stay; an audio channel may not have any.
+    SetChannelSource {
+        channel: ChannelId,
+        source: jdance_domain::ChannelSource,
+        clip_asset: Option<AssetId>,
+    },
     SetMasterVolume(f32),
     SetChannelTrack(ChannelId, TrackId),
 
@@ -274,7 +291,9 @@ pub enum MergeKey {
 impl Edit {
     pub fn label(&self) -> &'static str {
         match self {
-            Edit::SetTempo(_) => "Change tempo",
+            Edit::SetTempo(_) | Edit::RestoreTempo { .. } => "Change tempo",
+            Edit::SetChannelClipAsset(..) => "Place sampler",
+            Edit::SetChannelSource { .. } => "Change channel type",
             Edit::SetTimeSignature(_) => "Change time signature",
             Edit::SetRecordTo(_) => "Change recording track",
             Edit::SetStep { .. } => "Edit step",
@@ -391,7 +410,93 @@ impl Edit {
                     return Err(EditError::OutOfRange(*bpm));
                 }
                 let old = std::mem::replace(&mut p.tempo_bpm, *bpm);
-                Ok(Edit::SetTempo(old))
+                // Frames per tick scale with 1 / tempo: a clip keeps its
+                // tick when its frame scales by old / new (§8).
+                let ratio = old / *bpm;
+                let starts = p
+                    .playlist
+                    .audio_clips
+                    .iter_mut()
+                    .map(|c| {
+                        let before = c.start;
+                        c.start = ((c.start as f64 * ratio).round() as u64)
+                            .min(jdance_domain::MAX_START_FRAMES);
+                        (c.id, before)
+                    })
+                    .collect();
+                Ok(Edit::RestoreTempo { bpm: old, starts })
+            }
+            Edit::RestoreTempo { bpm, starts } => {
+                if !(MIN_TEMPO_BPM..=MAX_TEMPO_BPM).contains(bpm) {
+                    return Err(EditError::OutOfRange(*bpm));
+                }
+                let now = std::mem::replace(&mut p.tempo_bpm, *bpm);
+                for (id, start) in starts {
+                    if let Some(c) = p.playlist.audio_clips.iter_mut().find(|c| c.id == *id) {
+                        c.start = *start;
+                    }
+                }
+                Ok(Edit::SetTempo(now))
+            }
+            Edit::SetChannelClipAsset(id, asset) => {
+                if let Some(a) = asset
+                    && p.asset(*a).is_none()
+                {
+                    return Err(EditError::Arrangement("the audio file is gone".into()));
+                }
+                let used = p.channel_clips(*id).next().is_some();
+                let ch = p.channel_mut(*id).ok_or(EditError::NoSuchChannel(*id))?;
+                if ch.sample().is_none() && asset.is_some() {
+                    return Err(EditError::Arrangement(
+                        "only a sampler with a sample plays clips".into(),
+                    ));
+                }
+                if asset.is_none() && used {
+                    return Err(EditError::Arrangement(
+                        "the sampler still has clips in the Playlist".into(),
+                    ));
+                }
+                Ok(Edit::SetChannelClipAsset(
+                    *id,
+                    std::mem::replace(&mut ch.clip_asset, *asset),
+                ))
+            }
+            Edit::SetChannelSource {
+                channel,
+                source,
+                clip_asset,
+            } => {
+                let audio = matches!(source, jdance_domain::ChannelSource::Audio { .. });
+                let asset = match source {
+                    jdance_domain::ChannelSource::Audio { asset } => Some(*asset),
+                    _ => *clip_asset,
+                };
+                if let Some(a) = asset
+                    && p.asset(a).is_none()
+                {
+                    return Err(EditError::Arrangement("the audio file is gone".into()));
+                }
+                let used = p.channel_clips(*channel).next().is_some();
+                let notes = p.patterns.iter().any(|pat| {
+                    pat.row(*channel)
+                        .is_some_and(|r| r.steps.iter().any(|s| s.on) || !r.notes.is_empty())
+                });
+                if (used && asset.is_none()) || (audio && notes) {
+                    return Err(EditError::Arrangement(
+                        "the channel's clips or notes need what it plays now".into(),
+                    ));
+                }
+                let ch = p
+                    .channel_mut(*channel)
+                    .ok_or(EditError::NoSuchChannel(*channel))?;
+                let old_source = std::mem::replace(&mut ch.source, source.clone());
+                let old_asset =
+                    std::mem::replace(&mut ch.clip_asset, (!audio).then_some(asset).flatten());
+                Ok(Edit::SetChannelSource {
+                    channel: *channel,
+                    source: old_source,
+                    clip_asset: old_asset,
+                })
             }
             Edit::SetTimeSignature(sig) => {
                 sig.validate().map_err(EditError::Arrangement)?;
@@ -681,6 +786,13 @@ impl Edit {
                 Ok(Edit::MoveChannel(*id, from))
             }
             Edit::SetChannelSample(id, sample) => {
+                // The sample of a sampler with clips is their file (spec
+                // 0.2.9 §1.8).
+                if p.channel_clips(*id).next().is_some() {
+                    return Err(EditError::Arrangement(
+                        "the sampler's clips in the Playlist play this sample".into(),
+                    ));
+                }
                 let ch = p.channel_mut(*id).ok_or(EditError::NoSuchChannel(*id))?;
                 let jdance_domain::ChannelSource::Sampler { sample: slot } = &mut ch.source else {
                     return Err(EditError::Arrangement(
@@ -1632,5 +1744,161 @@ mod tests {
         let order: Vec<_> = p.channels.iter().map(|c| c.id).collect();
         assert_eq!(order, [kick, snare]);
         assert_eq!(p.channel(kick).unwrap().color, None);
+    }
+
+    fn asset_project() -> (Project, History, jdance_domain::AudioAsset) {
+        let mut p = Project::new();
+        let asset = jdance_domain::AudioAsset {
+            id: AssetId(p.ids.next()),
+            name: "loop".into(),
+            path: "/lib/loop.wav".into(),
+            hash: 1,
+            size: 10,
+            sample_rate: 48_000,
+            channels: 2,
+            frames: 96_000,
+        };
+        let mut h = History::default();
+        h.execute(&mut p, Edit::AddAsset(asset.clone())).unwrap();
+        (p, h, asset)
+    }
+
+    #[test]
+    fn a_tempo_change_keeps_audio_clips_on_their_bar_and_undo_is_exact() {
+        let (mut p, mut h, asset) = asset_project();
+        p.tempo_bpm = 130.0;
+        let mut plan = audio_channels::ChannelPlan::new();
+        let mut edits = Vec::new();
+        let ch = plan.sampler_for(&mut p, &asset, &mut edits);
+        // Bar 5 at 130 BPM, in frames.
+        let fpt = jdance_domain::frames_per_tick(130.0, p.timebase_rate);
+        let bar5 = 4 * 4 * u64::from(jdance_domain::PPQ);
+        let start = (bar5 as f64 * fpt).round() as u64 + 1;
+        let lane = p.playlist.lanes[0].id;
+        let id = ClipId(p.ids.next());
+        edits.push(Edit::AddAudioClip(audio_channels::audio_clip(
+            id, lane, ch, &asset, start,
+        )));
+        h.execute(&mut p, Edit::Batch(edits)).unwrap();
+        // A drag over many values is one gesture.
+        for bpm in [131.0, 135.5, 139.25, 140.0] {
+            h.execute_merging(&mut p, Edit::SetTempo(bpm)).unwrap();
+        }
+        h.end_gesture();
+        let (a, _) = p
+            .audio_clip_ticks(p.playlist.audio_clip(id).unwrap())
+            .unwrap();
+        assert!((a - bar5 as f64).abs() < 0.1, "still on bar 5: {a}");
+        h.undo(&mut p).unwrap();
+        assert_eq!(p.tempo_bpm, 130.0);
+        assert_eq!(
+            p.playlist.audio_clip(id).unwrap().start,
+            start,
+            "exact frames"
+        );
+        h.redo(&mut p).unwrap();
+        assert_eq!(p.tempo_bpm, 140.0);
+        let (a, _) = p
+            .audio_clip_ticks(p.playlist.audio_clip(id).unwrap())
+            .unwrap();
+        assert!((a - bar5 as f64).abs() < 0.1);
+    }
+
+    #[test]
+    fn a_dropped_file_goes_into_one_sampler_whose_clips_follow_its_stretch() {
+        let (mut p, mut h, asset) = asset_project();
+        let mut plan = audio_channels::ChannelPlan::new();
+        let mut edits = Vec::new();
+        let a = plan.sampler_for(&mut p, &asset, &mut edits);
+        let b = plan.sampler_for(&mut p, &asset, &mut edits);
+        assert_eq!(a, b, "one action, one sampler");
+        let lane = p.playlist.lanes[0].id;
+        let id = ClipId(p.ids.next());
+        edits.push(Edit::AddAudioClip(audio_channels::audio_clip(
+            id, lane, a, &asset, 0,
+        )));
+        h.execute(&mut p, Edit::Batch(edits)).unwrap();
+        let ch = p.channel(a).unwrap();
+        assert!(!ch.is_audio() && ch.clip_asset == Some(asset.id));
+        assert_eq!(ch.sample().unwrap().path, asset.path);
+        assert_eq!(ch.volume, 1.0, "sounds as the file");
+        // The same file again finds the sampler.
+        let mut plan = audio_channels::ChannelPlan::new();
+        let mut more = Vec::new();
+        assert_eq!(plan.sampler_for(&mut p, &asset, &mut more), a);
+        assert!(more.is_empty());
+        // MUL 2 doubles the clip; TIME follows the tempo.
+        let clip = *p.playlist.audio_clip(id).unwrap();
+        assert_eq!(p.audio_clip_len(&clip), Some(96_000));
+        let mut s = p.channel(a).unwrap().sampler;
+        s.stretch.mul = 2.0;
+        h.execute(&mut p, Edit::SetSampler(a, s)).unwrap();
+        assert_eq!(p.audio_clip_len(&clip), Some(192_000));
+        s.stretch.time = jdance_domain::sample_processing::TimeFit::Beats { beats: 8.0 };
+        h.execute(&mut p, Edit::SetSampler(a, s)).unwrap();
+        p.tempo_bpm = 120.0;
+        assert_eq!(
+            p.audio_clip_len(&clip),
+            Some(192_000),
+            "8 beats at 120 = 4 s"
+        );
+        // Steps and notes are fine on a sampler with clips.
+        let pat = p.patterns[0].id;
+        h.execute(
+            &mut p,
+            Edit::SetStep {
+                pattern: pat,
+                channel: a,
+                index: 0,
+                step: Step {
+                    on: true,
+                    velocity: 0.8,
+                },
+            },
+        )
+        .unwrap();
+        p.validate_arrangement().unwrap();
+        // Undo takes the sampler, the clip and nothing else.
+        while h.undo(&mut p).unwrap() {}
+        assert!(p.channels.is_empty() && p.playlist.audio_clips.is_empty());
+    }
+
+    #[test]
+    fn an_audio_channel_becomes_a_sampler_keeping_its_clips() {
+        let (mut p, mut h, asset) = asset_project();
+        let mut plan = audio_channels::ChannelPlan::new();
+        let mut edits = Vec::new();
+        let ch = plan.channel_for(&mut p, &asset, &mut edits);
+        let lane = p.playlist.lanes[0].id;
+        let id = ClipId(p.ids.next());
+        edits.push(Edit::AddAudioClip(audio_channels::audio_clip(
+            id, lane, ch, &asset, 0,
+        )));
+        h.execute(&mut p, Edit::Batch(edits)).unwrap();
+        assert!(p.channel(ch).unwrap().is_audio());
+        h.execute(
+            &mut p,
+            Edit::SetChannelSource {
+                channel: ch,
+                source: jdance_domain::ChannelSource::Sampler {
+                    sample: Some(SampleRef {
+                        path: asset.path.clone(),
+                    }),
+                },
+                clip_asset: Some(asset.id),
+            },
+        )
+        .unwrap();
+        let c = p.channel(ch).unwrap();
+        assert!(!c.is_audio() && c.balance_pan() && c.clip_asset == Some(asset.id));
+        p.validate_arrangement().unwrap();
+        // A file the clips need cannot be taken away.
+        assert!(
+            h.execute(&mut p, Edit::SetChannelClipAsset(ch, None))
+                .is_err()
+        );
+        h.undo(&mut p).unwrap();
+        assert!(p.channel(ch).unwrap().is_audio());
+        assert_eq!(p.channel(ch).unwrap().clip_asset, None);
     }
 }

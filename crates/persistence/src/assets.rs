@@ -122,7 +122,25 @@ pub fn collect_assets(project: &mut Project, project_dir: &Path) -> Result<usize
         a.path = copy_into_assets(path, project_dir, a.hash)?;
         copied += 1;
     }
+    sync_clip_samplers(project);
     Ok(copied)
+}
+
+/// A sampler with a clip file plays that file (spec 0.2.9 §1): its sample
+/// follows the asset's path when the asset moves into the project.
+pub fn sync_clip_samplers(project: &mut Project) {
+    for i in 0..project.channels.len() {
+        let Some(path) = project.channels[i]
+            .clip_asset
+            .and_then(|a| project.asset(a))
+            .map(|a| a.path.clone())
+        else {
+            continue;
+        };
+        if let jdance_domain::ChannelSource::Sampler { sample } = &mut project.channels[i].source {
+            *sample = Some(jdance_domain::SampleRef { path });
+        }
+    }
 }
 
 #[cfg(test)]

@@ -434,6 +434,11 @@ pub trait Host {
     fn take_imports(&mut self) -> Vec<(u64, Result<ImportedAudio, String>)> {
         Vec::new()
     }
+    /// The notes of a MIDI file (spec 0.2.9 §6), from tick 0. MIDI files
+    /// are small: read at once.
+    fn read_midi(&mut self, _path: &Path) -> Result<MidiNotes, String> {
+        Err("MIDI files are not available here".into())
+    }
 
     /// Recording devices of the current backend.
     fn input_devices(&mut self) -> Vec<InputDevice> {
@@ -655,4 +660,15 @@ pub trait Host {
     }
     fn set_plugin_prefs(&mut self, _prefs: jdance_plugin_api::search::PluginPrefs) {}
     fn take_notices(&mut self) -> Vec<Notice>;
+}
+
+/// The notes of a MIDI file for the Piano Roll (spec 0.2.9 §6).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MidiNotes {
+    /// From tick 0 (the earliest note), in the document's ticks.
+    pub notes: Vec<jdance_domain::Note>,
+    /// Notes too late for the longest pattern, left out.
+    pub dropped: usize,
+    /// The file's first tempo, not applied (§6.8).
+    pub tempo_bpm: Option<f64>,
 }

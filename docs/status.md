@@ -2,7 +2,7 @@
 
 Статусы по разделу 0.2 Amendment 02. `PASS` только с артефактом:
 тест в репозитории, лог CI или acceptance-отчёт.
-Последнее обновление: 2026-10-22 (релиз 0.2.4).
+Последнее обновление: 2026-10-23 (релиз 0.2.9).
 
 ## Milestone 0
 
@@ -509,3 +509,31 @@ Linux, тест окна редактора под Xvfb), clippy `-D warnings` �
 | Windows: PATH для зависимостей, без системных окон ошибок, понятные причины | PASS | код; Windows clippy; ручная проверка с реальными плагинами не проводилась |
 | Windows: масштаб DPI (плагин / система), точный размер клиентской области, WS_CLIPCHILDREN, владелец, фокус, изменяемый размер | PASS | код; тест `editor` в CI при 100 %; на экране с масштабом ≠ 100 % вручную не проверялось |
 | Windows MSI 0.2.8 | PASS | сборка, установка, проверка версии в workflow `Release`; https://github.com/MertzZzzz/jdance/releases/tag/v0.2.8 |
+
+## Релиз 0.2.9 (спецификация `docs/spec/spec-0.2.9.md`)
+
+Проверки на ветке `claude/epic-hypatia-j7xp2a`: `cargo test --workspace`
+(479 тестов на Linux), clippy `-D warnings`, `cargo xtask check`, запуск
+приложения под Xvfb (`--smoke-test-frames 60`) и рендер демо-проекта.
+
+| Пункт | Статус | Артефакт / комментарий |
+|---|---|---|
+| §1 Клип сэмплера: обработка, GAIN, длина по MUL/TIME | PASS | `engine` тест `a_sampler_clip_plays_its_processed_sample_with_the_sampler_gain`; `commands` тест `a_dropped_file_goes_into_one_sampler_whose_clips_follow_its_stretch` |
+| §1.1–1.2 Сэмплер из Channel Rack на плейлист, импорт сэмпла | PASS | `ui` тест `a_sampler_from_the_rack_gets_its_sample_imported_then_placed`; перетаскивание мышью — код |
+| §1.8 Замена сэмпла у сэмплера с клипами отклоняется | PASS | `commands` (`ReplaceRefusal::HasClips`, `SetChannelSample`) |
+| §2 Двойной клик открывает сэмплер; аудиоканал становится сэмплером одним шагом | PASS | `ui` тест `a_double_click_turns_an_audio_channel_into_a_sampler_in_one_step`; `commands` тест `an_audio_channel_becomes_a_sampler_keeping_its_clips` |
+| §3 Файл на плейлисте — в сэмплер, повтор — тот же сэмплер, один шаг Undo | PASS | `ui` тест `a_file_on_the_playlist_becomes_a_sampler_and_its_clip` |
+| §4 Инструмент Speed, скорость клипа в воспроизведении и экспорте | PASS | `ui` тест `the_speed_tool_shortens_a_clip_by_speeding_it_up`; `engine` тест `a_clip_at_double_speed_plays_every_other_frame_in_half_the_time`; `commands` тест края и разреза на скорости ×2 |
+| §5 Stop при остановленном транспорте глушит превью | PASS | `ui` тест `stop_ends_the_preview_also_when_stopped`; `engine` тест `stop_ends_the_preview` (0.2.6) |
+| §6 MIDI-файлы: чтение, вставка по Ctrl+M и броску | PASS | `persistence` тесты `midi::*` (формат 1, running status, velocity 0, SysEx, незакрытые ноты, SMPTE отклоняется); `ui` тест `a_midi_file_goes_into_the_piano_roll_at_the_drop_in_one_step` |
+| §7 Стрелки в библиотеке | PASS | `ui` тест `arrows_walk_the_files_and_preview_them` |
+| §8 Клипы сохраняют такт при смене темпа, Undo точный | PASS | `commands` тест `a_tempo_change_keeps_audio_clips_on_their_bar_and_undo_is_exact` |
+| Формат проекта 18 | PASS | миграция 17→18 без изменений; круговой тест формата |
+| Windows MSI 0.2.9 | — | workflow `Release` по тегу `v0.2.9` |
+
+Отступления от спецификации 0.2.9:
+
+- §7.4 (← / → сворачивают папку) — P2, не сделано.
+- §1.6 Make unique для клипов сэмплера копирует сэмплер вместе с файлом
+  клипов (как для аудиоканалов).
+- §6.4 файл читается в потоке интерфейса (MIDI-файлы маленькие).

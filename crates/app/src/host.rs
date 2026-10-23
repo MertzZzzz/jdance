@@ -1169,6 +1169,18 @@ impl Host for AudioHost {
         self.imports.1.try_iter().collect()
     }
 
+    fn read_midi(&mut self, path: &Path) -> Result<jdance_ui::MidiNotes, String> {
+        let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+        let file = jdance_persistence::read_midi(&bytes)?;
+        let last = u64::from(jdance_domain::MAX_PATTERN_STEPS * jdance_domain::TICKS_PER_STEP);
+        let (notes, dropped) = file.piano_notes(last);
+        Ok(jdance_ui::MidiNotes {
+            notes,
+            dropped,
+            tempo_bpm: file.tempo_bpm,
+        })
+    }
+
     fn sample_status(
         &self,
         sample: &SampleRef,

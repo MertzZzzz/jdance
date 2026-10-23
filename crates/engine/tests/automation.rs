@@ -188,6 +188,7 @@ fn audio_clip_gain_is_automated() {
         muted: false,
         fade_in: 0,
         fade_out: 0,
+        speed: 1.0,
     };
     p.channels.push(jdance_domain::Channel::new_audio(
         clip.channel,

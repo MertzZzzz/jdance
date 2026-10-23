@@ -77,9 +77,15 @@ pub struct AudioClipRt {
     /// Timeline `[start, end)` in samples.
     pub start: u64,
     pub end: u64,
-    /// Buffer frame played at `start`.
-    pub source: u64,
+    /// Buffer frame played at `start` (fractional when stretched).
+    pub source: f64,
+    /// Buffer frames per timeline sample: the clip's speed (spec 0.2.9
+    /// §4); 1 plays the buffer as it is.
+    pub rate: f64,
     pub gain: f32,
+    /// The sampler's own gain (spec 0.2.9 §1), on top of the clip gain
+    /// and its automation; 1 for audio channels.
+    pub boost: f32,
     /// Fade lengths in samples (at least the anti-click fade).
     pub fade_in: u64,
     pub fade_out: u64,
@@ -100,14 +106,21 @@ impl AudioClipRt {
             return;
         }
         let buf = &*self.buffer;
+        let plain = self.rate == 1.0 && self.source.fract() == 0.0;
         for t in a..b {
             let k = t - start;
-            let Some(i) = usize::try_from(self.source + k)
-                .ok()
-                .filter(|i| *i < buf.len())
-            else {
+            // Linear interpolation between frames when the speed or the
+            // stretch puts the read position between them.
+            let at = self.source + k as f64 * self.rate;
+            let (i, frac) = if plain {
+                (self.source as u64 + k, 0.0)
+            } else {
+                (at.floor() as u64, (at - at.floor()) as f32)
+            };
+            let Some(i) = usize::try_from(i).ok().filter(|i| *i < buf.len()) else {
                 break;
             };
+            let next = (i + 1).min(buf.len() - 1);
             let fin = if self.fade_in > 0 {
                 ((k + 1) as f32 / self.fade_in as f32).min(1.0)
             } else {
@@ -118,10 +131,15 @@ impl AudioClipRt {
             } else {
                 1.0
             };
-            let g = self.gain_at(t, automation) * fin * fout;
+            let g = self.gain_at(t, automation) * self.boost * fin * fout;
             let o = (t - from) as usize;
-            l[o] += buf.left[i] * g;
-            r[o] += buf.right[i] * g;
+            if frac == 0.0 {
+                l[o] += buf.left[i] * g;
+                r[o] += buf.right[i] * g;
+            } else {
+                l[o] += (buf.left[i] + (buf.left[next] - buf.left[i]) * frac) * g;
+                r[o] += (buf.right[i] + (buf.right[next] - buf.right[i]) * frac) * g;
+            }
         }
     }
 }
@@ -774,7 +792,7 @@ pub fn compile_full(
             // Level offsets of the sampler's Instrument tab (§4).
             let lv = c.sampler.levels;
             let pan = (c.pan + lv.pan).clamp(-1.0, 1.0);
-            let (l, r) = if c.is_audio() {
+            let (l, r) = if c.balance_pan() {
                 balance_gains(c.pan)
             } else {
                 pan_gains(pan)
@@ -940,34 +958,53 @@ fn compile_audio_clips(
             .position(|c| c.id == id)
     };
     for c in &pl.audio_clips {
-        let Some(asset) = project.clip_asset(c) else {
+        let (Some(asset), Some(ch)) = (project.clip_asset(c), project.channel(c.channel)) else {
             continue;
         };
         let to_dev = |frames: u64, rate: f64| (frames as f64 * sr / rate).round() as u64;
+        let stretch = project.channel_stretch(ch);
         let start = to_dev(c.start, tb);
-        let len = to_dev(c.length(asset, project.timebase_rate), tb);
+        let len = to_dev(c.length(asset, project.timebase_rate, stretch), tb);
         end = end.max(start + len);
         if !pl.admits_audio(c) || len == 0 {
             continue;
         }
-        let Some(buffer) = samples(&SampleRef {
-            path: asset.path.clone(),
-        })
-        .filter(|b| b.sample_rate == sample_rate) else {
+        // An audio channel plays the file; a sampler its sample with the
+        // sampler's processing and gain (spec 0.2.9 §1).
+        let (sample, gain) = if ch.is_audio() {
+            (
+                SampleRef {
+                    path: asset.path.clone(),
+                },
+                1.0,
+            )
+        } else {
+            let Some(s) = ch.playback_sample(project.tempo_bpm) else {
+                continue;
+            };
+            (s, 10f32.powf(ch.sampler.gain_db / 20.0))
+        };
+        let Some(buffer) = samples(&sample).filter(|b| b.sample_rate == sample_rate) else {
             continue;
         };
         let Some(channel) = channel_of(c.channel) else {
             continue;
         };
         let bound = |f: u64| f.max(fade).min(len / 2);
+        let source_in = c.source_in as f64 * sr / f64::from(asset.sample_rate.max(1));
         out.push(AudioClipRt {
             id: c.id,
             buffer,
             channel,
             start,
             end: start + len,
-            source: to_dev(c.source_in, f64::from(asset.sample_rate.max(1))),
+            source: (source_in * stretch).round(),
+            rate: f64::from(
+                c.speed
+                    .clamp(jdance_domain::MIN_CLIP_SPEED, jdance_domain::MAX_CLIP_SPEED),
+            ),
             gain: c.gain,
+            boost: gain,
             fade_in: bound(to_dev(c.fade_in, tb)),
             fade_out: bound(to_dev(c.fade_out, tb)),
             auto_gain: None,

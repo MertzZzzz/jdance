@@ -636,15 +636,19 @@ pub fn pattern_clip_edge(
 /// Audio clip resized so `edge` lands on project frame `at` (spec 0.2.0
 /// §4): the right edge moves `source_out` (up to the file end), the left
 /// edge moves `source_in` and the start together, keeping the end. No
-/// stretching; at least one source frame stays.
+/// stretching; at least one source frame stays. `stretch` is the length
+/// factor of the clip's sampler ([`Project::channel_stretch`]).
 pub fn audio_clip_edge(
     clip: &AudioClip,
     asset: &AudioAsset,
     timebase: u32,
+    stretch: f64,
     edge: Edge,
     at: i64,
 ) -> AudioClip {
-    let ratio = f64::from(asset.sample_rate.max(1)) / f64::from(timebase.max(1));
+    let ratio = f64::from(asset.sample_rate.max(1))
+        / f64::from(timebase.max(1))
+        / clip.scale(stretch).max(1e-6);
     let start = clip.start as i64;
     match edge {
         Edge::Right => {
@@ -707,10 +711,13 @@ pub fn slice_audio_clip(
     clip: &AudioClip,
     asset: &AudioAsset,
     timebase: u32,
+    stretch: f64,
     at: u64,
     new_id: ClipId,
 ) -> Option<(AudioClip, AudioClip)> {
-    let ratio = f64::from(asset.sample_rate.max(1)) / f64::from(timebase.max(1));
+    let ratio = f64::from(asset.sample_rate.max(1))
+        / f64::from(timebase.max(1))
+        / clip.scale(stretch).max(1e-6);
     if at <= clip.start {
         return None;
     }
@@ -724,7 +731,7 @@ pub fn slice_audio_clip(
     };
     let right = AudioClip {
         id: new_id,
-        start: clip.start + left.length(asset, timebase),
+        start: clip.start + left.length(asset, timebase, stretch),
         source_in: boundary,
         ..*clip
     };
@@ -1025,6 +1032,7 @@ mod tests {
             muted: false,
             fade_in: 0,
             fade_out: 0,
+            speed: 1.0,
         };
         h.execute(&mut p, Edit::AddAudioClip(clip)).unwrap();
         // Trimming past the file end is rejected and changes nothing.
@@ -1131,25 +1139,37 @@ mod tests {
             muted: false,
             fade_in: 0,
             fade_out: 0,
+            speed: 1.0,
         };
         // Right edge reveals up to the file end, never past it.
-        let r = audio_clip_edge(&c, &asset, 48_000, Edge::Right, 10_000_000);
+        let r = audio_clip_edge(&c, &asset, 48_000, 1.0, Edge::Right, 10_000_000);
         assert_eq!(r.source_out, 44_100);
         assert_eq!(r.start, c.start);
         // Left edge left: reveals earlier content, keeps the end.
-        let l = audio_clip_edge(&c, &asset, 48_000, Edge::Left, 48_000 - 12_000);
+        let l = audio_clip_edge(&c, &asset, 48_000, 1.0, Edge::Left, 48_000 - 12_000);
         assert_eq!((l.source_in, l.start), (0, 36_000));
-        assert_eq!(l.interval(&asset, 48_000).1, c.interval(&asset, 48_000).1);
+        assert_eq!(
+            l.interval(&asset, 48_000, 1.0).1,
+            c.interval(&asset, 48_000, 1.0).1
+        );
         // Left edge right trims and moves the start.
-        let t = audio_clip_edge(&c, &asset, 48_000, Edge::Left, 48_000 + 4_800);
+        let t = audio_clip_edge(&c, &asset, 48_000, 1.0, Edge::Left, 48_000 + 4_800);
         assert_eq!((t.source_in, t.start), (11_025 + 4_410, 52_800));
 
         let at = 48_000 + 12_000;
-        let (a, b) = slice_audio_clip(&c, &asset, 48_000, at, ClipId(5)).unwrap();
+        let (a, b) = slice_audio_clip(&c, &asset, 48_000, 1.0, at, ClipId(5)).unwrap();
         assert_eq!(a.source_out, b.source_in, "one boundary");
         assert_eq!((a.source_in, b.source_out), (c.source_in, c.source_out));
-        assert_eq!(b.start, a.start + a.length(&asset, 48_000));
+        assert_eq!(b.start, a.start + a.length(&asset, 48_000, 1.0));
+        // A clip at double speed: a frame of the timeline is two of the file.
+        let fast = AudioClip { speed: 2.0, ..c };
+        let r = audio_clip_edge(&fast, &asset, 48_000, 1.0, Edge::Right, 48_000 + 4_800);
+        assert_eq!(r.source_out, 11_025 + 8_820);
+        let (a, b) =
+            slice_audio_clip(&fast, &asset, 48_000, 1.0, 48_000 + 4_800, ClipId(6)).unwrap();
+        assert_eq!(a.source_out, 11_025 + 8_820);
+        assert_eq!(b.start, 48_000 + 4_800);
         assert_eq!((a.channel, b.channel), (c.channel, c.channel));
-        assert!(slice_audio_clip(&c, &asset, 48_000, c.start, ClipId(5)).is_none());
+        assert!(slice_audio_clip(&c, &asset, 48_000, 1.0, c.start, ClipId(5)).is_none());
     }
 }

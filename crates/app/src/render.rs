@@ -156,13 +156,16 @@ fn cut_at(p: &mut Project, end: u64) {
         let Some(asset) = p.clip_asset(c) else {
             continue;
         };
-        let len = c.length(asset, timebase);
+        let scale = p.clip_scale(c);
+        let len = p.audio_clip_len(c).unwrap_or(0);
         if c.start + len <= end_frame {
             continue;
         }
         let keep = end_frame - c.start;
-        let src = (keep as f64 * f64::from(asset.sample_rate) / f64::from(timebase.max(1))).round()
-            as u64;
+        let src = (keep as f64 * f64::from(asset.sample_rate)
+            / f64::from(timebase.max(1))
+            / scale.max(1e-6))
+        .round() as u64;
         c.source_out = (c.source_in + src.max(1)).min(c.source_out);
         c.fade_out = c.fade_out.max(CUT_FADE_FRAMES.min(keep));
     }
@@ -1165,6 +1168,7 @@ mod selection_tests {
             muted: false,
             fade_in: 0,
             fade_out: 0,
+            speed: 1.0,
         };
         let fpt = jdance_domain::frames_per_tick(p.tempo_bpm, p.timebase_rate);
         let end = 3840;

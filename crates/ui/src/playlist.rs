@@ -55,10 +55,12 @@ pub(crate) enum Tool {
     Delete,
     Slice,
     Select,
+    /// Spec 0.2.9 §4: dragging an audio clip changes its speed.
+    Speed,
 }
 
 impl Tool {
-    const ALL: [(Self, Glyph, &'static str); 5] = [
+    const ALL: [(Self, Glyph, &'static str); 6] = [
         (
             Self::Draw,
             Glyph::Draw,
@@ -83,6 +85,12 @@ impl Tool {
             Self::Select,
             Glyph::Select,
             "Select (E): drag a frame; Shift adds",
+        ),
+        (
+            Self::Speed,
+            Glyph::Speed,
+            "Speed (S): drag an audio clip to make it shorter (faster) or longer (slower); \
+             double-click: normal speed",
         ),
     ];
 }
@@ -112,6 +120,8 @@ enum DragKind {
     Frame {
         add: bool,
     },
+    /// The Speed tool on an audio clip: its end follows the pointer.
+    Speed(ClipId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -314,6 +324,27 @@ fn length_text(ticks: u64, sig: TimeSignature) -> String {
     format!("{bars}:{beats}:{rest:03}")
 }
 
+/// `c` with the speed that puts its end on `end_tick`, its start staying
+/// (spec 0.2.9 §4.2): faster when shorter, within ×0.25…×4.
+fn sped_up(project: &Project, c: &AudioClip, end_tick: i64) -> AudioClip {
+    let Some((a, b)) = project.audio_clip_ticks(c) else {
+        return *c;
+    };
+    let new_len = (end_tick as f64 - a).max(1.0);
+    let speed = (f64::from(c.speed) * (b - a) / new_len) as f32;
+    AudioClip {
+        speed: speed.clamp(jdance_domain::MIN_CLIP_SPEED, jdance_domain::MAX_CLIP_SPEED),
+        ..*c
+    }
+}
+
+/// The length factor of the sampler playing `c` (1 for audio channels).
+fn stretch_of(project: &Project, c: &AudioClip) -> f64 {
+    project
+        .channel(c.channel)
+        .map_or(1.0, |ch| project.channel_stretch(ch))
+}
+
 fn snap(ticks: i64, grid: u64) -> i64 {
     let g = grid.max(1) as i64;
     (ticks as f64 / g as f64).round() as i64 * g
@@ -423,8 +454,9 @@ fn source_len(project: &Project, source: Source) -> Option<f64> {
             )
         }
         Source::Channel(id) => {
-            let a = project.asset(project.channel(id)?.audio_asset()?)?.id;
-            source_len(project, Source::Asset(a))
+            let ch = project.channel(id)?;
+            let a = project.asset(ch.clip_asset_id()?)?.id;
+            Some(source_len(project, Source::Asset(a))? * project.channel_stretch(ch))
         }
         Source::Automation(id) => project.automation_lane(id).map(|l| l.length as f64),
     }
@@ -494,7 +526,9 @@ impl PlaylistView {
         let valid = match self.source {
             Some(Source::Pattern(id)) => project.pattern(id).is_some(),
             Some(Source::Asset(id)) => project.asset(id).is_some(),
-            Some(Source::Channel(id)) => project.channel(id).is_some_and(|c| c.is_audio()),
+            Some(Source::Channel(id)) => project
+                .channel(id)
+                .is_some_and(|c| c.clip_asset_id().is_some() || c.sample().is_some()),
             Some(Source::Automation(id)) => project.automation_lane(id).is_some(),
             None => true,
         };
@@ -730,6 +764,7 @@ impl PlaylistView {
             (b::TOOL_DELETE, Tool::Delete),
             (b::TOOL_SLICE, Tool::Slice),
             (b::TOOL_SELECT, Tool::Select),
+            (b::TOOL_SPEED, Tool::Speed),
         ] {
             if ctx.input_mut(|i| bnd.take(i)) {
                 self.tool = t;
@@ -1007,6 +1042,18 @@ impl PlaylistView {
                         Some(DragKind::Erase)
                     }
                     (_, Tool::Slice) => None,
+                    (Some((k, _)), Tool::Speed) => match items[k].item {
+                        Item::Audio(c) => {
+                            self.activate(&items[k].item, out);
+                            self.selection = BTreeSet::from([c.id]);
+                            Some(DragKind::Speed(c.id))
+                        }
+                        _ => {
+                            out.hint = Some("Speed changes audio and sampler clips".into());
+                            None
+                        }
+                    },
+                    (None, Tool::Speed) => None,
                     (Some((k, edge)), _) => {
                         let id = items[k].item.id();
                         self.activate(&items[k].item, out);
@@ -1074,11 +1121,21 @@ impl PlaylistView {
                         ..c
                     })
                 }
+                (Some(DragKind::Speed(id)), Item::Audio(c)) if id == c.id => {
+                    Item::Audio(sped_up(project, &c, edge_tick))
+                }
                 (Some(DragKind::Edge(id, e)), Item::Audio(c)) if id == c.id => {
                     match project.clip_asset(&c) {
                         Some(a) => {
                             let at = (edge_tick as f64 * fpt).round() as i64;
-                            Item::Audio(audio_clip_edge(&c, a, project.timebase_rate, e, at))
+                            Item::Audio(audio_clip_edge(
+                                &c,
+                                a,
+                                project.timebase_rate,
+                                stretch_of(project, &c),
+                                e,
+                                at,
+                            ))
                         }
                         None => g.item,
                     }
@@ -1185,7 +1242,7 @@ impl PlaylistView {
                         out.edits.push(Edit::Batch(edits));
                     }
                 }
-                DragKind::Edge(id, _) => {
+                DragKind::Edge(id, _) | DragKind::Speed(id) => {
                     if let Some(g) = items.iter().find(|g| g.item.id() == id) {
                         let after = moved(g);
                         if after.start != g.start || after.end != g.end {
@@ -1327,7 +1384,16 @@ impl PlaylistView {
             && let Some(p) = response.interact_pointer_pos()
             && let Some((k, _)) = hit(p)
         {
-            out.actions.push(PlaylistAction::Open(items[k].item.id()));
+            match (self.tool, items[k].item) {
+                // §4.5: the Speed tool's double-click is normal speed.
+                (Tool::Speed, Item::Audio(c)) => {
+                    if c.speed != 1.0 {
+                        out.edits
+                            .push(Edit::SetAudioClip(AudioClip { speed: 1.0, ..c }));
+                    }
+                }
+                (_, item) => out.actions.push(PlaylistAction::Open(item.id())),
+            }
         }
 
         // Files from the Browser or the system.
@@ -1396,7 +1462,9 @@ impl PlaylistView {
             if let Some(first) = hovered.first() {
                 drop_ghost = Some((p, display_name(first)));
             }
-            for (k, path) in dropped.into_iter().enumerate() {
+            // MIDI files go to the Piano Roll (spec 0.2.9 §6.5).
+            let dropped = dropped.into_iter().filter(|p| !crate::browser::is_midi(p));
+            for (k, path) in dropped.enumerate() {
                 // Several files go on consecutive lanes.
                 let row = lane_at(p.y).map(|l| l + k);
                 let lane = row.and_then(|l| pl.lanes.get(l)).map(|l| l.id);
@@ -1571,6 +1639,7 @@ impl PlaylistView {
             let icon = match (self.tool, edge) {
                 (Tool::Delete, _) => egui::CursorIcon::NotAllowed,
                 (Tool::Slice, _) => egui::CursorIcon::VerticalText,
+                (Tool::Speed, _) => egui::CursorIcon::ResizeColumn,
                 (_, Some(_)) => egui::CursorIcon::ResizeHorizontal,
                 (_, None) => egui::CursorIcon::Grab,
             };
@@ -1899,7 +1968,7 @@ fn paint_count(start: u64, to: i64, len: f64) -> usize {
     n.clamp(1, 1024) as usize
 }
 
-fn display_name(path: &Path) -> String {
+pub(crate) fn display_name(path: &Path) -> String {
     path.file_name()
         .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
 }
@@ -2101,9 +2170,13 @@ fn draw_clip(
             let Some(asset) = project.clip_asset(c) else {
                 return;
             };
-            let name = project
+            let mut name = project
                 .channel(c.channel)
                 .map_or_else(|| asset.name.clone(), |ch| ch.name.clone());
+            // §4.4: a clip at another speed says so.
+            if c.speed != 1.0 {
+                name = format!("{name}  ×{:.2}", c.speed);
+            }
             let peaks = host.sample_peaks(
                 &SampleRef {
                     path: asset.path.clone(),
@@ -2327,6 +2400,46 @@ fn draw_waveform(
 mod tests {
     use super::*;
     use egui::{Event, Modifiers, RawInput};
+
+    #[test]
+    fn the_speed_tool_shortens_a_clip_by_speeding_it_up() {
+        let mut p = Project::new();
+        p.tempo_bpm = 120.0;
+        let asset = AudioAsset {
+            id: AssetId(p.ids.next()),
+            name: "a".into(),
+            path: "a.wav".into(),
+            hash: 0,
+            size: 0,
+            sample_rate: 48_000,
+            channels: 1,
+            frames: 48_000,
+        };
+        let ch = ChannelId(p.ids.next());
+        p.channels.push(jdance_domain::Channel::new_clip_sampler(
+            ch, "a", asset.id, "a.wav",
+        ));
+        p.assets.push(asset.clone());
+        let lane = p.playlist.lanes[0].id;
+        let c = jdance_commands::audio_channels::audio_clip(ClipId(99), lane, ch, &asset, 0);
+        // One second at 120 BPM is two beats (1920 ticks).
+        let (a, b) = p.audio_clip_ticks(&c).unwrap();
+        assert!((b - a - 1920.0).abs() < 1e-6);
+        let fast = sped_up(&p, &c, 960);
+        assert_eq!(fast.speed, 2.0, "half as long, twice as fast");
+        let (_, b) = p.audio_clip_ticks(&fast).unwrap();
+        assert!((b - 960.0).abs() < 1e-6);
+        assert_eq!(sped_up(&p, &c, 3_840).speed, 0.5);
+        assert_eq!(
+            sped_up(&p, &c, 1).speed,
+            jdance_domain::MAX_CLIP_SPEED,
+            "bounded"
+        );
+        assert_eq!(
+            sped_up(&p, &c, 1_000_000).speed,
+            jdance_domain::MIN_CLIP_SPEED
+        );
+    }
 
     #[test]
     fn a_take_goes_to_the_armed_lane_then_the_first_free_one() {
@@ -2865,6 +2978,7 @@ mod source_tests {
             muted: false,
             fade_in: 0,
             fade_out: 0,
+            speed: 1.0,
         };
         assert_eq!(Item::Audio(c).source(), Source::Channel(ChannelId(7)));
     }
