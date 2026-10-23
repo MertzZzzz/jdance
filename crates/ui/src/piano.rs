@@ -121,6 +121,9 @@ fn clipboard(ctx: &egui::Context) -> Vec<Note> {
 }
 
 fn set_clipboard(ctx: &egui::Context, notes: Vec<Note>) {
+    // The system clipboard gets a line as well: on Windows and Linux
+    // Ctrl+V reaches the app only while that clipboard holds text.
+    ctx.copy_text(format!("jdance: {} note(s)", notes.len()));
     ctx.data_mut(|d| d.insert_temp(egui::Id::unique("piano_clipboard"), notes));
 }
 
@@ -1691,13 +1694,15 @@ impl PianoRoll {
         }
         let sel = indices(notes, &self.selection);
         // The system turns Ctrl+C / X / V into clipboard events; the keys
-        // are read too where it does not.
+        // are read too where it does not. Ctrl+V comes as an event only
+        // while the system clipboard holds something, so a copy puts a
+        // line there too (see `set_clipboard`).
         let (copy_ev, cut_ev, paste_ev) = ui.input(|i| {
             let has = |f: fn(&Event) -> bool| i.events.iter().any(f);
             (
                 has(|e| matches!(e, Event::Copy)),
                 has(|e| matches!(e, Event::Cut)),
-                has(|e| matches!(e, Event::Paste(_))),
+                has(|e| matches!(e, Event::Paste(_) | Event::PasteImage(_))),
             )
         });
         let copy = take(b::COPY) | copy_ev;
@@ -2145,6 +2150,34 @@ mod key_tests {
         e.press(Key::X, CTRL);
         assert!(e.notes().is_empty());
         e.h.undo(&mut e.p).unwrap();
+        assert_eq!(e.notes().len(), 4);
+    }
+
+    /// As the window system sends them: Ctrl+C / X as clipboard events,
+    /// Ctrl+V as a paste of the system clipboard's text (none while it is
+    /// empty), never as keys.
+    #[test]
+    fn clipboard_events_copy_and_paste() {
+        let mut e = Env::new(vec![note(480, 60), note(960, 64)]);
+        e.press(Key::A, CTRL);
+        e.frame(vec![Event::Copy]);
+        let copied =
+            e.d.copied
+                .clone()
+                .expect("a copy fills the system clipboard");
+        e.caret = 3840;
+        e.frame(vec![Event::Paste(copied)]);
+        let notes = e.notes();
+        assert_eq!(notes.len(), 4);
+        assert_eq!((notes[2].start, notes[2].key), (3840, 60));
+        e.frame(vec![Event::Cut]);
+        assert_eq!(
+            e.notes().len(),
+            2,
+            "the pasted copies were selected and cut"
+        );
+        // Text copied elsewhere afterwards still pastes the notes.
+        e.frame(vec![Event::Paste("hello".into())]);
         assert_eq!(e.notes().len(), 4);
     }
 

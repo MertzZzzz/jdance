@@ -14,7 +14,10 @@
            UpgradeCode="6B2E9C4A-3F1D-4E8B-9A57-2C0D1E4F7A31"
            Scope="perMachine"
            Language="1033">
-    <MajorUpgrade DowngradeErrorMessage="A newer version of jdance is already installed." />
+    <!-- Windows Installer ignores a fourth version field (0.2.7.1), so a
+         fix release replaces its release of the same three fields. -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="A newer version of jdance is already installed." />
     <MediaTemplate EmbedCab="yes" />
 
     <Property Id="ARPURLINFOABOUT" Value="https://github.com/MertzZzzz/jdance" />

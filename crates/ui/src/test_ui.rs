@@ -9,6 +9,8 @@ pub(crate) struct Driver {
     pub modifiers: Modifiers,
     /// Accessible nodes of the last frame: label and bounds.
     nodes: Vec<(String, Rect)>,
+    /// The last text put on the system clipboard.
+    pub copied: Option<String>,
 }
 
 impl Driver {
@@ -19,6 +21,7 @@ impl Driver {
             ctx,
             modifiers: Modifiers::NONE,
             nodes: Vec::new(),
+            copied: None,
         }
     }
 
@@ -32,6 +35,11 @@ impl Driver {
         };
         let mut out = self.ctx.run_ui(input, |root| ui(root));
         out.textures_delta.clear();
+        for c in &out.platform_output.commands {
+            if let egui::OutputCommand::CopyText(t) = c {
+                self.copied = Some(t.clone());
+            }
+        }
         self.nodes.clear();
         if let Some(update) = out.platform_output.accesskit_update {
             for (_, node) in update.nodes {

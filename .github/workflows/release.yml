@@ -43,6 +43,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+          # A fix release is written 0.2.7+1 in Cargo and released as 0.2.7.1.
+          version=${version/+/.}
           if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "v$version" ]]; then
             echo "tag $GITHUB_REF_NAME does not match the workspace version $version" >&2
             exit 1

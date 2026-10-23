@@ -52,7 +52,7 @@ fn main() -> ExitCode {
         // Internal: the out-of-process plugin scanner (PLG-012).
         Some("scan-plugin") => cmd_scan_plugin(&args[1..]),
         Some("--version" | "-V") => {
-            println!("jdance {}", env!("CARGO_PKG_VERSION"));
+            println!("jdance {}", env!("CARGO_PKG_VERSION").replace('+', "."));
             Ok(())
         }
         Some("--help" | "-h") => {
