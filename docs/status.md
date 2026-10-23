@@ -447,3 +447,34 @@ headless-тесты egui и приложение под Xvfb (длинные и�
 | Wet/Dry у каждого эффекта | PASS | `engine` тесты `wet_dry_mixes_the_effect_with_the_dry_signal`, `an_insert_at_zero_wet_renders_like_no_insert`; `commands` тест слияния; формат 16 с круговым тестом |
 | Stop останавливает любой звук, кроме мониторинга | PASS | `engine` тесты `stop_ends_the_preview`, `stop_does_not_interrupt_monitoring`, `stop_silences_an_instrument_tail_until_the_next_note`, `a_plugin_effect_is_heard_again_after_stop_and_play` |
 | Windows MSI 0.2.6 | PASS | сборка, установка, проверка версии в workflow `Release`; https://github.com/MertzZzzz/jdance/releases/tag/v0.2.6 |
+
+## Релиз 0.2.7 (спецификация `docs/spec/spec-0.2.7.md`)
+
+Проверки на ветке `0.2.7`: `cargo test --workspace` (459 тестов на
+Linux), clippy `-D warnings`, `cargo xtask check`. Открытые вопросы
+спецификации решены вариантами по умолчанию.
+
+| Пункт | Статус | Артефакт / комментарий |
+|---|---|---|
+| §3 Ctrl+B дублирует в плейлисте, Ctrl+D снимает выделение, подсказка | PASS | `playlist` тест `ctrl_b_duplicates_and_ctrl_d_only_deselects`; таблица `bindings` без конфликтов (`no_two_commands_share_keys_in_one_window`) |
+| §1 Единая таблица привязок, подписи в меню, Windows/macOS | PASS | `ui::bindings`; тест подписей; окно Options › Keyboard shortcuts |
+| §1 Вставка справа от каретки, выделение вставленного, буфер между окнами | PASS | `piano` тест `paste_puts_the_leftmost_note_on_the_caret_and_selects_the_copies` |
+| §1 Инструменты на одну букву, режим «клавиатура как пианино» | PASS | `piano` тест `tool_letters_and_the_typing_keyboard` |
+| §1 Ctrl+A, Ctrl+D, Ctrl+B, Delete, Ctrl+X | PASS | `piano` тесты выделения, дублирования и вырезания |
+| §1 Стрелки: привязка, пиксель, полутон, октава; без выделения ничего | PASS | `piano` тест `arrows_move_by_snap_and_pixel_and_transpose` |
+| §1 Backspace, Page Up/Down, Esc, фокус окна | PASS | `piano` тест `snap_zoom_close_and_the_key_focus` |
+| §1 Заглушение нот (T) | PASS | `engine` тест `muted_notes_do_not_play`; формат 17 |
+| §1 Ctrl+Z повтор/отмена, Ctrl+Alt+Z | PASS | код (`keys`, `JdanceApp`); headless-теста нет |
+| §1 Модификаторы мыши (Ctrl-выделение, Alt, Shift-копия, фиксация осей, средняя кнопка) | PASS | код; ручная проверка не проводилась |
+| §2 Клик по клипу делает источник активным, вставка, Esc, удалённый источник | PASS | `playlist` тесты `a_click_on_a_clip_makes_its_pattern_the_one_that_draw_places`, `a_removed_source_falls_back_to_the_first_pattern`, `audio_and_automation_clips_give_their_sources` |
+| Windows MSI 0.2.7 | — | сборка в workflow `Release` после слияния |
+
+Отступления от спецификации 0.2.7:
+
+- §1: пункты P1 и P2 не сделаны, кроме Alt+стрелок и прокрутки к
+  вставке; у нот нет панорамы, Mod X/Y, release, цвета, slide и
+  portamento, поэтому буфер их не переносит.
+- §1 п. 2: в режиме Ctrl+T играют только буквы раскладки пианино;
+  остальные буквы по-прежнему не переключают инструменты.
+- §2 п. 14 (призрак клипа) и п. 17 (хранение в проекте) — P1, не
+  сделаны.
