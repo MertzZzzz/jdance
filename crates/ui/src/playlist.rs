@@ -1462,7 +1462,9 @@ impl PlaylistView {
             if let Some(first) = hovered.first() {
                 drop_ghost = Some((p, display_name(first)));
             }
-            for (k, path) in dropped.into_iter().enumerate() {
+            // MIDI files go to the Piano Roll (spec 0.2.9 §6.5).
+            let dropped = dropped.into_iter().filter(|p| !crate::browser::is_midi(p));
+            for (k, path) in dropped.enumerate() {
                 // Several files go on consecutive lanes.
                 let row = lane_at(p.y).map(|l| l + k);
                 let lane = row.and_then(|l| pl.lanes.get(l)).map(|l| l.id);
@@ -1966,7 +1968,7 @@ fn paint_count(start: u64, to: i64, len: f64) -> usize {
     n.clamp(1, 1024) as usize
 }
 
-fn display_name(path: &Path) -> String {
+pub(crate) fn display_name(path: &Path) -> String {
     path.file_name()
         .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
 }
@@ -2398,6 +2400,46 @@ fn draw_waveform(
 mod tests {
     use super::*;
     use egui::{Event, Modifiers, RawInput};
+
+    #[test]
+    fn the_speed_tool_shortens_a_clip_by_speeding_it_up() {
+        let mut p = Project::new();
+        p.tempo_bpm = 120.0;
+        let asset = AudioAsset {
+            id: AssetId(p.ids.next()),
+            name: "a".into(),
+            path: "a.wav".into(),
+            hash: 0,
+            size: 0,
+            sample_rate: 48_000,
+            channels: 1,
+            frames: 48_000,
+        };
+        let ch = ChannelId(p.ids.next());
+        p.channels.push(jdance_domain::Channel::new_clip_sampler(
+            ch, "a", asset.id, "a.wav",
+        ));
+        p.assets.push(asset.clone());
+        let lane = p.playlist.lanes[0].id;
+        let c = jdance_commands::audio_channels::audio_clip(ClipId(99), lane, ch, &asset, 0);
+        // One second at 120 BPM is two beats (1920 ticks).
+        let (a, b) = p.audio_clip_ticks(&c).unwrap();
+        assert!((b - a - 1920.0).abs() < 1e-6);
+        let fast = sped_up(&p, &c, 960);
+        assert_eq!(fast.speed, 2.0, "half as long, twice as fast");
+        let (_, b) = p.audio_clip_ticks(&fast).unwrap();
+        assert!((b - 960.0).abs() < 1e-6);
+        assert_eq!(sped_up(&p, &c, 3_840).speed, 0.5);
+        assert_eq!(
+            sped_up(&p, &c, 1).speed,
+            jdance_domain::MAX_CLIP_SPEED,
+            "bounded"
+        );
+        assert_eq!(
+            sped_up(&p, &c, 1_000_000).speed,
+            jdance_domain::MIN_CLIP_SPEED
+        );
+    }
 
     #[test]
     fn a_take_goes_to_the_armed_lane_then_the_first_free_one() {

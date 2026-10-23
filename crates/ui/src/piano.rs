@@ -238,6 +238,17 @@ pub(crate) struct PianoOutput {
     pub script: Option<crate::scripts::ScriptRequest>,
     /// The caret was moved on the ruler.
     pub caret: Option<CaretRequest>,
+    /// A MIDI file's notes into this roll (spec 0.2.9 §6).
+    pub midi: Option<MidiRequest>,
+}
+
+/// Where a MIDI file comes from and where its notes go.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum MidiRequest {
+    /// Ctrl+M or the button: choose a file; the notes go to the caret.
+    Pick,
+    /// Dropped from the Browser or the system at `tick`.
+    Drop { path: std::path::PathBuf, tick: u32 },
 }
 
 fn is_black(key: u8) -> bool {
@@ -647,10 +658,44 @@ impl PianoRoll {
             if script.is_some() {
                 out.script = script;
             }
+            if ui
+                .button("Import MIDI…")
+                .on_hover_text(format!(
+                    "The notes of a MIDI file at the caret ({}); or drop a .mid file here",
+                    crate::bindings::IMPORT_MIDI.label()
+                ))
+                .clicked()
+            {
+                out.midi = Some(MidiRequest::Pick);
+            }
             if ui.button("Close").clicked() {
                 out.close = true;
             }
         });
+    }
+
+    /// Puts `clip` (notes from tick 0) into `pattern` at `at`, as Ctrl+V
+    /// does (spec 0.2.9 §6.4): the earliest note on `at`, the new notes
+    /// selected and shown. Returns the edit, one undo step.
+    pub fn insert_notes(&mut self, pattern: &Pattern, clip: &[Note], at: u32) -> Option<Edit> {
+        let notes: Vec<Note> = pattern
+            .row(self.channel)
+            .map(|r| r.notes.clone())
+            .unwrap_or_default();
+        let (new, added) = notes::paste(&notes, clip, at);
+        if added.is_empty() {
+            return None;
+        }
+        let select = added.iter().map(|&i| new[i]).collect();
+        self.reveal = Some(at);
+        let mut out = PianoOutput::default();
+        self.commit(&mut out, pattern, new, select);
+        out.edits.pop().map(|(e, _)| e)
+    }
+
+    /// The caret tick: where Ctrl+V and an imported file put notes.
+    pub fn caret(&self) -> u32 {
+        self.caret_tick
     }
 
     pub fn show(
@@ -1423,6 +1468,32 @@ impl PianoRoll {
                 out.end_gesture = true;
                 self.sound(host, None);
             }
+            // MIDI files dropped from the Browser or the system (§6.5).
+            let drop_tick = |x: f32| self.snap_tick((x - grid.left()) / px_tick);
+            let pointer = ui.ctx().pointer_latest_pos().filter(|p| grid.contains(*p));
+            if let Some(p) = pointer {
+                if let Some(item) = response.dnd_release_payload::<crate::browser::BrowserItem>()
+                    && let crate::browser::BrowserItem::Midi(path) = &*item
+                {
+                    out.midi = Some(MidiRequest::Drop {
+                        path: path.clone(),
+                        tick: drop_tick(p.x),
+                    });
+                }
+                let dropped = ui.input(|i| {
+                    i.raw
+                        .dropped_files
+                        .iter()
+                        .map(|f| f.path().to_path_buf())
+                        .find(|f| crate::browser::is_midi(f))
+                });
+                if let Some(path) = dropped {
+                    out.midi = Some(MidiRequest::Drop {
+                        path,
+                        tick: drop_tick(p.x),
+                    });
+                }
+            }
             h_offset = clip.left() - rect.left();
         });
         self.scroll_offset = scroll_out.state.clamped_offset();
@@ -1732,6 +1803,9 @@ impl PianoRoll {
             } else {
                 Snap::Off
             });
+        }
+        if take(b::IMPORT_MIDI) {
+            out.midi = Some(MidiRequest::Pick);
         }
         if take(b::CLOSE) {
             out.close = true;

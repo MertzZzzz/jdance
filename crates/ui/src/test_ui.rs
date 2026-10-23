@@ -117,6 +117,12 @@ pub(crate) struct StubHost {
     pub stops: u32,
     /// Files previewed, in order.
     pub previews: Vec<std::path::PathBuf>,
+    /// What `read_midi` returns.
+    pub midi: Option<crate::MidiNotes>,
+    /// Files asked to import, by ticket (1, 2, …); the test answers
+    /// through `imported`.
+    pub import_requests: Vec<std::path::PathBuf>,
+    pub imported: Vec<(u64, Result<crate::ImportedAudio, String>)>,
     pub live_inputs: Option<(u16, Vec<String>)>,
     pub plugins: Vec<jdance_plugin_api::PluginDescriptor>,
     pub plugin_prefs: jdance_plugin_api::search::PluginPrefs,
@@ -151,6 +157,16 @@ impl crate::Host for StubHost {
     fn stop(&mut self) {
         self.transport.playing = false;
         self.stops += 1;
+    }
+    fn import_audio(&mut self, path: &std::path::Path, _: Option<&std::path::Path>) -> Option<u64> {
+        self.import_requests.push(path.to_path_buf());
+        Some(self.import_requests.len() as u64)
+    }
+    fn take_imports(&mut self) -> Vec<(u64, Result<crate::ImportedAudio, String>)> {
+        std::mem::take(&mut self.imported)
+    }
+    fn read_midi(&mut self, _: &std::path::Path) -> Result<crate::MidiNotes, String> {
+        self.midi.clone().ok_or_else(|| "no file".into())
     }
     fn preview_file(&mut self, path: Option<&std::path::Path>) {
         self.previews.extend(path.map(std::path::Path::to_path_buf));
