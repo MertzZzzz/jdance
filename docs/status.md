@@ -489,3 +489,23 @@ Windows Installer не сравнивает).
 |---|---|---|
 | Ctrl+C / Ctrl+X / Ctrl+V в Piano Roll в настоящем окне | PASS | `piano` тест `clipboard_events_copy_and_paste` подаёт события так, как их шлёт оконная система (Copy, Cut, Paste с текстом, без нажатий клавиш). Причина: Ctrl+V доходил до программы только при тексте в системном буфере, а копирование нот туда ничего не писало; тесты 0.2.7 подавали нажатия клавиш и этого не видели |
 | Windows MSI 0.2.7.1 | PASS | сборка, установка, проверка версии в workflow `Release`; https://github.com/MertzZzzz/jdance/releases/tag/v0.2.7.1 |
+
+## Релиз 0.2.8 (совместимость с VST3)
+
+Проверки на ветке `0.2.8`: `cargo test --workspace` (464 теста на
+Linux, тест окна редактора под Xvfb), clippy `-D warnings` для Linux и
+для Windows (`x86_64-pc-windows-msvc`: `jdance-plugin-vst3`,
+`jdance-app`), `cargo xtask check`. Тестовый класс JD Test Strict ведёт
+себя как требовательные плагины (JUCE и др.) и отчитывается, что сделал
+хост.
+
+| Пункт | Статус | Артефакт / комментарий |
+|---|---|---|
+| Контекст хоста фабрике, `IPlugInterfaceSupport`, `IComponentHandler2`, обработчик до состояния, сообщения из другого потока, выходные события | PASS | `plugin-vst3` тест `a_picky_plugin_gets_what_it_needs_from_the_host` |
+| Смена задержки без пересоздания плагина | PASS | `plugin-vst3` тест выше; `app` тест `a_latency_change_keeps_the_instance` |
+| Переименованный бандл загружается | PASS | `plugin-vst3` тест `a_renamed_bundle_loads` |
+| Повторное сканирование чёрного списка новой версией | PASS | `app` тест `an_upgrade_scans_blocklisted_modules_again` |
+| Окно следует размеру плагина после подключения, все режимы масштаба | PASS | тест `editor` (JD Test Strict) на Linux (Xvfb), Windows и macOS в CI |
+| Windows: PATH для зависимостей, без системных окон ошибок, понятные причины | PASS | код; Windows clippy; ручная проверка с реальными плагинами не проводилась |
+| Windows: масштаб DPI (плагин / система), точный размер клиентской области, WS_CLIPCHILDREN, владелец, фокус, изменяемый размер | PASS | код; тест `editor` в CI при 100 %; на экране с масштабом ≠ 100 % вручную не проверялось |
+| Windows MSI 0.2.8 | — | сборка в workflow `Release` после слияния |
