@@ -19,7 +19,7 @@ mod mac;
 #[cfg(target_os = "macos")]
 use mac::NativeWindow;
 
-use jdance_plugin_api::PluginError;
+use jdance_plugin_api::{EditorScaling, PluginError};
 use std::any::Any;
 use std::cell::Cell;
 use std::rc::Rc;
@@ -219,7 +219,22 @@ pub struct Vst3Editor {
     view: ComPtr<IPlugView>,
     frame: ComWrapper<PlugFrame>,
     window: Rc<NativeWindow>,
+    /// The plugin's content scaling, when the host drives it (Windows,
+    /// window not scaled by the system), and the last scale sent.
+    content_scale: Option<(ComPtr<IPlugViewContentScaleSupport>, Cell<f32>)>,
+    attached: bool,
     _keep_alive: Arc<dyn Any + Send + Sync>,
+}
+
+/// Whether Windows scales the editor window (DPI-unaware window) instead
+/// of the plugin.
+fn system_scaled(scaling: EditorScaling, plugin_scales: bool) -> bool {
+    cfg!(windows)
+        && match scaling {
+            EditorScaling::Auto => !plugin_scales,
+            EditorScaling::Plugin => false,
+            EditorScaling::System => true,
+        }
 }
 
 impl std::fmt::Debug for Vst3Editor {
@@ -237,6 +252,7 @@ impl Vst3Editor {
         controller: &ComPtr<vst3::Steinberg::Vst::IEditController>,
         keep_alive: Arc<dyn Any + Send + Sync>,
         title: &str,
+        scaling: EditorScaling,
     ) -> Result<Option<Self>, PluginError> {
         use vst3::Steinberg::Vst::IEditControllerTrait;
         let view = unsafe { controller.createView(c"editor".as_ptr()) };
@@ -248,10 +264,17 @@ impl Vst3Editor {
                 "the plugin editor does not support this window system".into(),
             ));
         }
+        let scale_support = view.cast::<IPlugViewContentScaleSupport>();
+        let system = system_scaled(scaling, scale_support.is_some());
+        let resizable = unsafe { view.canResize() } == kResultTrue;
+        // Windows: the window and everything the plugin creates while it
+        // attaches get the chosen DPI awareness.
+        #[cfg(windows)]
+        let _dpi = win32::dpi_scope(system);
         let mut r = rect(400, 300);
         unsafe { view.getSize(&mut r) };
         let (w, h) = rect_size(&r);
-        let window = Rc::new(NativeWindow::new(title, w, h)?);
+        let window = Rc::new(NativeWindow::new(title, w, h, resizable)?);
         let frame = ComWrapper::new(PlugFrame {
             agreed: Cell::new(window.size()),
             window: Rc::clone(&window),
@@ -262,18 +285,41 @@ impl Vst3Editor {
             .as_com_ref::<IPlugFrame>()
             .map_or(std::ptr::null_mut(), |f| f.as_ptr());
         unsafe { view.setFrame(frame_ptr) };
-        if unsafe { view.attached(window.parent(), PLATFORM) } != kResultOk {
-            unsafe { view.setFrame(std::ptr::null_mut()) };
+        // The screen's scale before attaching, so the plugin opens at its
+        // final size (Windows only: elsewhere the system scales views).
+        let content_scale = scale_support.filter(|_| cfg!(windows) && !system).map(|s| {
+            let scale = window.scale();
+            unsafe { s.setContentScaleFactor(scale) };
+            (s, Cell::new(scale))
+        });
+        let mut editor = Self {
+            view,
+            frame,
+            window,
+            content_scale,
+            attached: false,
+            _keep_alive: keep_alive,
+        };
+        editor.follow_view_size();
+        if unsafe { editor.view.attached(editor.window.parent(), PLATFORM) } != kResultOk {
             return Err(PluginError::Failed(
                 "the plugin editor failed to open".into(),
             ));
         }
-        Ok(Some(Self {
-            view,
-            frame,
-            window,
-            _keep_alive: keep_alive,
-        }))
+        editor.attached = true;
+        // Some plugins settle on their size while attaching without
+        // asking the frame: the window follows.
+        editor.follow_view_size();
+        Ok(Some(editor))
+    }
+
+    /// Resizes the window to the plugin's own size when they differ.
+    fn follow_view_size(&self) {
+        let size = self.view_size();
+        if size != self.window.size() {
+            self.window.resize(size.0, size.1);
+        }
+        self.frame.agreed.set(size);
     }
 
     /// Runs the editor's event handling; call every UI frame. Returns
@@ -284,6 +330,21 @@ impl Vst3Editor {
         }
         #[cfg(target_os = "linux")]
         self.frame.run_loop.dispatch();
+        // Moved to a screen with another scale (Windows): tell the plugin;
+        // its new size comes through `resizeView` or its own size.
+        if let Some((support, sent)) = &self.content_scale {
+            let scale = self.window.scale();
+            if scale != sent.get() {
+                sent.set(scale);
+                unsafe { support.setContentScaleFactor(scale) };
+                self.follow_view_size();
+            }
+        }
+        // The plugin changed its size without asking: follow it.
+        let agreed = self.frame.agreed.get();
+        if self.window.size() == agreed && self.view_size() != agreed {
+            self.follow_view_size();
+        }
         // A user resize: let the plugin constrain it, or undo it.
         let now = self.window.size();
         let agreed = &self.frame.agreed;
@@ -322,7 +383,9 @@ impl Vst3Editor {
 impl Drop for Vst3Editor {
     fn drop(&mut self) {
         unsafe {
-            self.view.removed();
+            if self.attached {
+                self.view.removed();
+            }
             self.view.setFrame(std::ptr::null_mut());
         }
     }

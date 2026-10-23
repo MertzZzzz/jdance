@@ -508,7 +508,14 @@ impl PluginHost {
 
     /// Opens or closes the plugin's own editor window. `Err` explains
     /// why it cannot open (no editor, no window system, plugin not loaded).
-    pub fn toggle_editor(&mut self, id: PluginTarget, title: &str) -> Result<(), String> {
+    /// `scaling` is the user's choice per plugin class (absent:
+    /// automatic).
+    pub fn toggle_editor(
+        &mut self,
+        id: PluginTarget,
+        title: &str,
+        scaling: &BTreeMap<String, jdance_plugin_api::EditorScaling>,
+    ) -> Result<(), String> {
         let live = self
             .live
             .get_mut(&id)
@@ -516,7 +523,8 @@ impl PluginHost {
         if live.editor.take().is_some() {
             return Ok(());
         }
-        match live.controller.open_editor(title) {
+        let scaling = scaling.get(&live.class_id).copied().unwrap_or_default();
+        match live.controller.open_editor(title, scaling) {
             Ok(Some(e)) => {
                 live.editor = Some(e);
                 Ok(())
@@ -524,6 +532,11 @@ impl PluginHost {
             Ok(None) => Err("this plugin has no editor; use Parameters".into()),
             Err(e) => Err(e.to_string()),
         }
+    }
+
+    /// Class id of the live plugin in `id`.
+    pub fn class_id(&self, id: PluginTarget) -> Option<&str> {
+        self.live.get(&id).map(|l| l.class_id.as_str())
     }
 
     pub fn editor_open(&self, id: PluginTarget) -> bool {

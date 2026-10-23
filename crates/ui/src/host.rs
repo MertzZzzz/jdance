@@ -569,6 +569,10 @@ pub trait Host {
     fn plugin_editor_open(&self, _target: PluginTarget) -> bool {
         false
     }
+    /// Class id of the loaded plugin in `target`.
+    fn plugin_class_id(&self, _target: PluginTarget) -> Option<String> {
+        None
+    }
     fn any_plugin_editor_open(&self) -> bool {
         false
     }

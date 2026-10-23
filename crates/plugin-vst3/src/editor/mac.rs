@@ -13,7 +13,7 @@ pub struct NativeWindow {
 }
 
 impl NativeWindow {
-    pub fn new(title: &str, width: u32, height: u32) -> Result<Self, PluginError> {
+    pub fn new(title: &str, width: u32, height: u32, resizable: bool) -> Result<Self, PluginError> {
         let mtm = MainThreadMarker::new().ok_or_else(|| {
             PluginError::Unsupported("plugin editors open on the main thread only".into())
         })?;
@@ -22,9 +22,12 @@ impl NativeWindow {
             NSPoint::new(200.0, 200.0),
             NSSize::new(f64::from(width), f64::from(height)),
         );
-        let style = NSWindowStyleMask::Titled
+        let mut style = NSWindowStyleMask::Titled
             | NSWindowStyleMask::Closable
             | NSWindowStyleMask::Miniaturizable;
+        if resizable {
+            style |= NSWindowStyleMask::Resizable;
+        }
         let window = unsafe {
             NSWindow::initWithContentRect_styleMask_backing_defer(
                 mtm.alloc(),
@@ -45,6 +48,12 @@ impl NativeWindow {
         self.window.contentView().map_or(std::ptr::null_mut(), |v| {
             Retained::as_ptr(&v) as *mut c_void
         })
+    }
+
+    /// AppKit scales views itself (backing scale factor).
+    #[allow(dead_code)]
+    pub fn scale(&self) -> f32 {
+        1.0
     }
 
     pub fn resize(&self, width: u32, height: u32) {

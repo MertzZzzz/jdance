@@ -6,7 +6,7 @@
 //! windows can only be created there). On Linux it needs an X server
 //! (CI runs it under xvfb-run) and reports NOT RUN otherwise.
 
-use jdance_plugin_api::ProcessSetupInfo;
+use jdance_plugin_api::{EditorScaling, ProcessSetupInfo};
 use jdance_plugin_vst3::{Vst3Module, bundle_binary, instantiate};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -36,7 +36,11 @@ fn main() {
 
     // A plugin without an editor: generic editor only.
     let (_p, c) = instantiate(&module, &class("JD Test Latency"), &SETUP, None).unwrap();
-    assert!(c.open_editor("no gui").unwrap().is_none());
+    assert!(
+        c.open_editor("no gui", EditorScaling::Auto)
+            .unwrap()
+            .is_none()
+    );
 
     // A connection of our own for the whole test: it also keeps the X
     // server from resetting between the two editors.
@@ -45,7 +49,7 @@ fn main() {
     let (p, c) = instantiate(&module, &class("JD Test Gain"), &SETUP, None).unwrap();
     for round in 0..2 {
         let mut e = c
-            .open_editor("JD Test Gain")
+            .open_editor("JD Test Gain", EditorScaling::Auto)
             .unwrap()
             .expect("the gain class has an editor");
         // The view asked for a new size while attaching.
@@ -70,6 +74,23 @@ fn main() {
             space_reaches_the_host(&mut e, &x);
         }
         // Closing the editor keeps the instance (PLG-063); round 2 reopens.
+        drop(e);
+    }
+    drop(c);
+    drop(p);
+
+    // A resizable editor with content scaling that takes its size while
+    // attaching without asking the frame: the window follows it, in every
+    // scaling mode (the test screen has scale 1).
+    let (p, c) = instantiate(&module, &class("JD Test Strict"), &SETUP, None).unwrap();
+    for scaling in EditorScaling::ALL {
+        let mut e = c
+            .open_editor("JD Test Strict", scaling)
+            .unwrap()
+            .expect("the strict class has an editor");
+        assert!(e.poll());
+        assert_eq!(e.view_size(), (520, 340), "{scaling:?}");
+        assert_eq!(e.size(), (520, 340), "window follows the view, {scaling:?}");
         drop(e);
     }
     drop(c);

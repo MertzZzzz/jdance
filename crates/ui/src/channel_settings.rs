@@ -1121,13 +1121,13 @@ fn instrument_tab(
     let target = PluginTarget::Channel(ch.id);
     ui.horizontal(|ui| {
         let open = host.plugin_editor_open(target);
-        if ui
+        let r = ui
             .selectable_label(open, "Native editor")
-            .on_hover_text("Open the plugin's own window")
-            .clicked()
-        {
+            .on_hover_text("Open the plugin's own window (right-click: scaling)");
+        if r.clicked() {
             out.toggle_editor = true;
         }
+        crate::mixer::editor_scaling_menu(&r, host, target, &ch.name);
     });
     crate::mixer::plugin_params_ui(
         ui,

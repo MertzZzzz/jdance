@@ -67,6 +67,9 @@ pub struct PluginPrefs {
     pub only_favorites: bool,
     /// Favorites sorted by name instead of the user's order.
     pub favorites_alphabetical: bool,
+    /// Editor scaling chosen per plugin class (absent: automatic).
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub editor_scaling: std::collections::BTreeMap<String, crate::EditorScaling>,
 }
 
 impl PluginPrefs {

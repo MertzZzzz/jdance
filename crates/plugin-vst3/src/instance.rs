@@ -849,8 +849,12 @@ impl std::fmt::Debug for Vst3Controller {
 impl Vst3Controller {
     /// Opens the plugin's own editor in a new window (UI thread only;
     /// macOS: main thread). `Ok(None)` when the plugin has no editor.
-    pub fn open_editor(&self, title: &str) -> Result<Option<crate::Vst3Editor>, PluginError> {
-        crate::Vst3Editor::open(&self.controller, self.core.clone(), title)
+    pub fn open_editor(
+        &self,
+        title: &str,
+        scaling: jdance_plugin_api::EditorScaling,
+    ) -> Result<Option<crate::Vst3Editor>, PluginError> {
+        crate::Vst3Editor::open(&self.controller, self.core.clone(), title, scaling)
     }
 
     /// The plugin's latency now. After `LatencyChanged` the host reads it

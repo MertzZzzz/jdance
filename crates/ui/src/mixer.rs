@@ -1136,14 +1136,14 @@ fn insert_ui(
         }
         if ins.effect.kind == EffectKind::Plugin {
             let open = host.plugin_editor_open(PluginTarget::Insert(ins.id));
-            if ui
+            let title = format!("{} — {}", ins.effect.name(), t.name);
+            let r = ui
                 .selectable_label(open, "Edit")
-                .on_hover_text("Open the plugin's own editor window")
-                .clicked()
-            {
-                let title = format!("{} — {}", ins.effect.name(), t.name);
+                .on_hover_text("Open the plugin's own editor window (right-click: scaling)");
+            if r.clicked() {
                 host.toggle_plugin_editor(PluginTarget::Insert(ins.id), &title);
             }
+            editor_scaling_menu(&r, host, PluginTarget::Insert(ins.id), &title);
         }
         if index > 0
             && ui
@@ -1634,4 +1634,51 @@ mod drop_tests {
         let a = drop_on("Master · double-click or F2 to rename");
         assert!(a.is_empty(), "{a:?}");
     }
+}
+
+/// Right-click menu of an editor button: how the plugin's window is
+/// scaled on a high-DPI screen (Windows). A change reopens an open editor.
+pub(crate) fn editor_scaling_menu(
+    r: &egui::Response,
+    host: &mut dyn Host,
+    target: PluginTarget,
+    title: &str,
+) {
+    use jdance_plugin_api::EditorScaling;
+    if !cfg!(windows) {
+        return;
+    }
+    let Some(class) = host.plugin_class_id(target) else {
+        return;
+    };
+    r.context_menu(|ui| {
+        ui.label(egui::RichText::new("Editor scaling").strong());
+        let mut prefs = host.plugin_prefs();
+        let current = prefs
+            .editor_scaling
+            .get(&class)
+            .copied()
+            .unwrap_or_default();
+        for s in EditorScaling::ALL {
+            if ui.radio(current == s, s.label()).clicked() && s != current {
+                if s == EditorScaling::Auto {
+                    prefs.editor_scaling.remove(&class);
+                } else {
+                    prefs.editor_scaling.insert(class.clone(), s);
+                }
+                host.set_plugin_prefs(prefs.clone());
+                if host.plugin_editor_open(target) {
+                    host.toggle_plugin_editor(target, title);
+                    host.toggle_plugin_editor(target, title);
+                }
+                ui.close();
+            }
+        }
+        ui.label(
+            egui::RichText::new(
+                "If the editor is tiny, cut off or blurry on a scaled screen, try another mode.",
+            )
+            .size(11.0),
+        );
+    });
 }

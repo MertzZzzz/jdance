@@ -6,19 +6,109 @@ use std::collections::HashSet;
 use std::ffi::c_void;
 use std::sync::{Mutex, OnceLock};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows_sys::Win32::Graphics::Gdi::{BLACK_BRUSH, GetStockObject, HBRUSH};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::System::Threading::GetCurrentThreadId;
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetFocus, VK_SPACE};
+use windows_sys::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    GetActiveWindow, GetFocus, SetFocus, VK_SPACE,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, CW_USEDEFAULT, CallNextHookEx, CreateWindowExW, DefWindowProcW,
-    DestroyWindow, DispatchMessageW, GA_ROOT, GetAncestor, GetClassNameW, GetClientRect, IDC_ARROW,
-    LoadCursorW, MSG, PM_REMOVE, PeekMessageW, RegisterClassW, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOZORDER, SetWindowPos, SetWindowsHookExW, TranslateMessage, WH_GETMESSAGE, WM_CLOSE,
-    WM_KEYDOWN, WM_KEYUP, WM_NULL, WNDCLASSW, WS_CAPTION, WS_MINIMIZEBOX, WS_OVERLAPPED,
-    WS_SYSMENU, WS_VISIBLE,
+    DestroyWindow, DispatchMessageW, GA_ROOT, GW_CHILD, GetAncestor, GetClassNameW, GetClientRect,
+    GetWindow, GetWindowRect, GetWindowThreadProcessId, IDC_ARROW, LoadCursorW, MSG, PM_REMOVE,
+    PeekMessageW, RegisterClassW, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetWindowPos,
+    SetWindowsHookExW, ShowWindow, TranslateMessage, WH_GETMESSAGE, WM_CLOSE, WM_DPICHANGED,
+    WM_KEYDOWN, WM_KEYUP, WM_NULL, WM_SETFOCUS, WNDCLASSW, WS_CAPTION, WS_CLIPCHILDREN,
+    WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU, WS_THICKFRAME,
 };
 
-const STYLE: u32 = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+/// The frame never paints over the plugin's own window (WS_CLIPCHILDREN):
+/// without it, plugin graphics flicker or show the frame's background.
+const STYLE: u32 = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
+const RESIZABLE: u32 = WS_THICKFRAME | WS_MAXIMIZEBOX;
+
+/// Per-monitor DPI functions of Windows 10 1607 and later, looked up at
+/// run time so older systems still start.
+mod dpi {
+    use super::{HWND, RECT};
+    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+
+    /// `DPI_AWARENESS_CONTEXT` handles.
+    pub type Context = isize;
+    pub const UNAWARE: Context = -1;
+    pub const PER_MONITOR_V2: Context = -4;
+
+    type SetThreadContext = unsafe extern "system" fn(Context) -> Context;
+    type GetDpiForWindow = unsafe extern "system" fn(HWND) -> u32;
+    type AdjustForDpi = unsafe extern "system" fn(*mut RECT, u32, i32, u32, u32) -> i32;
+
+    fn proc_address(name: &std::ffi::CStr) -> Option<unsafe extern "system" fn() -> isize> {
+        let user32: Vec<u16> = "user32.dll\0".encode_utf16().collect();
+        unsafe {
+            let module = GetModuleHandleW(user32.as_ptr());
+            if module.is_null() {
+                return None;
+            }
+            GetProcAddress(module, name.as_ptr().cast())
+        }
+    }
+
+    macro_rules! lookup {
+        ($name:literal, $ty:ty) => {{
+            static F: std::sync::OnceLock<Option<$ty>> = std::sync::OnceLock::new();
+            *F.get_or_init(|| {
+                proc_address($name).map(|f| unsafe { std::mem::transmute::<_, $ty>(f) })
+            })
+        }};
+    }
+
+    /// Sets this thread's DPI awareness until dropped: windows created
+    /// meanwhile (the frame and the plugin's own) keep it.
+    pub struct Scope(Option<Context>);
+
+    pub fn enter(context: Context) -> Scope {
+        let set = lookup!(c"SetThreadDpiAwarenessContext", SetThreadContext);
+        Scope(set.map(|f| unsafe { f(context) }).filter(|old| *old != 0))
+    }
+
+    impl Drop for Scope {
+        fn drop(&mut self) {
+            if let (Some(old), Some(set)) = (
+                self.0,
+                lookup!(c"SetThreadDpiAwarenessContext", SetThreadContext),
+            ) {
+                unsafe { set(old) };
+            }
+        }
+    }
+
+    /// The window's DPI (96 = 100 %).
+    pub fn of(hwnd: HWND) -> u32 {
+        lookup!(c"GetDpiForWindow", GetDpiForWindow)
+            .map(|f| unsafe { f(hwnd) })
+            .filter(|d| *d > 0)
+            .unwrap_or(96)
+    }
+
+    /// `AdjustWindowRectExForDpi`, or `false` where it does not exist.
+    pub fn adjust(r: &mut RECT, style: u32, dpi: u32) -> bool {
+        lookup!(c"AdjustWindowRectExForDpi", AdjustForDpi)
+            .is_some_and(|f| unsafe { f(r, style, 0, 0, dpi) } != 0)
+    }
+}
+
+pub use dpi::Scope as DpiScope;
+
+/// Sets the DPI awareness for an editor about to be created: `system`
+/// lets Windows scale a plugin that does not scale itself (blurry but the
+/// right size), otherwise the plugin draws at the monitor's resolution.
+pub fn dpi_scope(system: bool) -> DpiScope {
+    dpi::enter(if system {
+        dpi::UNAWARE
+    } else {
+        dpi::PER_MONITOR_V2
+    })
+}
 
 /// Windows the user asked to close (by address).
 fn closed() -> &'static Mutex<HashSet<usize>> {
@@ -31,15 +121,29 @@ fn wide(s: &str) -> Vec<u16> {
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
-    if msg == WM_CLOSE {
-        // Closing only hides the editor from the host's point of view;
-        // the host removes the view and destroys the window.
-        if let Ok(mut c) = closed().lock() {
-            c.insert(hwnd as usize);
+    match msg {
+        WM_CLOSE => {
+            // Closing only hides the editor from the host's point of view;
+            // the host removes the view and destroys the window.
+            if let Ok(mut c) = closed().lock() {
+                c.insert(hwnd as usize);
+            }
+            0
         }
-        return 0;
+        // The keyboard goes to the plugin's window (knobs, text fields,
+        // the mouse wheel), not to the empty frame.
+        WM_SETFOCUS => {
+            let child = unsafe { GetWindow(hwnd, GW_CHILD) };
+            if !child.is_null() {
+                unsafe { SetFocus(child) };
+            }
+            0
+        }
+        // The new scale reaches the plugin from `poll`; its size follows
+        // from the plugin, not from the suggested rectangle.
+        WM_DPICHANGED => 0,
+        _ => unsafe { DefWindowProcW(hwnd, msg, wp, lp) },
     }
-    unsafe { DefWindowProcW(hwnd, msg, wp, lp) }
 }
 
 const CLASS_NAME: &str = "JdancePluginEditor";
@@ -97,6 +201,9 @@ fn class_name() -> &'static [u16] {
             lpfnWndProc: Some(wndproc),
             hInstance: unsafe { GetModuleHandleW(std::ptr::null()) },
             hCursor: unsafe { LoadCursorW(std::ptr::null_mut(), IDC_ARROW) },
+            // Uncovered parts of the frame (while resizing) are black,
+            // not left unpainted.
+            hbrBackground: unsafe { GetStockObject(BLACK_BRUSH) } as HBRUSH,
             lpszClassName: name.as_ptr(),
             ..unsafe { std::mem::zeroed() }
         };
@@ -105,36 +212,57 @@ fn class_name() -> &'static [u16] {
     })
 }
 
-fn outer_size(width: u32, height: u32) -> (i32, i32) {
+/// Window size for a client area of `width` × `height` at `dpi` (the
+/// frame's borders and title grow with the scale).
+fn outer_size(style: u32, width: u32, height: u32, dpi: u32) -> (i32, i32) {
     let mut r = RECT {
         left: 0,
         top: 0,
         right: width as i32,
         bottom: height as i32,
     };
-    unsafe { AdjustWindowRectEx(&mut r, STYLE, 0, 0) };
+    if !dpi::adjust(&mut r, style, dpi) {
+        unsafe { AdjustWindowRectEx(&mut r, style, 0, 0) };
+    }
     (r.right - r.left, r.bottom - r.top)
+}
+
+/// The app's own window that is active now: the editor's owner, so it
+/// stays in front of the app and minimizes with it.
+fn owner() -> HWND {
+    let w = unsafe { GetActiveWindow() };
+    let mut pid = 0;
+    if w.is_null() || unsafe { GetWindowThreadProcessId(w, &mut pid) } == 0 {
+        return std::ptr::null_mut();
+    }
+    if pid == unsafe { GetCurrentProcessId() } {
+        w
+    } else {
+        std::ptr::null_mut()
+    }
 }
 
 pub struct NativeWindow {
     hwnd: HWND,
+    style: u32,
 }
 
 impl NativeWindow {
-    pub fn new(title: &str, width: u32, height: u32) -> Result<Self, PluginError> {
-        let (w, h) = outer_size(width, height);
+    /// Create inside a [`dpi_scope`]: the window keeps its DPI awareness.
+    pub fn new(title: &str, width: u32, height: u32, resizable: bool) -> Result<Self, PluginError> {
+        let style = if resizable { STYLE | RESIZABLE } else { STYLE };
         let title = wide(title);
         let hwnd = unsafe {
             CreateWindowExW(
                 0,
                 class_name().as_ptr(),
                 title.as_ptr(),
-                STYLE | WS_VISIBLE,
+                style,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
-                w,
-                h,
-                std::ptr::null_mut(),
+                width as i32,
+                height as i32,
+                owner(),
                 std::ptr::null_mut(),
                 GetModuleHandleW(std::ptr::null()),
                 std::ptr::null(),
@@ -143,17 +271,28 @@ impl NativeWindow {
         if hwnd.is_null() {
             return Err(PluginError::Failed("CreateWindowExW failed".into()));
         }
+        let w = Self { hwnd, style };
+        // The exact client size at the monitor's DPI, then shown.
+        w.resize(width, height);
+        unsafe { ShowWindow(hwnd, SW_SHOW) };
         install_key_hook();
-        Ok(Self { hwnd })
+        Ok(w)
     }
 
     pub fn parent(&self) -> *mut c_void {
         self.hwnd
     }
 
+    /// Scale of the window's monitor (1.0 = 96 DPI); 1.0 for a window
+    /// that Windows scales.
+    pub fn scale(&self) -> f32 {
+        dpi::of(self.hwnd) as f32 / 96.0
+    }
+
+    /// Sets the client area to exactly `width` × `height`.
     pub fn resize(&self, width: u32, height: u32) {
-        let (w, h) = outer_size(width, height);
-        unsafe {
+        let (w, h) = outer_size(self.style, width, height, dpi::of(self.hwnd));
+        let set = |w: i32, h: i32| unsafe {
             SetWindowPos(
                 self.hwnd,
                 std::ptr::null_mut(),
@@ -164,6 +303,18 @@ impl NativeWindow {
                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
             )
         };
+        set(w, h);
+        // Whatever the frame's real borders are (themes, rounding at odd
+        // scales): correct by what is missing.
+        let (cw, ch) = self.size();
+        if (cw, ch) != (width, height) {
+            let mut r: RECT = unsafe { std::mem::zeroed() };
+            unsafe { GetWindowRect(self.hwnd, &mut r) };
+            set(
+                r.right - r.left + width as i32 - cw as i32,
+                r.bottom - r.top + height as i32 - ch as i32,
+            );
+        }
     }
 
     pub fn size(&self) -> (u32, u32) {

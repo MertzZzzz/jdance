@@ -1435,7 +1435,8 @@ impl Host for AudioHost {
     }
 
     fn toggle_plugin_editor(&mut self, insert: PluginTarget, title: &str) {
-        if let Err(e) = self.plugins.toggle_editor(insert, title) {
+        let scaling = &self.settings.plugin_prefs.editor_scaling;
+        if let Err(e) = self.plugins.toggle_editor(insert, title, scaling) {
             self.notices
                 .push(Notice::warning(format!("Cannot open the editor: {e}")));
         }
@@ -1443,6 +1444,10 @@ impl Host for AudioHost {
 
     fn plugin_editor_open(&self, insert: PluginTarget) -> bool {
         self.plugins.editor_open(insert)
+    }
+
+    fn plugin_class_id(&self, target: PluginTarget) -> Option<String> {
+        self.plugins.class_id(target).map(str::to_owned)
     }
 
     fn any_plugin_editor_open(&self) -> bool {

@@ -129,6 +129,34 @@ pub struct PluginState {
     pub controller: Vec<u8>,
 }
 
+/// How a plugin's own editor window is scaled on a high-DPI screen
+/// (Windows; other systems scale editors themselves).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EditorScaling {
+    /// The plugin scales itself when it says it can, otherwise Windows
+    /// scales it.
+    #[default]
+    Auto,
+    /// The plugin is told the screen's scale and draws sharp at it.
+    Plugin,
+    /// Windows enlarges the window: right size, slightly blurry. For
+    /// plugins that come out tiny or cut off.
+    System,
+}
+
+impl EditorScaling {
+    pub const ALL: [Self; 3] = [Self::Auto, Self::Plugin, Self::System];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "Automatic",
+            Self::Plugin => "Plugin scales itself (sharp)",
+            Self::System => "Windows scales it (right size, softer)",
+        }
+    }
+}
+
 /// Notifications from a plugin to the host, delivered on the UI thread.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PluginEvent {

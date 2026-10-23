@@ -47,7 +47,13 @@ fn err(e: impl std::fmt::Display) -> PluginError {
 }
 
 impl NativeWindow {
-    pub fn new(title: &str, width: u32, height: u32) -> Result<Self, PluginError> {
+    /// `resizable` is left to the window manager on X11.
+    pub fn new(
+        title: &str,
+        width: u32,
+        height: u32,
+        _resizable: bool,
+    ) -> Result<Self, PluginError> {
         let (conn, screen_num) = x11rb::connect(None).map_err(err)?;
         let screen = &conn.setup().roots[screen_num];
         let (root, black) = (screen.root, screen.black_pixel);
@@ -137,6 +143,12 @@ impl NativeWindow {
 
     pub fn size(&self) -> (u32, u32) {
         self.size.get()
+    }
+
+    /// Views are not scaled by the host on X11.
+    #[allow(dead_code)]
+    pub fn scale(&self) -> f32 {
+        1.0
     }
 
     /// Handles window events; returns `false` once the user closed it.
