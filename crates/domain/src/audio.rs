@@ -4,8 +4,9 @@
 //! An asset is an imported file; a clip places a range of it on the
 //! playlist. Several clips may use one asset with different ranges. Clip
 //! positions are integer frames of the project timebase
-//! ([`crate::Project::timebase_rate`]): they keep their absolute time when
-//! the tempo changes, and nothing is time-stretched.
+//! ([`crate::Project::timebase_rate`]); a tempo change moves them so they
+//! keep their bar (spec 0.2.9 §8). The audio itself is never stretched by
+//! the tempo, unless the sampler of a clip fits it (TIME).
 
 use crate::{AssetId, ChannelId, ClipId, LaneId, MAX_VOLUME};
 use serde::{Deserialize, Serialize};
@@ -71,18 +72,46 @@ pub struct AudioClip {
     pub fade_in: u64,
     #[serde(default)]
     pub fade_out: u64,
+    /// Playback speed (spec 0.2.9 §4): the clip plays `speed` times
+    /// faster and is that much shorter; pitch moves with it, like tape.
+    #[serde(default = "unit_speed", skip_serializing_if = "is_unit_speed")]
+    pub speed: f32,
+}
+
+/// Slowest and fastest clip speed (spec 0.2.9 §4.3).
+pub const MIN_CLIP_SPEED: f32 = 0.25;
+pub const MAX_CLIP_SPEED: f32 = 4.0;
+
+fn unit_speed() -> f32 {
+    1.0
+}
+
+fn is_unit_speed(v: &f32) -> bool {
+    *v == 1.0
 }
 
 impl AudioClip {
     /// Length on the timeline in project frames for `asset`'s rate.
-    pub fn length(&self, asset: &AudioAsset, timebase: u32) -> u64 {
+    /// `stretch` is the length factor of the channel's sampler (1 for
+    /// audio channels); the clip's speed divides it.
+    pub fn length(&self, asset: &AudioAsset, timebase: u32, stretch: f64) -> u64 {
         let src = self.source_out.saturating_sub(self.source_in);
-        (src as f64 * f64::from(timebase) / f64::from(asset.sample_rate.max(1))).round() as u64
+        (src as f64 * f64::from(timebase) / f64::from(asset.sample_rate.max(1))
+            * self.scale(stretch))
+        .round() as u64
+    }
+
+    /// Timeline frames per frame of the file at the timebase rate.
+    pub fn scale(&self, stretch: f64) -> f64 {
+        stretch / f64::from(self.speed.clamp(MIN_CLIP_SPEED, MAX_CLIP_SPEED))
     }
 
     /// `[start, end)` in project frames.
-    pub fn interval(&self, asset: &AudioAsset, timebase: u32) -> (u64, u64) {
-        (self.start, self.start + self.length(asset, timebase))
+    pub fn interval(&self, asset: &AudioAsset, timebase: u32, stretch: f64) -> (u64, u64) {
+        (
+            self.start,
+            self.start + self.length(asset, timebase, stretch),
+        )
     }
 
     pub fn validate(&self, asset: &AudioAsset) -> Result<(), String> {
@@ -98,6 +127,9 @@ impl AudioClip {
         }
         if !(0.0..=MAX_VOLUME).contains(&self.gain) {
             return Err(format!("audio clip {id} gain {} out of range", self.gain));
+        }
+        if !(MIN_CLIP_SPEED..=MAX_CLIP_SPEED).contains(&self.speed) {
+            return Err(format!("audio clip {id} speed {} out of range", self.speed));
         }
         Ok(())
     }
@@ -149,9 +181,18 @@ mod tests {
             muted: false,
             fade_in: 0,
             fade_out: 0,
+            speed: 1.0,
         };
-        assert_eq!(c.length(&a, 48_000), 24_000, "half a second");
-        assert_eq!(c.interval(&a, 48_000), (1000, 25_000));
+        assert_eq!(c.length(&a, 48_000, 1.0), 24_000, "half a second");
+        assert_eq!(c.interval(&a, 48_000, 1.0), (1000, 25_000));
+        let fast = AudioClip { speed: 2.0, ..c };
+        assert_eq!(fast.length(&a, 48_000, 1.0), 12_000, "twice as fast");
+        assert_eq!(
+            fast.length(&a, 48_000, 3.0),
+            36_000,
+            "stretched three times"
+        );
+        assert!(AudioClip { speed: 5.0, ..c }.validate(&a).is_err());
         assert!(c.validate(&a).is_ok());
         assert!(
             AudioClip {

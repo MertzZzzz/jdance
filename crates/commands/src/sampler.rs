@@ -17,6 +17,8 @@ pub enum ReplaceRefusal {
     NoChannel,
     /// An instrument or an audio channel: it does not take samples.
     NotASampler,
+    /// The sampler's file plays its Playlist clips (spec 0.2.9 §1.8).
+    HasClips,
 }
 
 /// One edit that loads `sample` into sampler channel `ch`: the markers
@@ -36,6 +38,9 @@ pub fn replace_sample(
     let old = c.sample().cloned();
     if old.as_ref() == Some(&sample) {
         return Ok(None);
+    }
+    if p.channel_clips(ch).next().is_some() {
+        return Err(ReplaceRefusal::HasClips);
     }
     let auto_named = match &old {
         Some(o) => c.name == stem(&o.path),
@@ -58,6 +63,10 @@ pub fn replace_sample(
     };
     if markers != c.sampler {
         edits.push(Edit::SetSampler(ch, markers));
+    }
+    // Another file: the sampler no longer has a clip file.
+    if c.clip_asset.is_some() {
+        edits.push(Edit::SetChannelClipAsset(ch, None));
     }
     edits.push(Edit::SetChannelSample(ch, Some(sample)));
     Ok(Some(Edit::Batch(edits)))

@@ -1731,7 +1731,10 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                     let cid = ClipId(p.ids.next());
                     ids.push(cid);
                     let mut clip = audio_channels::audio_clip(cid, lane, channel, &asset, 0);
-                    clip.start = first + k * clip.length(&asset, p.timebase_rate);
+                    let len = p
+                        .audio_clip_len(&clip)
+                        .unwrap_or_else(|| clip.length(&asset, p.timebase_rate, 1.0));
+                    clip.start = first + k * len;
                     edits.push(Edit::AddAudioClip(clip));
                 }
             }
@@ -1869,9 +1872,14 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             };
             let fpt = jdance_domain::frames_per_tick(p.tempo_bpm, p.timebase_rate);
             let at = (tick as f64 * fpt).round() as u64;
-            let Some((l, r)) =
-                jdance_commands::slice_audio_clip(&c, &asset, p.timebase_rate, at, new_id)
-            else {
+            let Some((l, r)) = jdance_commands::slice_audio_clip(
+                &c,
+                &asset,
+                p.timebase_rate,
+                p.channel(c.channel).map_or(1.0, |ch| p.channel_stretch(ch)),
+                at,
+                new_id,
+            ) else {
                 return Ok(());
             };
             vec![Edit::SetAudioClip(l), Edit::AddAudioClip(r)]
@@ -3072,6 +3080,12 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
         match jdance_commands::sampler::replace_sample(&self.project, ch, sample) {
             Ok(Some(edit)) => self.apply(edit, false, now),
             Ok(None) => {}
+            Err(jdance_commands::sampler::ReplaceRefusal::HasClips) => self.notify(
+                Notice::info(
+                    "This sampler's clips are in the Playlist: delete them first, or drop the file into another channel",
+                ),
+                now,
+            ),
             Err(_) => self.notify(
                 Notice::info("The selected channel does not take samples"),
                 now,

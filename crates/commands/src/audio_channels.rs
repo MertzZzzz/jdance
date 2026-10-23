@@ -44,6 +44,31 @@ impl ChannelPlan {
         id
     }
 
+    /// Spec 0.2.9 §3: like [`Self::channel_for`], but a new channel is a
+    /// sampler with `asset` as its sample and clip file.
+    pub fn sampler_for(
+        &mut self,
+        p: &mut Project,
+        asset: &AudioAsset,
+        edits: &mut Vec<Edit>,
+    ) -> ChannelId {
+        if let Some(c) = p.audio_channels_of(asset.id).next() {
+            return c.id;
+        }
+        if let Some((_, c)) = self.created.iter().find(|(a, _)| *a == asset.id) {
+            return *c;
+        }
+        let id = ChannelId(p.ids.next());
+        edits.push(Edit::AddChannel {
+            channel: Channel::new_clip_sampler(id, asset.name.clone(), asset.id, &asset.path),
+            index: p.channels.len() + self.created.len(),
+            rows: Vec::new(),
+            automation: Vec::new(),
+        });
+        self.created.push((asset.id, id));
+        id
+    }
+
     /// Channels created by this plan (ACH-018: shown to the user).
     pub fn created(&self) -> impl Iterator<Item = ChannelId> + '_ {
         self.created.iter().map(|(_, c)| *c)
@@ -88,6 +113,7 @@ pub fn audio_clip(
         muted: false,
         fade_in: 0,
         fade_out: 0,
+        speed: 1.0,
     }
 }
 
@@ -119,7 +145,7 @@ pub fn make_audio_unique(
         .channel;
     let source = p
         .channel(first)
-        .filter(|c| c.is_audio())
+        .filter(|c| c.clip_asset_id().is_some())
         .cloned()
         .ok_or_else(|| err("the clip has no audio channel".into()))?;
     let mut moved = Vec::with_capacity(clips.len());

@@ -54,6 +54,7 @@ fn clip(p: &mut Project, channel: ChannelId, start: u64, range: (u64, u64)) -> A
         muted: false,
         fade_in: 0,
         fade_out: 0,
+        speed: 1.0,
     };
     p.playlist.audio_clips.push(c);
     c
@@ -219,4 +220,54 @@ fn pattern_clip_window_offset_and_loop() {
     // Not looped: only the rest of the pattern (step 8) plays.
     p.playlist.clips[0].looped = false;
     assert_eq!(onsets(&p), [0]);
+}
+
+#[test]
+fn a_clip_at_double_speed_plays_every_other_frame_in_half_the_time() {
+    let buf = ramp(10_000);
+    let (mut p, a) = project_with_asset(10_000);
+    let mut c = clip(&mut p, a, 0, (0, 4_000));
+    c.speed = 2.0;
+    p.playlist.audio_clips[0] = c;
+    let out = render(&p, &buf, 4_000);
+    // Spec 0.2.9 §4: frame k of the timeline is frame 2k of the file.
+    let t = 1_000;
+    assert!((out[t] - frame(2 * t as u64)).abs() < 1e-6, "{}", out[t]);
+    assert!(out[2_000..].iter().all(|v| *v == 0.0), "half as long");
+    // Half speed reads between frames: interpolated.
+    c.speed = 0.5;
+    p.playlist.audio_clips[0] = c;
+    let out = render(&p, &buf, 9_000);
+    let t = 1_001;
+    let half = 0.5 * (frame(500) + frame(501));
+    assert!((out[t] - half).abs() < 1e-6, "{} vs {half}", out[t]);
+    assert!(out[7_000] != 0.0, "twice as long");
+}
+
+#[test]
+fn a_sampler_clip_plays_its_processed_sample_with_the_sampler_gain() {
+    let file = ramp(10_000);
+    let processed = ramp(20_000);
+    let (mut p, _) = project_with_asset(10_000);
+    p.channels.clear();
+    let asset = p.assets[0].id;
+    let ch = ChannelId(p.ids.next());
+    let mut s = Channel::new_clip_sampler(ch, "ramp", asset, "ramp.wav");
+    // MUL 2: the processed sample and the clip are twice as long.
+    s.sampler.stretch.mul = 2.0;
+    s.sampler.gain_db = 20.0 * 0.5f32.log10();
+    p.channels.push(s);
+    clip(&mut p, ch, 0, (0, 10_000));
+    assert_eq!(p.audio_clip_len(&p.playlist.audio_clips[0]), Some(20_000));
+    p.validate_arrangement().unwrap();
+    let key = p.channels[0].playback_sample(p.tempo_bpm).unwrap();
+    assert_ne!(key.path, "ramp.wav", "processed under its own key");
+    let (f, pr) = (Arc::clone(&file), Arc::clone(&processed));
+    let snap = compile_with(&p, SR, PlayMode::Song, move |r| {
+        Some(Arc::clone(if r.path == key.path { &pr } else { &f }))
+    });
+    let out = render_offline(snap, 22_000, || 512).left;
+    let t = 15_000;
+    assert!((out[t] - frame(t as u64) * 0.5).abs() < 1e-5, "{}", out[t]);
+    assert!(out[20_000..].iter().all(|v| *v == 0.0));
 }

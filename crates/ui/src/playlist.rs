@@ -314,6 +314,13 @@ fn length_text(ticks: u64, sig: TimeSignature) -> String {
     format!("{bars}:{beats}:{rest:03}")
 }
 
+/// The length factor of the sampler playing `c` (1 for audio channels).
+fn stretch_of(project: &Project, c: &AudioClip) -> f64 {
+    project
+        .channel(c.channel)
+        .map_or(1.0, |ch| project.channel_stretch(ch))
+}
+
 fn snap(ticks: i64, grid: u64) -> i64 {
     let g = grid.max(1) as i64;
     (ticks as f64 / g as f64).round() as i64 * g
@@ -1078,7 +1085,14 @@ impl PlaylistView {
                     match project.clip_asset(&c) {
                         Some(a) => {
                             let at = (edge_tick as f64 * fpt).round() as i64;
-                            Item::Audio(audio_clip_edge(&c, a, project.timebase_rate, e, at))
+                            Item::Audio(audio_clip_edge(
+                                &c,
+                                a,
+                                project.timebase_rate,
+                                stretch_of(project, &c),
+                                e,
+                                at,
+                            ))
                         }
                         None => g.item,
                     }
@@ -2865,6 +2879,7 @@ mod source_tests {
             muted: false,
             fade_in: 0,
             fade_out: 0,
+            speed: 1.0,
         };
         assert_eq!(Item::Audio(c).source(), Source::Channel(ChannelId(7)));
     }

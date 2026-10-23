@@ -19,8 +19,8 @@ mod plugin;
 pub mod sample_processing;
 
 pub use audio::{
-    AudioAsset, AudioClip, DEFAULT_TIMEBASE, EDGE_FADE_SECONDS, MAX_START_FRAMES, content_hash,
-    frames_per_tick,
+    AudioAsset, AudioClip, DEFAULT_TIMEBASE, EDGE_FADE_SECONDS, MAX_CLIP_SPEED, MAX_START_FRAMES,
+    MIN_CLIP_SPEED, content_hash, frames_per_tick,
 };
 pub use automation::{
     AutoPoint, AutomationLane, AutomationTarget, Curve, MAX_AUTOMATION_POINTS,
@@ -149,18 +149,52 @@ impl Project {
         self.assets.iter().find(|a| a.id == id)
     }
 
-    /// The asset an audio clip plays: the one of its channel.
+    /// The asset an audio clip plays: the one of its channel (an audio
+    /// channel's file or a sampler's clip file).
     pub fn clip_asset(&self, clip: &AudioClip) -> Option<&AudioAsset> {
         self.channel(clip.channel)?
-            .audio_asset()
+            .clip_asset_id()
             .and_then(|a| self.asset(a))
     }
 
-    /// Audio channels of `asset`, in Channel Rack order.
+    /// Length factor the channel's sampler applies to its clips (MUL or
+    /// TIME, spec 0.2.9 §1); 1 for audio channels.
+    pub fn channel_stretch(&self, ch: &Channel) -> f64 {
+        let s = &ch.sampler.stretch;
+        if ch.is_audio() || s.is_identity() {
+            return 1.0;
+        }
+        let seconds = ch
+            .clip_asset_id()
+            .and_then(|a| self.asset(a))
+            .map_or(0.0, AudioAsset::seconds);
+        s.length_factor(seconds, self.tempo_bpm).clamp(0.05, 20.0)
+    }
+
+    /// Timeline frames per file frame (at the timebase rate) of `clip`:
+    /// its channel's stretch over its speed.
+    pub fn clip_scale(&self, clip: &AudioClip) -> f64 {
+        let stretch = self
+            .channel(clip.channel)
+            .map_or(1.0, |c| self.channel_stretch(c));
+        clip.scale(stretch)
+    }
+
+    /// Length of `clip` on the timeline in project frames.
+    pub fn audio_clip_len(&self, clip: &AudioClip) -> Option<u64> {
+        let asset = self.clip_asset(clip)?;
+        let stretch = self
+            .channel(clip.channel)
+            .map_or(1.0, |c| self.channel_stretch(c));
+        Some(clip.length(asset, self.timebase_rate, stretch))
+    }
+
+    /// Channels whose Playlist clips play `asset` (audio channels and
+    /// samplers with that clip file), in Channel Rack order.
     pub fn audio_channels_of(&self, asset: AssetId) -> impl Iterator<Item = &Channel> {
         self.channels
             .iter()
-            .filter(move |c| c.audio_asset() == Some(asset))
+            .filter(move |c| c.clip_asset_id() == Some(asset))
     }
 
     /// Playlist clips of channel `id` (its instances).
@@ -174,9 +208,9 @@ impl Project {
     /// `[start, end)` of an audio clip in (fractional) ticks at the
     /// current tempo.
     pub fn audio_clip_ticks(&self, clip: &AudioClip) -> Option<(f64, f64)> {
-        let asset = self.clip_asset(clip)?;
+        let len = self.audio_clip_len(clip)?;
         let fpt = frames_per_tick(self.tempo_bpm, self.timebase_rate);
-        let (a, b) = clip.interval(asset, self.timebase_rate);
+        let (a, b) = (clip.start, clip.start + len);
         Some((a as f64 / fpt, b as f64 / fpt))
     }
 
@@ -235,7 +269,7 @@ impl Project {
             .iter()
             .filter(|c| {
                 self.channel(c.channel)
-                    .is_some_and(|ch| ch.audio_asset() == Some(asset))
+                    .is_some_and(|ch| ch.clip_asset_id() == Some(asset))
             })
             .count()
     }
@@ -424,13 +458,14 @@ impl Project {
             if self.playlist.lane(c.lane).is_none() {
                 return Err(format!("audio clip {} is on a missing lane", c.id.0));
             }
-            // ACH-015: every audio clip is an instance of an audio channel.
+            // ACH-015: every audio clip is an instance of an audio channel
+            // or of a sampler with a clip file (spec 0.2.9 §1).
             let channel = self
                 .channel(c.channel)
-                .filter(|ch| ch.is_audio())
+                .filter(|ch| ch.clip_asset_id().is_some())
                 .ok_or_else(|| format!("audio clip {} has no audio channel", c.id.0))?;
             let asset = channel
-                .audio_asset()
+                .clip_asset_id()
                 .and_then(|a| self.asset(a))
                 .ok_or_else(|| format!("audio clip {} references a missing file", c.id.0))?;
             c.validate(asset)?;
@@ -457,6 +492,13 @@ impl Project {
         }
         if let Some(e) = self.automation_overlap() {
             return Err(e);
+        }
+        for ch in &self.channels {
+            if let Some(a) = ch.clip_asset
+                && self.asset(a).is_none()
+            {
+                return Err(format!("sampler {:?} references a missing file", ch.name));
+            }
         }
         // ACH-003: audio channels have a file and no steps or notes.
         for ch in &self.channels {
@@ -533,6 +575,10 @@ pub struct Channel {
     /// Sample playback settings; ignored by instrument channels.
     #[serde(default, skip_serializing_if = "SamplerSettings::is_default")]
     pub sampler: SamplerSettings,
+    /// A sampler's clip file (spec 0.2.9 §1): the imported file its
+    /// sample is, measured by its Playlist clips. Samplers only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clip_asset: Option<AssetId>,
 }
 
 fn is_zero_i32(v: &i32) -> bool {
@@ -760,6 +806,26 @@ impl Channel {
             polyphony: 0,
             mono: false,
             sampler: SamplerSettings::default(),
+            clip_asset: None,
+        }
+    }
+
+    /// A sampler playing imported file `asset` (at `path`), whose clips
+    /// the Playlist can hold (spec 0.2.9 §3). Unity volume, like an audio
+    /// channel, so a clip sounds as the file does.
+    pub fn new_clip_sampler(
+        id: ChannelId,
+        name: impl Into<String>,
+        asset: AssetId,
+        path: impl Into<String>,
+    ) -> Self {
+        Self {
+            source: ChannelSource::Sampler {
+                sample: Some(SampleRef { path: path.into() }),
+            },
+            volume: 1.0,
+            clip_asset: Some(asset),
+            ..Self::new_sampler(id, name)
         }
     }
 
@@ -817,6 +883,22 @@ impl Channel {
 
     pub fn is_audio(&self) -> bool {
         self.audio_asset().is_some()
+    }
+
+    /// The file this channel's Playlist clips play: an audio channel's,
+    /// or a sampler's clip file.
+    pub fn clip_asset_id(&self) -> Option<AssetId> {
+        match self.source {
+            ChannelSource::Audio { asset } => Some(asset),
+            ChannelSource::Sampler { .. } => self.clip_asset,
+            ChannelSource::Plugin { .. } => None,
+        }
+    }
+
+    /// Pan works as a balance (unity at the centre): audio channels and
+    /// samplers with clips (spec 0.2.9 §1).
+    pub fn balance_pan(&self) -> bool {
+        self.clip_asset_id().is_some()
     }
 }
 
