@@ -508,4 +508,4 @@ Linux, тест окна редактора под Xvfb), clippy `-D warnings` �
 | Окно следует размеру плагина после подключения, все режимы масштаба | PASS | тест `editor` (JD Test Strict) на Linux (Xvfb), Windows и macOS в CI |
 | Windows: PATH для зависимостей, без системных окон ошибок, понятные причины | PASS | код; Windows clippy; ручная проверка с реальными плагинами не проводилась |
 | Windows: масштаб DPI (плагин / система), точный размер клиентской области, WS_CLIPCHILDREN, владелец, фокус, изменяемый размер | PASS | код; тест `editor` в CI при 100 %; на экране с масштабом ≠ 100 % вручную не проверялось |
-| Windows MSI 0.2.8 | — | сборка в workflow `Release` после слияния |
+| Windows MSI 0.2.8 | PASS | сборка, установка, проверка версии в workflow `Release`; https://github.com/MertzZzzz/jdance/releases/tag/v0.2.8 |
