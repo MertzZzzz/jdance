@@ -14,6 +14,7 @@ pub(crate) enum Glyph {
     Slice,
     Select,
     Mute,
+    Speed,
 }
 
 /// A 24×24 tool button; `on` = the active tool.
@@ -98,6 +99,18 @@ pub(crate) fn paint(ui: &Ui, glyph: Glyph, r: Rect, color: Color32) {
             p.add(egui::Shape::closed_line(body, s));
             line(at(11.0, 5.0), at(15.0, 11.0));
             line(at(15.0, 5.0), at(11.0, 11.0));
+        }
+        Glyph::Speed => {
+            // A dial: half circle and a needle leaning fast.
+            let pts: Vec<Pos2> = (0..=8)
+                .map(|k| {
+                    let a = std::f32::consts::PI * (1.0 + k as f32 / 8.0);
+                    at(8.0 + 6.0 * a.cos(), 11.0 + 6.0 * a.sin())
+                })
+                .collect();
+            p.add(egui::Shape::line(pts, s));
+            line(at(8.0, 11.0), at(12.0, 6.5));
+            line(at(2.0, 13.5), at(14.0, 13.5));
         }
         Glyph::Select => {
             // Dashed rectangle.

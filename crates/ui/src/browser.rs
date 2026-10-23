@@ -413,7 +413,7 @@ impl BrowserView {
         );
         let resp = resp.on_hover_text(if supported {
             format!(
-                "{}\nClick: select and preview · double-click: Sample Editor · middle click: into the selected channel\nDrag onto the Channel Rack (sampler) or the Playlist (audio clip)",
+                "{}\nClick: select and preview · double-click: Sample Editor · middle click: into the selected channel\nDrag onto the Channel Rack or the Playlist (a sampler and its clip)",
                 e.path.display()
             )
         } else {

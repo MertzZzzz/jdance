@@ -786,6 +786,13 @@ impl Edit {
                 Ok(Edit::MoveChannel(*id, from))
             }
             Edit::SetChannelSample(id, sample) => {
+                // The sample of a sampler with clips is their file (spec
+                // 0.2.9 §1.8).
+                if p.channel_clips(*id).next().is_some() {
+                    return Err(EditError::Arrangement(
+                        "the sampler's clips in the Playlist play this sample".into(),
+                    ));
+                }
                 let ch = p.channel_mut(*id).ok_or(EditError::NoSuchChannel(*id))?;
                 let jdance_domain::ChannelSource::Sampler { sample: slot } = &mut ch.source else {
                     return Err(EditError::Arrangement(

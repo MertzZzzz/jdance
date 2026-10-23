@@ -503,7 +503,19 @@ impl RackView {
             (None, Some(_)) => ("Audio", None),
             (None, None) => ("Sampler", ch.sample().map(|s| host.sample_status(s, dir))),
         };
-        let (rect, resp) = ui.allocate_exact_size(vec2(NAME_W, STEP_H), Sense::click());
+        // A sampler with a sample drags onto the Playlist (spec 0.2.9 §1.1).
+        let placeable = ch.clip_asset_id().is_some() || ch.sample().is_some();
+        let sense = if placeable {
+            Sense::click_and_drag()
+        } else {
+            Sense::click()
+        };
+        let (rect, resp) = ui.allocate_exact_size(vec2(NAME_W, STEP_H), sense);
+        if placeable {
+            resp.dnd_set_drag_payload(crate::project_browser::ProjectItem(
+                crate::playlist::Source::Channel(ch.id),
+            ));
+        }
         let painter = ui.painter();
         let fill = if resp.hovered() {
             egui::Color32::from_rgb(0x2E, 0x34, 0x3B)
@@ -579,8 +591,12 @@ impl RackView {
                 })),
             ) => {
                 format!(
-                    "{}\n{frames} frames, {source_rate} Hz\nDouble-click: sample settings",
-                    s.path
+                    "{}\n{frames} frames, {source_rate} Hz{}\nDouble-click: sample settings · drag onto the Playlist: a clip of this sampler",
+                    s.path,
+                    match project.channel_clips(ch.id).count() {
+                        0 => String::new(),
+                        n => format!(" · {n} clip(s) in the Playlist"),
+                    }
                 )
             }
             (None, Some(s), Some(Some(SampleStatus::Failed(e)))) => {
