@@ -176,6 +176,7 @@ impl RackView {
             .max_height(ui.available_height())
             .auto_shrink([false, true])
             .show(ui, |ui| {
+                crate::widgets::middle_pan(ui);
                 ui.horizontal(|ui| {
                     let label = |ui: &mut egui::Ui, w: f32, t: &str| {
                         ui.add_sized(

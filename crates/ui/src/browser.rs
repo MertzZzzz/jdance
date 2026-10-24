@@ -109,6 +109,7 @@ impl BrowserView {
             .max_height(list_h)
             .auto_shrink([false, false])
             .show(ui, |ui| {
+                crate::widgets::middle_pan(ui);
                 if !self.query.trim().is_empty() {
                     let mut roots: Vec<PathBuf> =
                         library.iter().chain(&favorites).cloned().collect();

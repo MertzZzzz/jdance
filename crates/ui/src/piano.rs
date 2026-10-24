@@ -777,6 +777,8 @@ impl PianoRoll {
         }
         let mut h_offset = 0.0;
         let scroll_out = scroll.show(ui, |ui| {
+            // Spec 0.3.0 §6.4: dragging near the edge moves the view.
+            crate::widgets::edge_scroll(ui, self.drag.is_some());
             let (rect, response) =
                 ui.allocate_exact_size(vec2(KEYBOARD_W + grid_w, grid_h), Sense::click_and_drag());
             let clip = ui.clip_rect();

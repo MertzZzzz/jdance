@@ -393,6 +393,7 @@ pub(crate) fn show(
             egui::ScrollArea::horizontal()
                 .id_salt("mixer_strips")
                 .show(ui, |ui| {
+                    crate::widgets::middle_pan(ui);
                     ui.horizontal_top(|ui| {
                         ui.spacing_mut().item_spacing.x = 2.0;
                         scale(ui, view.view);

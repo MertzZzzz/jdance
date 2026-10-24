@@ -817,6 +817,9 @@ impl PlaylistView {
                         h = h.horizontal_scroll_offset(o);
                     }
                     let o = h.show(ui, |ui| {
+                        // Spec 0.3.0 §6: the view follows the mouse.
+                        crate::widgets::middle_pan(ui);
+                        crate::widgets::edge_scroll(ui, self.drag.is_some());
                         self.canvas(ui, project, playhead, host, project_dir, &mut out);
                     });
                     view = Some(View {
