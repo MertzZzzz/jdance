@@ -295,6 +295,10 @@ pub struct JdanceApp<H: Host, S: ProjectStore> {
     /// Audio channels just created by putting samples on the Playlist;
     /// the Channel Rack reveals them (ACH-018).
     new_channels: Vec<ChannelId>,
+    /// Pattern and Piano Roll channel the live input last followed
+    /// (spec 0.3.0 §11).
+    pattern_seen: Option<PatternId>,
+    piano_seen: Option<ChannelId>,
     project_browser: project_browser::ProjectBrowser,
     /// Pattern or audio file waiting for a delete confirmation.
     confirm_delete: Option<playlist::Source>,
@@ -399,6 +403,8 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             recovery_checked: None,
             pending_imports: std::collections::BTreeMap::new(),
             new_channels: Vec::new(),
+            pattern_seen: None,
+            piano_seen: None,
             project_browser: project_browser::ProjectBrowser::default(),
             confirm_delete: None,
             rack_view: rack::RackView::default(),
@@ -1143,6 +1149,56 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
         }
     }
 
+    /// The first channel (not audio) with notes or steps in `pat`.
+    fn pattern_instrument(&self, pat: &jdance_domain::Pattern) -> Option<ChannelId> {
+        self.project
+            .channels
+            .iter()
+            .filter(|c| !c.is_audio())
+            .find(|c| {
+                pat.row(c.id)
+                    .is_some_and(|r| !r.notes.is_empty() || r.steps.iter().any(|s| s.on))
+            })
+            .map(|c| c.id)
+    }
+
+    /// Spec 0.3.0 §11: an opened Piano Roll selects its channel; another
+    /// pattern moves the roll to the instrument that plays in it; the
+    /// live input (MIDI, typing keyboard) plays that channel, else the
+    /// selected one.
+    fn follow_input(&mut self) {
+        if self.pattern_seen != Some(self.current_pattern) {
+            self.pattern_seen = Some(self.current_pattern);
+            if let Some(roll) = &self.piano
+                && let Some(pat) = self.project.pattern(self.current_pattern)
+                && pat
+                    .row(roll.channel)
+                    .is_none_or(|r| r.notes.is_empty() && !r.steps.iter().any(|s| s.on))
+                && let Some(ch) = self.pattern_instrument(pat)
+                && ch != roll.channel
+            {
+                if let Some(mut old) = self.piano.take() {
+                    old.release(&mut self.host);
+                }
+                self.piano = Some(piano::PianoRoll::new(ch));
+            }
+        }
+        let roll = self.piano.as_ref().map(|p| p.channel);
+        if roll.is_some() && self.piano_seen != roll {
+            self.rack_view.selection = roll.into_iter().collect();
+        }
+        self.piano_seen = roll;
+        let input = roll.or_else(|| {
+            self.project
+                .channels
+                .iter()
+                .filter(|c| !c.is_audio())
+                .find(|c| self.rack_view.selection.contains(&c.id))
+                .map(|c| c.id)
+        });
+        self.host.set_input_channel(input);
+    }
+
     /// The Stop button: ends a recording, playback, the Browser preview
     /// and every tail, also when the transport already stands (spec 0.2.9
     /// §5); stopped, it puts the caret at the start.
@@ -1822,7 +1878,8 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 lane,
                 start,
                 count,
-            } => self.place(source, lane, start, count),
+                like,
+            } => self.place(source, lane, start, count, like),
             A::ImportAudio { path, lane, start } => {
                 let dir = self.project_dir().map(Path::to_path_buf);
                 match self.host.import_audio(&path, dir.as_deref()) {
@@ -1869,6 +1926,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
         lane: Option<LaneId>,
         start: u64,
         count: u32,
+        like: Option<playlist::Like>,
     ) -> Result<(), jdance_commands::EditError> {
         let p = &mut self.project;
         let mut edits = Vec::new();
@@ -1894,18 +1952,26 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 let pat = p
                     .pattern(id)
                     .ok_or(jdance_commands::EditError::NoSuchPattern(id))?;
-                let len = pat.length_ticks();
                 let pat = pat.clone();
+                let shape = |c| like.map_or(c, |l| l.apply_pattern(c));
+                let len = shape(jdance_domain::PatternClip::repeating(
+                    ClipId(0),
+                    lane,
+                    &pat,
+                    0,
+                    1,
+                ))
+                .duration;
                 for k in 0..u64::from(count.max(1)) {
                     let cid = ClipId(p.ids.next());
                     ids.push(cid);
-                    edits.push(Edit::AddClip(jdance_domain::PatternClip::repeating(
+                    edits.push(Edit::AddClip(shape(jdance_domain::PatternClip::repeating(
                         cid,
                         lane,
                         &pat,
                         start + k * len,
                         1,
-                    )));
+                    ))));
                 }
             }
             playlist::Source::Asset(_) | playlist::Source::Channel(_) => {
@@ -1964,6 +2030,9 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                     let cid = ClipId(p.ids.next());
                     ids.push(cid);
                     let mut clip = audio_channels::audio_clip(cid, lane, channel, &asset, 0);
+                    if let Some(l) = like {
+                        clip = l.apply_audio(clip);
+                    }
                     let len = p
                         .audio_clip_len(&clip)
                         .unwrap_or_else(|| clip.length(&asset, p.timebase_rate, 1.0));
@@ -1978,18 +2047,23 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                         jdance_commands::EditError::Arrangement("the automation is gone".into())
                     })?
                     .length;
-                for k in 0..u64::from(count.max(1)) {
-                    let cid = ClipId(p.ids.next());
-                    ids.push(cid);
-                    edits.push(Edit::AddAutomationClip(jdance_domain::AutomationClip {
+                let shape = |c| like.map_or(c, |l| l.apply_automation(c));
+                let clip = |cid, at| {
+                    shape(jdance_domain::AutomationClip {
                         id: cid,
                         lane,
                         source: id,
-                        start: start + k * len,
+                        start: at,
                         offset: 0,
                         duration: len,
                         muted: false,
-                    }));
+                    })
+                };
+                let step = clip(ClipId(0), 0).duration;
+                for k in 0..u64::from(count.max(1)) {
+                    let cid = ClipId(p.ids.next());
+                    ids.push(cid);
+                    edits.push(Edit::AddAutomationClip(clip(cid, start + k * step)));
                 }
             }
         }
@@ -2179,10 +2253,12 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
     fn open_clip(&mut self, id: ClipId, now: f64) {
         if let Some(c) = self.project.playlist.clip(id) {
             self.current_pattern = c.pattern;
+            // The instrument that plays in this pattern (spec 0.3.0 §11.1).
             let channel = self
-                .piano
-                .as_ref()
-                .map(|p| p.channel)
+                .project
+                .pattern(c.pattern)
+                .and_then(|pat| self.pattern_instrument(pat))
+                .or_else(|| self.piano.as_ref().map(|p| p.channel))
                 .or_else(|| {
                     self.rack_view
                         .selection
@@ -2328,6 +2404,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                     // The playlist follows the current pattern.
                 }
                 self.playlist_view.source = Some(src);
+                self.playlist_view.like = None;
                 Ok(())
             }
             A::OpenPattern(id) => {
@@ -4144,6 +4221,7 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
         {
             self.piano = None;
         }
+        self.follow_input();
         let piano_docked = !self.layout.is_undocked(dock::Panel::PianoRoll);
         // The editor keys go to the editor last clicked; a docked Piano
         // Roll hides the Playlist and has them (spec 0.2.7 §1 item 1).
@@ -4734,6 +4812,7 @@ mod pattern_caret_tests {
                 lane: Some(lane),
                 start: 960,
                 count: 1,
+                like: None,
             },
             0.0,
         );
@@ -4755,6 +4834,7 @@ mod pattern_caret_tests {
                 lane: Some(lane),
                 start: 7_680,
                 count: 2,
+                like: None,
             },
             0.0,
         );
@@ -4845,6 +4925,56 @@ mod pattern_caret_tests {
         a.undo(0.0);
         assert_eq!(a.project.patterns.len(), patterns);
         assert!(a.project.channels.is_empty());
+    }
+
+    #[test]
+    fn draw_copies_take_the_state_of_the_clicked_clip() {
+        let mut a = app();
+        let pat = a.project.patterns[0].id;
+        let lane = a.project.playlist.lanes[2].id;
+        let like = playlist::Like::Pattern {
+            offset: 960,
+            duration: 1_920,
+            looped: false,
+        };
+        a.playlist_action(
+            playlist::PlaylistAction::Place {
+                source: playlist::Source::Pattern(pat),
+                lane: Some(lane),
+                start: 0,
+                count: 2,
+                like: Some(like),
+            },
+            0.0,
+        );
+        let mut placed: Vec<_> = a
+            .project
+            .playlist
+            .clips
+            .iter()
+            .filter(|c| c.lane == lane)
+            .map(|c| (c.start, c.offset, c.duration, c.looped))
+            .collect();
+        placed.sort_unstable();
+        assert_eq!(placed, [(0, 960, 1_920, false), (1_920, 960, 1_920, false)]);
+    }
+
+    #[test]
+    fn opening_a_pattern_plays_its_instrument_with_the_input() {
+        let mut a = app();
+        let keys =
+            jdance_commands::add_sampler_channel(&mut a.history, &mut a.project, "Keys").unwrap();
+        let bass =
+            jdance_commands::add_sampler_channel(&mut a.history, &mut a.project, "Bass").unwrap();
+        a.project.patterns[0].row_mut(bass).steps[0].on = true;
+        a.rack_view.selection = std::iter::once(keys).collect();
+        a.follow_input();
+        assert_eq!(a.host.input, Some(keys), "no roll: the selected channel");
+        a.open_clip(ClipId(900), 0.0);
+        a.follow_input();
+        assert_eq!(a.piano.as_ref().map(|p| p.channel), Some(bass));
+        assert!(a.rack_view.selection.contains(&bass) && !a.rack_view.selection.contains(&keys));
+        assert_eq!(a.host.input, Some(bass));
     }
 
     #[test]

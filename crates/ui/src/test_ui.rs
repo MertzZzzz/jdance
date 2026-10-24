@@ -117,6 +117,8 @@ pub(crate) struct StubHost {
     pub stops: u32,
     /// Files previewed, in order.
     pub previews: Vec<std::path::PathBuf>,
+    /// The channel live input plays.
+    pub input: Option<jdance_domain::ChannelId>,
     /// What `read_midi` returns.
     pub midi: Option<crate::MidiNotes>,
     /// Files asked to import, by ticket (1, 2, …); the test answers
@@ -164,6 +166,9 @@ impl crate::Host for StubHost {
     }
     fn take_imports(&mut self) -> Vec<(u64, Result<crate::ImportedAudio, String>)> {
         std::mem::take(&mut self.imported)
+    }
+    fn set_input_channel(&mut self, ch: Option<jdance_domain::ChannelId>) {
+        self.input = ch;
     }
     fn read_midi(&mut self, _: &std::path::Path) -> Result<crate::MidiNotes, String> {
         self.midi.clone().ok_or_else(|| "no file".into())

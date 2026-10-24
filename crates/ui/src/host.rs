@@ -347,6 +347,8 @@ pub trait Host {
     /// Plays (`Some(velocity)`) or releases a held note on `channel`
     /// outside the sequencer: piano keys, MIDI input.
     fn live_note(&mut self, _channel: jdance_domain::ChannelId, _key: u8, _velocity: Option<f32>) {}
+    /// The channel MIDI input plays (spec 0.3.0 §11.3, §12).
+    fn set_input_channel(&mut self, _channel: Option<jdance_domain::ChannelId>) {}
     fn set_mode(&mut self, mode: TransportMode);
     /// Clicks `beats` beats while stopped, then plays (MET-021); Stop
     /// cancels the count-in.

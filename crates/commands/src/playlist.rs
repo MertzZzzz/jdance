@@ -685,11 +685,18 @@ pub fn audio_clip_edge(
         }
         Edge::Left => {
             let delta = ((at - start) as f64 * ratio).round() as i64;
-            let new_in = (clip.source_in as i64 + delta).clamp(0, clip.source_out as i64 - 1);
-            let moved = ((new_in - clip.source_in as i64) as f64 / ratio).round() as i64;
+            let wanted = clip.source_in as i64 + delta;
+            let new_in = wanted.clamp(0, clip.source_out as i64 - 1);
+            // The start lands on `at` itself (the snapped line, spec 0.3.0
+            // §10.1); only a clamped edge is placed from the source.
+            let new_start = if new_in == wanted {
+                at
+            } else {
+                start + ((new_in - clip.source_in as i64) as f64 / ratio).round() as i64
+            };
             AudioClip {
                 source_in: new_in as u64,
-                start: (start + moved).max(0) as u64,
+                start: new_start.max(0) as u64,
                 ..*clip
             }
         }
@@ -1178,6 +1185,10 @@ mod tests {
         // Left edge right trims and moves the start.
         let t = audio_clip_edge(&c, &asset, 48_000, 1.0, Edge::Left, 48_000 + 4_800);
         assert_eq!((t.source_in, t.start), (11_025 + 4_410, 52_800));
+        // A grid line that is no whole frame of the file: the start is on
+        // the line exactly (spec 0.3.0 §10.1).
+        let t = audio_clip_edge(&c, &asset, 48_000, 1.0, Edge::Left, 48_000 + 4_801);
+        assert_eq!(t.start, 52_801);
 
         let at = 48_000 + 12_000;
         let (a, b) = slice_audio_clip(&c, &asset, 48_000, 1.0, at, ClipId(5)).unwrap();

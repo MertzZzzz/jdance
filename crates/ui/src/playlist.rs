@@ -105,6 +105,103 @@ pub(crate) enum Source {
     Automation(AutomationId),
 }
 
+/// The state a clicked clip gives the copies Draw and Paint place (spec
+/// 0.3.0 §9). Mute is not copied.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Like {
+    Pattern {
+        offset: u64,
+        duration: u64,
+        looped: bool,
+    },
+    Audio {
+        source_in: u64,
+        source_out: u64,
+        speed: f32,
+        gain: f32,
+        fade_in: u64,
+        fade_out: u64,
+    },
+    Automation {
+        offset: u64,
+        duration: u64,
+    },
+}
+
+impl Like {
+    fn of(item: &Item) -> Self {
+        match *item {
+            Item::Pattern(c) => Like::Pattern {
+                offset: c.offset,
+                duration: c.duration,
+                looped: c.looped,
+            },
+            Item::Audio(c) => Like::Audio {
+                source_in: c.source_in,
+                source_out: c.source_out,
+                speed: c.speed,
+                gain: c.gain,
+                fade_in: c.fade_in,
+                fade_out: c.fade_out,
+            },
+            Item::Automation(c) => Like::Automation {
+                offset: c.offset,
+                duration: c.duration,
+            },
+        }
+    }
+
+    /// `clip` with this state, when it is of the same kind.
+    pub fn apply_audio(self, clip: AudioClip) -> AudioClip {
+        match self {
+            Like::Audio {
+                source_in,
+                source_out,
+                speed,
+                gain,
+                fade_in,
+                fade_out,
+            } => AudioClip {
+                source_in,
+                source_out,
+                speed,
+                gain,
+                fade_in,
+                fade_out,
+                ..clip
+            },
+            _ => clip,
+        }
+    }
+
+    pub fn apply_pattern(self, clip: PatternClip) -> PatternClip {
+        match self {
+            Like::Pattern {
+                offset,
+                duration,
+                looped,
+            } => PatternClip {
+                offset,
+                duration,
+                looped,
+                ..clip
+            },
+            _ => clip,
+        }
+    }
+
+    pub fn apply_automation(self, clip: AutomationClip) -> AutomationClip {
+        match self {
+            Like::Automation { offset, duration } => AutomationClip {
+                offset,
+                duration,
+                ..clip
+            },
+            _ => clip,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum DragKind {
     Move,
@@ -142,6 +239,9 @@ pub(crate) struct PlaylistView {
     grid: u64,
     pub tool: Tool,
     pub source: Option<Source>,
+    /// The clicked clip whose state the copies take (spec 0.3.0 §9);
+    /// `None` = the source as it is.
+    pub like: Option<Like>,
     /// Pattern current at the last frame: choosing another one makes it
     /// the source.
     last_pattern: Option<PatternId>,
@@ -231,6 +331,7 @@ impl Default for PlaylistView {
             grid: u64::from(TICKS_PER_STEP),
             tool: Tool::Draw,
             source: None,
+            like: None,
             last_pattern: None,
             erased: BTreeSet::new(),
             rmb: crate::widgets::RightSweep::default(),
@@ -262,6 +363,8 @@ pub(crate) enum PlaylistAction {
         lane: Option<LaneId>,
         start: u64,
         count: u32,
+        /// The state the copies take (spec 0.3.0 §9).
+        like: Option<Like>,
     },
     Duplicate(Vec<ClipId>),
     MakeUnique(ClipId),
@@ -472,6 +575,27 @@ fn source_len(project: &Project, source: Source) -> Option<f64> {
     }
 }
 
+/// Length in ticks of one copy of `source` with the state `like` (spec
+/// 0.3.0 §9).
+fn copy_len(project: &Project, source: Source, like: Option<Like>) -> Option<f64> {
+    match (source, like) {
+        (Source::Pattern(_), Some(Like::Pattern { duration, .. }))
+        | (Source::Automation(_), Some(Like::Automation { duration, .. })) => Some(duration as f64),
+        (Source::Channel(ch), Some(l @ Like::Audio { .. })) => {
+            let asset = project.asset(project.channel(ch)?.clip_asset_id()?)?;
+            let clip = l.apply_audio(jdance_commands::audio_channels::audio_clip(
+                ClipId(0),
+                LaneId(0),
+                ch,
+                asset,
+                0,
+            ));
+            project.audio_clip_ticks(&clip).map(|(a, b)| b - a)
+        }
+        _ => source_len(project, source),
+    }
+}
+
 fn source_name(project: &Project, source: Source) -> Option<String> {
     match source {
         Source::Pattern(id) => project.pattern(id).map(|p| p.name.clone()),
@@ -524,6 +648,7 @@ impl PlaylistView {
     fn activate(&mut self, item: &Item, out: &mut PlaylistOutput) {
         let source = item.source();
         self.source = Some(source);
+        self.like = Some(Like::of(item));
         if let Source::Pattern(id) = source {
             self.last_pattern = Some(id);
             out.select_pattern = Some(id);
@@ -546,6 +671,7 @@ impl PlaylistView {
             // The active source was removed: the first pattern, if any
             // (§2 item 12).
             self.source = project.patterns.first().map(|p| Source::Pattern(p.id));
+            self.like = None;
         }
         if self.armed.is_some_and(|l| pl.lane(l).is_none()) {
             self.armed = None;
@@ -667,6 +793,9 @@ impl PlaylistView {
         self.grid = u64::from(snap.max(1));
         if self.last_pattern != Some(current_pattern) {
             self.last_pattern = Some(current_pattern);
+            if self.source != Some(Source::Pattern(current_pattern)) {
+                self.like = None;
+            }
             self.source = Some(Source::Pattern(current_pattern));
         }
         let mut out = PlaylistOutput::default();
@@ -1197,7 +1326,7 @@ impl PlaylistView {
         // Ghost of Draw / Paint copies.
         let ghosts: Vec<(usize, f64, f64)> = match (drag_kind, pointer, self.source) {
             (Some(DragKind::Place), Some(p), Some(src)) => {
-                match (lane_at(p.y), source_len(project, src)) {
+                match (lane_at(p.y), copy_len(project, src, self.like)) {
                     (Some(l), Some(len)) if l < n_lanes => {
                         let a = snapped(p.x) as f64;
                         vec![(l, a, a + len)]
@@ -1206,7 +1335,7 @@ impl PlaylistView {
                 }
             }
             (Some(DragKind::Paint { lane, start }), Some(p), Some(src)) if lane < n_lanes => {
-                match source_len(project, src) {
+                match copy_len(project, src, self.like) {
                     Some(len) if len > 0.0 => {
                         let count = paint_count(start, tick_at(p.x), len);
                         (0..count)
@@ -1278,6 +1407,7 @@ impl PlaylistView {
                             lane: Some(pl.lanes[lane].id),
                             start: start as u64,
                             count: ghosts.len() as u32,
+                            like: self.like,
                         });
                     }
                 }
@@ -1389,6 +1519,7 @@ impl PlaylistView {
                                 lane: Some(pl.lanes[l].id),
                                 start: snapped(p.x) as u64,
                                 count: 1,
+                                like: self.like,
                             });
                         }
                         (_, None) => {
@@ -1445,11 +1576,13 @@ impl PlaylistView {
         {
             let (lane, start) = drop_at(p);
             self.source = Some(item.0);
+            self.like = None;
             out.actions.push(PlaylistAction::Place {
                 source: item.0,
                 lane,
                 start,
                 count: 1,
+                like: None,
             });
         }
         if let Some(item) = dnd_release::<BrowserItem>(&response)
