@@ -393,6 +393,7 @@ pub(crate) fn show(
             egui::ScrollArea::horizontal()
                 .id_salt("mixer_strips")
                 .show(ui, |ui| {
+                    crate::widgets::middle_pan(ui);
                     ui.horizontal_top(|ui| {
                         ui.spacing_mut().item_spacing.x = 2.0;
                         scale(ui, view.view);
@@ -586,13 +587,20 @@ fn strip(
                     let lamp = crate::widgets::lamp(ui, !t.muted).on_hover_text(if t.is_master() {
                         "Mute"
                     } else {
-                        "Mute (click) · solo (right-click)"
+                        "Mute (click) · solo (right-click; Ctrl+right-click adds)"
                     });
                     if lamp.clicked() {
                         out.edits.push((Edit::SetTrackMuted(t.id, !t.muted), false));
                     }
-                    if lamp.secondary_clicked() && !t.is_master() {
-                        out.edits.push((Edit::SetTrackSolo(t.id, !t.solo), false));
+                    // Spec 0.3.0 §7: solo alone; Ctrl adds to the solo.
+                    if lamp.secondary_clicked() {
+                        let add = ui.input(|i| i.modifiers.command);
+                        if let Some(e) = jdance_commands::solo_track(mixer, t.id, add) {
+                            out.edits.push((e, false));
+                        }
+                    }
+                    if t.solo {
+                        crate::widgets::solo_ring(ui, &lamp);
                     }
                     if t.solo {
                         ui.painter().text(

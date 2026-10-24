@@ -55,6 +55,8 @@ pub(crate) struct RackOutput {
     /// Open Channel Settings (`true`: on the sample tab).
     pub open_settings: Option<(ChannelId, bool)>,
     pub clone: Vec<ChannelId>,
+    /// Route these channels to free mixer tracks (spec 0.3.0 §5).
+    pub free_track: Vec<ChannelId>,
     /// Channels to delete after the user confirms.
     pub delete: Vec<ChannelId>,
     /// Open the Sample Selection Dialog for this purpose.
@@ -174,6 +176,7 @@ impl RackView {
             .max_height(ui.available_height())
             .auto_shrink([false, true])
             .show(ui, |ui| {
+                crate::widgets::middle_pan(ui);
                 ui.horizontal(|ui| {
                     let label = |ui: &mut egui::Ui, w: f32, t: &str| {
                         ui.add_sized(
@@ -705,6 +708,14 @@ impl RackView {
             };
             if ui.button(clone).clicked() {
                 out.clone.extend(selection.iter().copied());
+                ui.close();
+            }
+            if ui
+                .button(format!("Route to free mixer track ({})", selection.len()))
+                .on_hover_text("Each channel gets an empty mixer track of its own")
+                .clicked()
+            {
+                out.free_track.extend(selection.iter().copied());
                 ui.close();
             }
             let n = project.channels.len();

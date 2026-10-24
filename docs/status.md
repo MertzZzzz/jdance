@@ -537,3 +537,34 @@ Linux, тест окна редактора под Xvfb), clippy `-D warnings` �
 - §1.6 Make unique для клипов сэмплера копирует сэмплер вместе с файлом
   клипов (как для аудиоканалов).
 - §6.4 файл читается в потоке интерфейса (MIDI-файлы маленькие).
+
+## Релиз 0.3.0 (спецификация `docs/spec/spec-0.3.0.md`)
+
+Проверки на ветке `claude/epic-hypatia-j7xp2a`: `cargo test --workspace`
+(489 тестов на Linux), clippy `-D warnings` (Linux и
+`x86_64-pc-windows-msvc` для `jdance-app`), `cargo xtask check`, запуск
+под Xvfb (`--smoke-test-frames 60`).
+
+| Пункт | Статус | Артефакт / комментарий |
+|---|---|---|
+| §1 Ctrl+C / V при кнопке в фокусе; фокус клавиш по окнам | PASS | `ui` тест `the_keys_work_while_a_button_has_the_focus` (на коде 0.2.9 падает) |
+| §2 Ctrl+M в piano roll, перетаскивание `.mid` | PASS | `ui` тесты `a_midi_file_goes_into_the_piano_roll_at_the_drop_in_one_step`, `a_midi_file_on_the_playlist_becomes_a_pattern_and_its_clip`; перетаскивание мышью — код |
+| §3 Неверное число треков, RMID, системные байты, длины | PASS | `persistence` тест `wrong_track_counts_rmid_system_bytes_and_bad_lengths_still_give_notes` |
+| §4 Кнопки транспорта не забирают фокус | PASS | `theme::icon_button`; тест §1 |
+| §5 Route to free mixer track | PASS | `commands` тест `free_tracks_are_found_or_made_one_per_channel` |
+| §6 Средняя кнопка и автопрокрутка у края | PASS | `ui` тест `the_middle_button_drags_the_view_and_edges_follow_a_drag`; Shift+колесо — egui |
+| §7 Соло правым кликом | PASS | `commands` тест `a_right_click_solos_alone_and_again_clears_and_ctrl_adds` |
+| §8 Фоновая загрузка модулей, бюджет кадра, статус | PASS | `app` тест `instrument_channels_get_live_instances` (через предзагрузку); §8.6–8.7 — P2, не сделаны |
+| §9 Образец клипа для карандаша и кисти | PASS | `ui` тест `draw_copies_take_the_state_of_the_clicked_clip` |
+| §10 Левый край по Snap | PASS | `commands` тест `audio_clip_edges_and_slice_share_one_boundary` |
+| §11 Паттерн переключает вход на свой инструмент | PASS | `ui` тест `opening_a_pattern_plays_its_instrument_with_the_input` |
+| §12 MIDI-вход | PASS | `app` тесты `midi_in::*`; с реальным устройством не проверялся (в контейнере нет MIDI) |
+| Windows MSI 0.3.0 | — | workflow `Release` |
+
+Отступления от спецификации 0.3.0:
+
+- §12.7: нота доходит до движка в ближайшем кадре интерфейса (поток MIDI
+  будит интерфейс сразу), а не напрямую из потока MIDI.
+- §8.4: медленная загрузка сообщается уведомлением, отметки в окне
+  Plugins нет.
+- §2.5 (File › Import MIDI file) и §10.4 не сделаны.

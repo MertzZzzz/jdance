@@ -59,6 +59,8 @@ pub(crate) struct SettingsOutput {
     /// Audio channel: select its Playlist clips / open the Sample Editor.
     pub select_clips: bool,
     pub open_clip_editor: bool,
+    /// Route to a free mixer track (spec 0.3.0 §5).
+    pub free_track: bool,
 }
 
 use crate::piano::key_name;
@@ -701,6 +703,14 @@ fn header(ui: &mut egui::Ui, project: &Project, ch: &Channel, out: &mut Settings
                     }
                 }
             });
+        // Spec 0.3.0 §5: a mixer track of its own in one click.
+        if ui
+            .button("→ Free track")
+            .on_hover_text("Route this channel to the first free mixer track (a new one if none)")
+            .clicked()
+        {
+            out.free_track = true;
+        }
     });
 }
 

@@ -7,8 +7,8 @@
 
 use crate::{Edit, EditError, History};
 use jdance_domain::{
-    AudioAsset, AudioClip, AutomationClip, ClipId, LANE_COLORS, Lane, LaneId, MAX_PATTERN_STEPS,
-    Pattern, PatternClip, PatternId, Playlist, Project, Step, TICKS_PER_STEP,
+    AudioAsset, AudioClip, AutomationClip, ChannelId, ClipId, LANE_COLORS, Lane, LaneId,
+    MAX_PATTERN_STEPS, Pattern, PatternClip, PatternId, Playlist, Project, Step, TICKS_PER_STEP,
 };
 use std::collections::BTreeSet;
 
@@ -407,6 +407,29 @@ pub fn add_pattern(
     Ok(id)
 }
 
+/// A new pattern named `name` holding `notes` (from tick 0) for
+/// `channel`, as long as whole bars of the project signature need (spec
+/// 0.3.0 §2.4); notes past the longest pattern are left out. Not added.
+pub fn pattern_with_notes(
+    p: &mut Project,
+    name: impl Into<String>,
+    channel: ChannelId,
+    notes: &[jdance_domain::Note],
+) -> (Pattern, usize) {
+    let mut pattern = Pattern::new(PatternId(p.ids.next()), name);
+    let bar = p.time_signature.steps_per_bar().max(1);
+    let limit = MAX_PATTERN_STEPS * TICKS_PER_STEP;
+    let kept: Vec<_> = notes.iter().filter(|n| n.start < limit).copied().collect();
+    let end = kept.iter().map(|n| n.end().min(limit)).max().unwrap_or(0);
+    let steps = end.div_ceil(TICKS_PER_STEP).div_ceil(bar).max(1) * bar;
+    pattern.length_steps = steps.min(MAX_PATTERN_STEPS / bar * bar).max(bar);
+    let row = pattern.row_mut(channel);
+    row.notes = kept.clone();
+    jdance_domain::assign_note_ids(&mut row.notes);
+    jdance_domain::sort_notes(&mut row.notes);
+    (pattern, notes.len() - kept.len())
+}
+
 /// Adds a lane at the end with the next default color.
 pub fn add_lane(history: &mut History, p: &mut Project) -> Result<LaneId, EditError> {
     let name = format!("Lane {}", p.playlist.lanes.len() + 1);
@@ -662,11 +685,18 @@ pub fn audio_clip_edge(
         }
         Edge::Left => {
             let delta = ((at - start) as f64 * ratio).round() as i64;
-            let new_in = (clip.source_in as i64 + delta).clamp(0, clip.source_out as i64 - 1);
-            let moved = ((new_in - clip.source_in as i64) as f64 / ratio).round() as i64;
+            let wanted = clip.source_in as i64 + delta;
+            let new_in = wanted.clamp(0, clip.source_out as i64 - 1);
+            // The start lands on `at` itself (the snapped line, spec 0.3.0
+            // §10.1); only a clamped edge is placed from the source.
+            let new_start = if new_in == wanted {
+                at
+            } else {
+                start + ((new_in - clip.source_in as i64) as f64 / ratio).round() as i64
+            };
             AudioClip {
                 source_in: new_in as u64,
-                start: (start + moved).max(0) as u64,
+                start: new_start.max(0) as u64,
                 ..*clip
             }
         }
@@ -1155,6 +1185,10 @@ mod tests {
         // Left edge right trims and moves the start.
         let t = audio_clip_edge(&c, &asset, 48_000, 1.0, Edge::Left, 48_000 + 4_800);
         assert_eq!((t.source_in, t.start), (11_025 + 4_410, 52_800));
+        // A grid line that is no whole frame of the file: the start is on
+        // the line exactly (spec 0.3.0 §10.1).
+        let t = audio_clip_edge(&c, &asset, 48_000, 1.0, Edge::Left, 48_000 + 4_801);
+        assert_eq!(t.start, 52_801);
 
         let at = 48_000 + 12_000;
         let (a, b) = slice_audio_clip(&c, &asset, 48_000, 1.0, at, ClipId(5)).unwrap();

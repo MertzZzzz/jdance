@@ -130,6 +130,12 @@ pub(crate) fn lamp(ui: &mut Ui, on: bool) -> Response {
     resp
 }
 
+/// The accent ring of a soloed lamp (spec 0.3.0 §7.3).
+pub(crate) fn solo_ring(ui: &Ui, lamp: &Response) {
+    ui.painter()
+        .circle_stroke(lamp.rect.center(), 7.5, Stroke::new(1.5, theme::AMBER));
+}
+
 /// A right-button delete gesture: a press starts it, and while the button
 /// is held every point the pointer passes over is reported, including the
 /// path between frames (a fast sweep must not skip small objects).
@@ -244,5 +250,112 @@ mod tests {
         }
         assert!(!started);
         assert!(!sweep.active());
+    }
+}
+
+/// Whether a pointer press started inside `area` in the window `ui` is
+/// drawn in (spec 0.3.0 §1.3: each window reads its own input).
+pub(crate) fn pressed_in(ui: &egui::Ui, area: egui::Rect) -> bool {
+    ui.input(|i| {
+        i.pointer.any_pressed() && i.pointer.press_origin().is_some_and(|p| area.contains(p))
+    })
+}
+
+/// Middle button held down inside the visible part of a scroll area:
+/// the view follows the mouse both ways (spec 0.3.0 §6.3). Call it inside
+/// the scroll area's contents; nested areas each take their own axis.
+pub(crate) fn middle_pan(ui: &Ui) {
+    let clip = ui.clip_rect();
+    let delta = ui.input(|i| {
+        let inside = i.pointer.press_origin().is_some_and(|p| clip.contains(p));
+        (i.pointer.middle_down() && inside).then(|| i.pointer.delta())
+    });
+    if let Some(d) = delta.filter(|d| *d != egui::Vec2::ZERO) {
+        ui.scroll_with_delta_animation(d, egui::style::ScrollAnimation::none());
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+    }
+}
+
+/// While something is dragged near the edge of the visible part of a
+/// scroll area, the view moves after the mouse, faster the further out
+/// it goes (spec 0.3.0 §6.4). Call it inside the scroll area's contents.
+pub(crate) fn edge_scroll(ui: &Ui, dragging: bool) {
+    const MARGIN: f32 = 28.0;
+    if !dragging {
+        return;
+    }
+    let clip = ui.clip_rect();
+    let Some(p) = ui.input(|i| {
+        i.pointer
+            .primary_down()
+            .then(|| i.pointer.latest_pos())
+            .flatten()
+    }) else {
+        return;
+    };
+    let step = |pos: f32, lo: f32, hi: f32| -> f32 {
+        if pos < lo + MARGIN {
+            (lo + MARGIN - pos).min(4.0 * MARGIN) * 0.35
+        } else if pos > hi - MARGIN {
+            -(pos - (hi - MARGIN)).min(4.0 * MARGIN) * 0.35
+        } else {
+            0.0
+        }
+    };
+    let d = egui::vec2(
+        step(p.x, clip.left(), clip.right()),
+        step(p.y, clip.top(), clip.bottom()),
+    );
+    if d != egui::Vec2::ZERO {
+        ui.scroll_with_delta_animation(d, egui::style::ScrollAnimation::none());
+        ui.ctx().request_repaint();
+    }
+}
+
+#[cfg(test)]
+mod pan_tests {
+    use crate::test_ui::Driver;
+    use egui::{Event, PointerButton, pos2, vec2};
+
+    fn run(d: &mut Driver, events: Vec<Event>, drag: bool) -> egui::Vec2 {
+        let mut offset = egui::Vec2::ZERO;
+        d.frame(events, &mut |ui| {
+            let o = egui::ScrollArea::both()
+                .id_salt("pan")
+                .max_width(400.0)
+                .max_height(300.0)
+                .show(ui, |ui| {
+                    super::middle_pan(ui);
+                    super::edge_scroll(ui, drag);
+                    ui.allocate_space(vec2(3000.0, 3000.0));
+                });
+            offset = o.state.clamped_offset();
+        });
+        offset
+    }
+
+    #[test]
+    fn the_middle_button_drags_the_view_and_edges_follow_a_drag() {
+        let mut d = Driver::new();
+        let middle = |p, pressed| Event::PointerButton {
+            pos: p,
+            button: PointerButton::Middle,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        run(&mut d, vec![Event::PointerMoved(pos2(200.0, 150.0))], false);
+        run(&mut d, vec![middle(pos2(200.0, 150.0), true)], false);
+        run(&mut d, vec![Event::PointerMoved(pos2(170.0, 130.0))], false);
+        let o = run(&mut d, vec![], false);
+        assert_eq!(o, vec2(30.0, 20.0), "the content follows the mouse");
+        run(&mut d, vec![middle(pos2(170.0, 130.0), false)], false);
+        // A primary drag at the right edge scrolls right.
+        let before = run(&mut d, vec![Event::PointerMoved(pos2(200.0, 150.0))], false);
+        let press = d.button(pos2(200.0, 150.0), true);
+        run(&mut d, vec![press], true);
+        run(&mut d, vec![Event::PointerMoved(pos2(398.0, 150.0))], true);
+        let after = run(&mut d, vec![], true);
+        assert!(after.x > before.x, "{before:?} → {after:?}");
+        assert_eq!(after.y, before.y);
     }
 }

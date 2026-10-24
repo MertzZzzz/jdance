@@ -16,7 +16,8 @@ pub mod sampler;
 pub use mixer::{add_insert, add_send, add_track};
 pub use playlist::{
     Edge, add_clip, add_lane, add_pattern, audio_clip_edge, duplicate_clips, make_unique,
-    new_lane_edit, pattern_clip_edge, slice_audio_clip, slice_pattern_clip, steps_beyond,
+    new_lane_edit, pattern_clip_edge, pattern_with_notes, slice_audio_clip, slice_pattern_clip,
+    steps_beyond,
 };
 
 use jdance_domain::{
@@ -1267,6 +1268,84 @@ pub fn remove_automation(
     Ok(())
 }
 
+/// «Route to free mixer track» (spec 0.3.0 §5): each channel gets the
+/// first track no channel plays into and with no effects, in mixer order;
+/// with none left a new track named after the channel. Returns the edit
+/// (one undo step) and the track of the last channel.
+pub fn route_to_free_tracks(p: &mut Project, channels: &[ChannelId]) -> Option<(Edit, TrackId)> {
+    let mut taken: Vec<TrackId> = p.channels.iter().map(|c| c.track).collect();
+    let mut edits = Vec::new();
+    let mut last = None;
+    let mut added = 0;
+    for &ch in channels {
+        let Some(name) = p.channel(ch).map(|c| c.name.clone()) else {
+            continue;
+        };
+        let free = p
+            .mixer
+            .tracks
+            .iter()
+            .find(|t| t.inserts.is_empty() && !taken.contains(&t.id))
+            .map(|t| t.id);
+        let track = match free {
+            Some(t) => t,
+            None => {
+                let t = TrackId(p.ids.next());
+                edits.push(Edit::AddTrack {
+                    track: MixerTrack::new(t, name),
+                    index: p.mixer.tracks.len() + added,
+                });
+                added += 1;
+                t
+            }
+        };
+        taken.push(track);
+        edits.push(Edit::SetChannelTrack(ch, track));
+        last = Some(track);
+    }
+    Some((Edit::Batch(edits), last?))
+}
+
+/// Right click on a lane's lamp (spec 0.3.0 §7): solo it alone; again on
+/// the only solo lane: no solo; `add` (Ctrl) toggles it among the others.
+/// `None` when nothing changes.
+pub fn solo_lane(p: &Project, lane: LaneId, add: bool) -> Option<Edit> {
+    let lanes = &p.playlist.lanes;
+    let me = lanes.iter().find(|l| l.id == lane)?;
+    let edits: Vec<Edit> = if add {
+        vec![Edit::SetLaneSolo(lane, !me.solo)]
+    } else {
+        let alone = me.solo && lanes.iter().all(|l| l.id == lane || !l.solo);
+        lanes
+            .iter()
+            .filter_map(|l| {
+                let want = !alone && l.id == lane;
+                (l.solo != want).then_some(Edit::SetLaneSolo(l.id, want))
+            })
+            .collect()
+    };
+    (!edits.is_empty()).then_some(Edit::Batch(edits))
+}
+
+/// The same for a mixer track's lamp; the master has no solo.
+pub fn solo_track(mixer: &Mixer, track: TrackId, add: bool) -> Option<Edit> {
+    let tracks = &mixer.tracks;
+    let me = tracks.iter().find(|t| t.id == track)?;
+    let edits: Vec<Edit> = if add {
+        vec![Edit::SetTrackSolo(track, !me.solo)]
+    } else {
+        let alone = me.solo && tracks.iter().all(|t| t.id == track || !t.solo);
+        tracks
+            .iter()
+            .filter_map(|t| {
+                let want = !alone && t.id == track;
+                (t.solo != want).then_some(Edit::SetTrackSolo(t.id, want))
+            })
+            .collect()
+    };
+    (!edits.is_empty()).then_some(Edit::Batch(edits))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1761,6 +1840,71 @@ mod tests {
         let mut h = History::default();
         h.execute(&mut p, Edit::AddAsset(asset.clone())).unwrap();
         (p, h, asset)
+    }
+
+    #[test]
+    fn free_tracks_are_found_or_made_one_per_channel() {
+        let mut p = Project::new();
+        let mut h = History::default();
+        let a = add_sampler_channel(&mut h, &mut p, "Kick").unwrap();
+        let b = add_sampler_channel(&mut h, &mut p, "Snare").unwrap();
+        let t1 = TrackId(p.ids.next());
+        p.mixer.tracks.push(MixerTrack::new(t1, "Insert 1"));
+        let (e, last) = route_to_free_tracks(&mut p, &[a, b]).unwrap();
+        h.execute(&mut p, e).unwrap();
+        assert_eq!(p.channel(a).unwrap().track, t1, "the empty track");
+        let tb = p.channel(b).unwrap().track;
+        assert_eq!(last, tb);
+        assert_eq!(p.mixer.track(tb).unwrap().name, "Snare", "a new one, named");
+        h.undo(&mut p).unwrap();
+        assert_eq!(p.mixer.tracks.len(), 1);
+        assert_eq!(p.channel(b).unwrap().track, TrackId::MASTER);
+    }
+
+    #[test]
+    fn a_right_click_solos_alone_and_again_clears_and_ctrl_adds() {
+        let mut p = Project::new();
+        let mut h = History::default();
+        let (a, b) = (p.playlist.lanes[0].id, p.playlist.lanes[1].id);
+        let solo = |p: &Project| -> Vec<bool> { p.playlist.lanes.iter().map(|l| l.solo).collect() };
+        {
+            let e = solo_lane(&p, a, false).unwrap();
+            h.execute(&mut p, e).unwrap();
+        }
+        assert_eq!(&solo(&p)[..2], [true, false]);
+        {
+            let e = solo_lane(&p, b, false).unwrap();
+            h.execute(&mut p, e).unwrap();
+        }
+        assert_eq!(&solo(&p)[..2], [false, true], "one solo replaces the other");
+        {
+            let e = solo_lane(&p, a, true).unwrap();
+            h.execute(&mut p, e).unwrap();
+        }
+        assert_eq!(&solo(&p)[..2], [true, true], "Ctrl adds");
+        {
+            let e = solo_lane(&p, a, false).unwrap();
+            h.execute(&mut p, e).unwrap();
+        }
+        assert_eq!(&solo(&p)[..2], [true, false]);
+        {
+            let e = solo_lane(&p, a, false).unwrap();
+            h.execute(&mut p, e).unwrap();
+        }
+        assert!(solo(&p).iter().all(|s| !s), "again: no solo");
+        h.undo(&mut p).unwrap();
+        assert_eq!(&solo(&p)[..2], [true, false], "one step");
+        // Tracks: the master never solos.
+        let t = TrackId(p.ids.next());
+        p.mixer
+            .tracks
+            .push(jdance_domain::MixerTrack::new(t, "Drums"));
+        {
+            let e = solo_track(&p.mixer, t, false).unwrap();
+            h.execute(&mut p, e).unwrap();
+        }
+        assert!(p.mixer.track(t).unwrap().solo);
+        assert!(solo_track(&p.mixer, TrackId::MASTER, false).is_none());
     }
 
     #[test]

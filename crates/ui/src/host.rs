@@ -347,6 +347,25 @@ pub trait Host {
     /// Plays (`Some(velocity)`) or releases a held note on `channel`
     /// outside the sequencer: piano keys, MIDI input.
     fn live_note(&mut self, _channel: jdance_domain::ChannelId, _key: u8, _velocity: Option<f32>) {}
+    /// The channel MIDI input plays (spec 0.3.0 §11.3, §12).
+    fn set_input_channel(&mut self, _channel: Option<jdance_domain::ChannelId>) {}
+    /// Called from the MIDI threads to wake the UI (§12.7).
+    fn set_waker(&mut self, _waker: std::sync::Arc<dyn Fn() + Send + Sync>) {}
+    /// MIDI input ports and whether each is enabled (§12.1).
+    fn midi_inputs(&self) -> Vec<(String, bool)> {
+        Vec::new()
+    }
+    fn set_midi_input(&mut self, _name: &str, _on: bool) {}
+    fn rescan_midi(&mut self) {}
+    /// MIDI arrived in the last moment (§12.4).
+    fn midi_active(&self) -> bool {
+        false
+    }
+    /// Plugins of the project still loading (spec 0.3.0 §8.3): loaded,
+    /// wanted and the next one's name.
+    fn plugin_loading(&self) -> Option<(usize, usize, String)> {
+        None
+    }
     fn set_mode(&mut self, mode: TransportMode);
     /// Clicks `beats` beats while stopped, then plays (MET-021); Stop
     /// cancels the count-in.
@@ -671,4 +690,7 @@ pub struct MidiNotes {
     pub dropped: usize,
     /// The file's first tempo, not applied (§6.8).
     pub tempo_bpm: Option<f64>,
+    /// Tracks and events read, for a file without notes (spec 0.3.0 §3.5).
+    pub tracks: u16,
+    pub events: usize,
 }

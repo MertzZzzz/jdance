@@ -213,6 +213,9 @@ pub(crate) struct PianoRoll {
     reveal: Option<u32>,
     /// Where the Piano Roll was drawn, for the app's key focus.
     pub area: Rect,
+    /// A press inside the roll this frame, in its own window: the app
+    /// gives it the editor keys.
+    pub pressed: bool,
     hover_hint: &'static str,
 }
 
@@ -362,6 +365,7 @@ impl PianoRoll {
             caret_tick: 0,
             reveal: None,
             area: Rect::NOTHING,
+            pressed: false,
             hover_hint: "",
         }
     }
@@ -773,6 +777,8 @@ impl PianoRoll {
         }
         let mut h_offset = 0.0;
         let scroll_out = scroll.show(ui, |ui| {
+            // Spec 0.3.0 §6.4: dragging near the edge moves the view.
+            crate::widgets::edge_scroll(ui, self.drag.is_some());
             let (rect, response) =
                 ui.allocate_exact_size(vec2(KEYBOARD_W + grid_w, grid_h), Sense::click_and_drag());
             let clip = ui.clip_rect();
@@ -1471,28 +1477,31 @@ impl PianoRoll {
             // MIDI files dropped from the Browser or the system (§6.5).
             let drop_tick = |x: f32| self.snap_tick((x - grid.left()) / px_tick);
             let pointer = ui.ctx().pointer_latest_pos().filter(|p| grid.contains(*p));
-            if let Some(p) = pointer {
-                if let Some(item) = response.dnd_release_payload::<crate::browser::BrowserItem>()
-                    && let crate::browser::BrowserItem::Midi(path) = &*item
-                {
-                    out.midi = Some(MidiRequest::Drop {
-                        path: path.clone(),
-                        tick: drop_tick(p.x),
-                    });
-                }
-                let dropped = ui.input(|i| {
-                    i.raw
-                        .dropped_files
-                        .iter()
-                        .map(|f| f.path().to_path_buf())
-                        .find(|f| crate::browser::is_midi(f))
+            if let Some(p) = pointer
+                && let Some(item) =
+                    crate::playlist::dnd_release::<crate::browser::BrowserItem>(&response)
+                && let crate::browser::BrowserItem::Midi(path) = &*item
+            {
+                out.midi = Some(MidiRequest::Drop {
+                    path: path.clone(),
+                    tick: drop_tick(p.x),
                 });
-                if let Some(path) = dropped {
-                    out.midi = Some(MidiRequest::Drop {
-                        path,
-                        tick: drop_tick(p.x),
-                    });
-                }
+            }
+            // From the system: where it lands, or at the caret when the
+            // window did not get the pointer (Explorer, spec 0.3.0 §2.3).
+            let dropped = ui.input(|i| {
+                i.raw
+                    .dropped_files
+                    .iter()
+                    .map(|f| f.path().to_path_buf())
+                    .find(|f| crate::browser::is_midi(f))
+            });
+            let over = ui.ctx().pointer_latest_pos().filter(|p| clip.contains(*p));
+            if let Some(path) = dropped
+                && (over.is_some() || ui.ctx().pointer_latest_pos().is_none())
+            {
+                let tick = pointer.map_or(self.caret_tick, |p| drop_tick(p.x));
+                out.midi = Some(MidiRequest::Drop { path, tick });
             }
             h_offset = clip.left() - rect.left();
         });
@@ -1608,6 +1617,7 @@ impl PianoRoll {
             }
         }
         self.area = ui.min_rect();
+        self.pressed = crate::widgets::pressed_in(ui, self.area);
         out
     }
 
@@ -1747,7 +1757,7 @@ impl PianoRoll {
         out: &mut PianoOutput,
     ) {
         use crate::bindings as b;
-        if !self.keys_active || ui.ctx().egui_wants_keyboard_input() || self.dialog.is_some() {
+        if !self.keys_active || ui.ctx().text_edit_focused() || self.dialog.is_some() {
             return;
         }
         let ctx = ui.ctx().clone();
@@ -2121,6 +2131,7 @@ mod key_tests {
         caret: u64,
         snaps: Vec<Snap>,
         close: bool,
+        focused_button: bool,
     }
 
     fn key(k: Key, modifiers: Modifiers) -> Event {
@@ -2162,6 +2173,7 @@ mod key_tests {
                 caret: 0,
                 snaps: Vec::new(),
                 close: false,
+                focused_button: false,
             };
             env.frame(vec![]);
             env.frame(vec![]);
@@ -2179,8 +2191,13 @@ mod key_tests {
                 caret: Some(self.caret),
             };
             let (roll, host, p) = (&mut self.roll, &mut self.host, &self.p);
+            let button = self.focused_button;
             let mut out = PianoOutput::default();
             let mut ui = |ui: &mut egui::Ui| {
+                // A button elsewhere holding the keyboard focus (Play).
+                if button {
+                    ui.button("Play").request_focus();
+                }
                 out = roll.show(ui, p, &pattern, host, marks, Snap::Step);
             };
             self.d.frame(events, &mut ui);
@@ -2230,6 +2247,24 @@ mod key_tests {
     /// As the window system sends them: Ctrl+C / X as clipboard events,
     /// Ctrl+V as a paste of the system clipboard's text (none while it is
     /// empty), never as keys.
+    /// Spec 0.3.0 §1: a button with the keyboard focus (Play after a
+    /// click) no longer turns the editor keys off.
+    #[test]
+    fn the_keys_work_while_a_button_has_the_focus() {
+        let mut e = Env::new(vec![note(480, 60)]);
+        e.focused_button = true;
+        e.frame(vec![]);
+        assert!(e.d.ctx.memory(|m| m.focused().is_some()));
+        e.press(Key::A, CTRL);
+        e.frame(vec![Event::Copy]);
+        let copied = e.d.copied.clone().expect("copied");
+        e.caret = 1920;
+        e.frame(vec![Event::Paste(copied)]);
+        assert_eq!(e.notes().len(), 2);
+        e.press(Key::B, Modifiers::NONE);
+        assert_eq!(e.roll.tool, Tool::Paint);
+    }
+
     #[test]
     fn clipboard_events_copy_and_paste() {
         let mut e = Env::new(vec![note(480, 60), note(960, 64)]);
