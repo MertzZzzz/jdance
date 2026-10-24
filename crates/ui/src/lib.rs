@@ -921,6 +921,15 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
 
     /// Ctrl+L (UI-VIS-064, ACH-033): the selected Channel Rack channels,
     /// instruments and audio alike, play into the selected mixer track.
+    /// Each channel onto a free mixer track (spec 0.3.0 §5), one step; the
+    /// mixer shows the last one.
+    fn route_free(&mut self, ids: &[ChannelId], now: f64) {
+        if let Some((edit, last)) = jdance_commands::route_to_free_tracks(&mut self.project, ids) {
+            self.apply(edit, false, now);
+            self.mixer_view.selected = last;
+        }
+    }
+
     fn route_selected_channels(&mut self, now: f64) {
         let track = self.mixer_view.selected;
         let ids: Vec<ChannelId> = self
@@ -4373,6 +4382,10 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
             self.host
                 .toggle_plugin_editor(jdance_domain::PluginTarget::Channel(id), &title);
         }
+        let free = std::mem::take(&mut out.free_track);
+        if !free.is_empty() {
+            self.route_free(&free, now);
+        }
         for id in std::mem::take(&mut out.clone) {
             match jdance_commands::clone_channel(&mut self.history, &mut self.project, id) {
                 Ok(_) => self.sync_needed = true,
@@ -4478,6 +4491,9 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
                     .collect();
                 self.playlist_view.select_only(&ids);
                 self.show_playlist = true;
+            }
+            if o.free_track {
+                self.route_free(&[w.channel], now);
             }
             let first = self.project.channel_clips(w.channel).next().map(|c| c.id);
             if o.open_clip_editor

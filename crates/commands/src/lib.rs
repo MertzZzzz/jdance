@@ -1268,6 +1268,44 @@ pub fn remove_automation(
     Ok(())
 }
 
+/// «Route to free mixer track» (spec 0.3.0 §5): each channel gets the
+/// first track no channel plays into and with no effects, in mixer order;
+/// with none left a new track named after the channel. Returns the edit
+/// (one undo step) and the track of the last channel.
+pub fn route_to_free_tracks(p: &mut Project, channels: &[ChannelId]) -> Option<(Edit, TrackId)> {
+    let mut taken: Vec<TrackId> = p.channels.iter().map(|c| c.track).collect();
+    let mut edits = Vec::new();
+    let mut last = None;
+    let mut added = 0;
+    for &ch in channels {
+        let Some(name) = p.channel(ch).map(|c| c.name.clone()) else {
+            continue;
+        };
+        let free = p
+            .mixer
+            .tracks
+            .iter()
+            .find(|t| t.inserts.is_empty() && !taken.contains(&t.id))
+            .map(|t| t.id);
+        let track = match free {
+            Some(t) => t,
+            None => {
+                let t = TrackId(p.ids.next());
+                edits.push(Edit::AddTrack {
+                    track: MixerTrack::new(t, name),
+                    index: p.mixer.tracks.len() + added,
+                });
+                added += 1;
+                t
+            }
+        };
+        taken.push(track);
+        edits.push(Edit::SetChannelTrack(ch, track));
+        last = Some(track);
+    }
+    Some((Edit::Batch(edits), last?))
+}
+
 /// Right click on a lane's lamp (spec 0.3.0 §7): solo it alone; again on
 /// the only solo lane: no solo; `add` (Ctrl) toggles it among the others.
 /// `None` when nothing changes.
@@ -1802,6 +1840,25 @@ mod tests {
         let mut h = History::default();
         h.execute(&mut p, Edit::AddAsset(asset.clone())).unwrap();
         (p, h, asset)
+    }
+
+    #[test]
+    fn free_tracks_are_found_or_made_one_per_channel() {
+        let mut p = Project::new();
+        let mut h = History::default();
+        let a = add_sampler_channel(&mut h, &mut p, "Kick").unwrap();
+        let b = add_sampler_channel(&mut h, &mut p, "Snare").unwrap();
+        let t1 = TrackId(p.ids.next());
+        p.mixer.tracks.push(MixerTrack::new(t1, "Insert 1"));
+        let (e, last) = route_to_free_tracks(&mut p, &[a, b]).unwrap();
+        h.execute(&mut p, e).unwrap();
+        assert_eq!(p.channel(a).unwrap().track, t1, "the empty track");
+        let tb = p.channel(b).unwrap().track;
+        assert_eq!(last, tb);
+        assert_eq!(p.mixer.track(tb).unwrap().name, "Snare", "a new one, named");
+        h.undo(&mut p).unwrap();
+        assert_eq!(p.mixer.tracks.len(), 1);
+        assert_eq!(p.channel(b).unwrap().track, TrackId::MASTER);
     }
 
     #[test]
