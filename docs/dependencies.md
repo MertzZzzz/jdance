@@ -25,6 +25,7 @@
 | libc | 0.2.186 | MIT OR Apache-2.0 | plugin-vst3 (Linux) | `poll` для IRunLoop | — |
 | mp3lame-encoder (+ mp3lame-sys 0.1.11) | 0.2.5 | LGPL-3.0 (crates), LAME 3.100: LGPL-2.0-or-later | mp3 | MP3-кодирование для экспорта (спецификация 0.2.0 §12, план D9) | LAME собирается из исходников в crate: autotools (Linux, macOS), `cc` (Windows MSVC); линковка статическая |
 | rhai | 1.27.0 | MIT OR Apache-2.0 | scripts | встроенный runtime скриптов Piano Roll (спецификация 0.2.0 §18.22) | — |
+| midir (+ alsa, coremidi, windows-sys) | 0.11.1 | MIT | app | MIDI-вход (спецификация 0.3.0 §12): WinMM, CoreMIDI, ALSA | Linux: libasound (ALSA sequencer) |
 | tempfile | 3.27.0 | MIT OR Apache-2.0 | persistence, app (dev) | временные каталоги в тестах | — |
 
 Проверено: Claude Code, 2026-10-20, по `cargo metadata`.

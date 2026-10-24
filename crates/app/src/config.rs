@@ -87,6 +87,9 @@ pub struct UserSettings {
     /// Metronome and count-in (spec 0.2.3 MET-002/020).
     #[serde(default)]
     pub metronome: MetronomeConfig,
+    /// Enabled MIDI input ports by name (spec 0.3.0 §12.1).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub midi_inputs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]

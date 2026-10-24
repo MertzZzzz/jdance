@@ -26,6 +26,7 @@ jdance-plugin-api.workspace = true
 jdance-plugin-vst3.workspace = true
 jdance-ui.workspace = true
 eframe.workspace = true
+midir.workspace = true
 rtrb.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -13,6 +13,7 @@
 mod browser_fs;
 mod config;
 mod host;
+mod midi_in;
 mod plugins;
 mod recording;
 mod render;

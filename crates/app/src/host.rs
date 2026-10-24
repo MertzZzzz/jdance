@@ -149,6 +149,10 @@ struct Active {
 }
 
 pub struct AudioHost {
+    /// MIDI input ports and the channel they play (spec 0.3.0 §12).
+    midi: crate::midi_in::MidiIn,
+    midi_sounding: crate::midi_in::Sounding,
+    input_channel: Option<jdance_domain::ChannelId>,
     backends: Vec<Box<dyn AudioBackend>>,
     active: Option<Active>,
     reading: FeedbackReading,
@@ -291,7 +295,17 @@ impl AudioHost {
                  automatically; use \"Load again\" in its mixer slot to retry."
             )));
         }
+        let mut midi = crate::midi_in::MidiIn::default();
+        midi.scan();
+        notices.extend(
+            midi.apply(&settings.midi_inputs)
+                .into_iter()
+                .map(Notice::warning),
+        );
         Self {
+            midi,
+            midi_sounding: crate::midi_in::Sounding::default(),
+            input_channel: None,
             backends,
             active: None,
             reading: FeedbackReading::default(),
@@ -641,7 +655,60 @@ impl AudioHost {
 }
 
 impl Host for AudioHost {
+    fn set_input_channel(&mut self, channel: Option<jdance_domain::ChannelId>) {
+        self.input_channel = channel;
+    }
+
+    fn set_waker(&mut self, waker: std::sync::Arc<dyn Fn() + Send + Sync>) {
+        self.midi.set_waker(waker);
+        // Ports opened before the waker existed get it now.
+        let enabled = self.settings.midi_inputs.clone();
+        self.midi.apply(&[]);
+        for m in self.midi.apply(&enabled) {
+            self.notices.push(Notice::warning(m));
+        }
+    }
+
+    fn midi_inputs(&self) -> Vec<(String, bool)> {
+        self.midi
+            .ports()
+            .iter()
+            .map(|p| (p.clone(), self.midi.is_open(p)))
+            .collect()
+    }
+
+    fn set_midi_input(&mut self, name: &str, on: bool) {
+        let list = &mut self.settings.midi_inputs;
+        list.retain(|n| n != name);
+        if on {
+            list.push(name.to_owned());
+        }
+        let enabled = list.clone();
+        for m in self.midi.apply(&enabled) {
+            self.notices.push(Notice::warning(m));
+        }
+        self.save_settings();
+    }
+
+    fn rescan_midi(&mut self) {
+        self.midi.scan();
+        let enabled = self.settings.midi_inputs.clone();
+        for m in self.midi.apply(&enabled) {
+            self.notices.push(Notice::warning(m));
+        }
+    }
+
+    fn midi_active(&self) -> bool {
+        self.midi.active()
+    }
+
     fn poll(&mut self) {
+        // MIDI notes onto the input channel (spec 0.3.0 §12.3, §12.6).
+        for e in self.midi.take() {
+            if let Some((ch, key, velocity)) = self.midi_sounding.route(e, self.input_channel) {
+                self.live_note(ch, key, velocity);
+            }
+        }
         if self.samples.poll() {
             self.needs_compile = true;
         }

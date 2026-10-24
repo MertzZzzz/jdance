@@ -233,6 +233,10 @@ pub struct JdanceApp<H: Host, S: ProjectStore> {
     key_focus: KeyFocus,
     /// Options › Keyboard shortcuts is open.
     show_keys: bool,
+    /// Options › MIDI settings (spec 0.3.0 §12.1).
+    show_midi: bool,
+    /// The MIDI threads can wake this UI (set on the first frame).
+    waker_set: bool,
     /// The plugin picker (F8, spec 0.2.5 §10 item 13), also opened by
     /// the Channel Rack's and mixer's add buttons.
     plugin_picker: Option<PluginPicker>,
@@ -366,6 +370,8 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             undo_toggle: None,
             key_focus: KeyFocus::Playlist,
             show_keys: false,
+            show_midi: false,
+            waker_set: false,
             show_mixer: true,
             show_rack: true,
             show_playlist: true,
@@ -1199,6 +1205,38 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
         self.host.set_input_channel(input);
     }
 
+    /// Options › MIDI settings: the input ports, Enable and Rescan (spec
+    /// 0.3.0 §12.1).
+    fn midi_window(&mut self, ctx: &egui::Context) {
+        let mut open = true;
+        egui::Window::new("MIDI settings")
+            .open(&mut open)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label(
+                    egui::RichText::new(
+                        "Enabled inputs play the open Piano Roll's channel, else the selected one \
+                         (all MIDI channels).",
+                    )
+                    .color(theme::MUTED),
+                );
+                let ports = self.host.midi_inputs();
+                if ports.is_empty() {
+                    ui.label("No MIDI inputs found. Connect a device, then Rescan.");
+                }
+                for (name, on) in ports {
+                    let mut enabled = on;
+                    if ui.checkbox(&mut enabled, &name).changed() {
+                        self.host.set_midi_input(&name, enabled);
+                    }
+                }
+                if ui.button("Rescan").clicked() {
+                    self.host.rescan_midi();
+                }
+            });
+        self.show_midi = open;
+    }
+
     /// The Stop button: ends a recording, playback, the Browser preview
     /// and every tail, also when the transport already stands (spec 0.2.9
     /// §5); stopped, it puts the caret at the start.
@@ -1474,6 +1512,11 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                     self.show_keys = true;
                     ui.close();
                 }
+                if ui.button("MIDI settings…").clicked() {
+                    self.host.rescan_midi();
+                    self.show_midi = true;
+                    ui.close();
+                }
                 if ui.button("Plugin picker (F8)").clicked() {
                     self.plugin_picker = Some(PluginPicker::new(plugin_list::Scope::All, None));
                     ui.close();
@@ -1554,6 +1597,18 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             }
             if counting {
                 ui.ctx().request_repaint_after(std::time::Duration::from_millis(125));
+            }
+            // MIDI activity (spec 0.3.0 §12.4).
+            let midi = self.host.midi_active();
+            let (r, resp) = ui.allocate_exact_size(egui::vec2(14.0, 28.0), egui::Sense::hover());
+            ui.painter().circle_filled(
+                r.center(),
+                3.5,
+                if midi { theme::GREEN } else { theme::RAISED },
+            );
+            resp.on_hover_text("MIDI input (Options › MIDI settings)");
+            if midi {
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(160));
             }
             self.metronome_buttons(ui);
 
@@ -4080,6 +4135,12 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
             self.focused = Some(focused);
             self.host.focus_changed(focused);
         }
+        if !self.waker_set {
+            self.waker_set = true;
+            let c = ctx.clone();
+            self.host
+                .set_waker(std::sync::Arc::new(move || c.request_repaint()));
+        }
         self.host.poll();
         for n in self.host.take_notices() {
             self.notify(n, now);
@@ -4593,6 +4654,9 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
         self.color_window(&ctx, now);
         self.presets_window(&ctx);
         self.plugin_picker_window(&ctx, now);
+        if self.show_midi {
+            self.midi_window(&ctx);
+        }
         if self.show_keys {
             bindings::keys_window(&ctx, &mut self.show_keys);
         }
