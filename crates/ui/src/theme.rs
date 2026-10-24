@@ -173,6 +173,10 @@ pub(crate) enum Icon {
 pub(crate) fn icon_button(ui: &mut egui::Ui, icon: Icon, on: bool, label: &str) -> egui::Response {
     let size = vec2(34.0, 28.0);
     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+    // Transport buttons never keep the keyboard focus (spec 0.3.0 §4).
+    if resp.clicked() || resp.has_focus() {
+        resp.surrender_focus();
+    }
     let visuals = ui.style().interact(&resp);
     let accent = if icon == Icon::Record { RED } else { AMBER };
     let fill = if on { accent } else { visuals.bg_fill };

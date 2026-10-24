@@ -830,15 +830,13 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
         }
         // F4: a new pattern and its name window (spec 0.2.5 §9).
         if self.rename.is_none()
-            && !ctx.egui_wants_keyboard_input()
+            && !ctx.text_edit_focused()
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::F4))
         {
             self.new_pattern(now);
         }
         // F7: the Piano Roll of the selected channel, or closes it.
-        if !ctx.egui_wants_keyboard_input()
-            && ctx.input_mut(|i| crate::bindings::PIANO_ROLL.take(i))
-        {
+        if !ctx.text_edit_focused() && ctx.input_mut(|i| crate::bindings::PIANO_ROLL.take(i)) {
             if let Some(mut roll) = self.piano.take() {
                 roll.release(&mut self.host);
             } else {
@@ -856,7 +854,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             }
         }
         // F8: the plugin picker.
-        if !ctx.egui_wants_keyboard_input()
+        if !ctx.text_edit_focused()
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::F8))
         {
             self.plugin_picker = match self.plugin_picker {
@@ -895,6 +893,12 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             self.guarded(Pending::New, ctx, now);
         }
         // Metronome and count-in (MET-002, MET-020).
+        // Ctrl+M in the Piano Roll imports a MIDI file; elsewhere it is
+        // the metronome (spec 0.3.0 §2.1).
+        if k.metronome && self.piano.as_ref().is_some_and(|p| p.keys_active) {
+            k.metronome = false;
+            self.import_midi(piano::MidiRequest::Pick, now);
+        }
         if k.metronome || k.count_in {
             let mut m = self.host.metronome();
             m.on ^= k.metronome;
@@ -4035,17 +4039,20 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
         let piano_docked = !self.layout.is_undocked(dock::Panel::PianoRoll);
         // The editor keys go to the editor last clicked; a docked Piano
         // Roll hides the Playlist and has them (spec 0.2.7 §1 item 1).
-        if let Some(press) =
-            ctx.input(|i| i.pointer.press_origin().filter(|_| i.pointer.any_pressed()))
-        {
-            if self.piano.as_ref().is_some_and(|p| p.area.contains(press)) {
-                self.key_focus = KeyFocus::PianoRoll;
-            } else if self.playlist_view.area.contains(press) {
-                self.key_focus = KeyFocus::Playlist;
-            } else if self.browser_view.area.is_some_and(|a| a.contains(press)) {
-                self.key_focus = KeyFocus::Browser;
-            }
+        // Presses of the last frame, each read in its own window: buttons
+        // elsewhere (Play, Stop…) leave the focus alone (§1.3, §4).
+        if self.piano.as_ref().is_some_and(|p| p.pressed) {
+            self.key_focus = KeyFocus::PianoRoll;
+        } else if self.playlist_view.pressed {
+            self.key_focus = KeyFocus::Playlist;
+        } else if self.browser_view.pressed {
+            self.key_focus = KeyFocus::Browser;
         }
+        if let Some(p) = &mut self.piano {
+            p.pressed = false;
+        }
+        self.playlist_view.pressed = false;
+        self.browser_view.pressed = false;
         let browser_keys = self.key_focus == KeyFocus::Browser;
         self.browser_view.keys_active = browser_keys;
         let piano_keys = !browser_keys

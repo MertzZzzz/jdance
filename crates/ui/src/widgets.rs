@@ -246,3 +246,11 @@ mod tests {
         assert!(!sweep.active());
     }
 }
+
+/// Whether a pointer press started inside `area` in the window `ui` is
+/// drawn in (spec 0.3.0 §1.3: each window reads its own input).
+pub(crate) fn pressed_in(ui: &egui::Ui, area: egui::Rect) -> bool {
+    ui.input(|i| {
+        i.pointer.any_pressed() && i.pointer.press_origin().is_some_and(|p| area.contains(p))
+    })
+}

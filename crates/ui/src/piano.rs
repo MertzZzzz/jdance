@@ -213,6 +213,9 @@ pub(crate) struct PianoRoll {
     reveal: Option<u32>,
     /// Where the Piano Roll was drawn, for the app's key focus.
     pub area: Rect,
+    /// A press inside the roll this frame, in its own window: the app
+    /// gives it the editor keys.
+    pub pressed: bool,
     hover_hint: &'static str,
 }
 
@@ -362,6 +365,7 @@ impl PianoRoll {
             caret_tick: 0,
             reveal: None,
             area: Rect::NOTHING,
+            pressed: false,
             hover_hint: "",
         }
     }
@@ -1608,6 +1612,7 @@ impl PianoRoll {
             }
         }
         self.area = ui.min_rect();
+        self.pressed = crate::widgets::pressed_in(ui, self.area);
         out
     }
 
@@ -1747,7 +1752,7 @@ impl PianoRoll {
         out: &mut PianoOutput,
     ) {
         use crate::bindings as b;
-        if !self.keys_active || ui.ctx().egui_wants_keyboard_input() || self.dialog.is_some() {
+        if !self.keys_active || ui.ctx().text_edit_focused() || self.dialog.is_some() {
             return;
         }
         let ctx = ui.ctx().clone();
@@ -2121,6 +2126,7 @@ mod key_tests {
         caret: u64,
         snaps: Vec<Snap>,
         close: bool,
+        focused_button: bool,
     }
 
     fn key(k: Key, modifiers: Modifiers) -> Event {
@@ -2162,6 +2168,7 @@ mod key_tests {
                 caret: 0,
                 snaps: Vec::new(),
                 close: false,
+                focused_button: false,
             };
             env.frame(vec![]);
             env.frame(vec![]);
@@ -2179,8 +2186,13 @@ mod key_tests {
                 caret: Some(self.caret),
             };
             let (roll, host, p) = (&mut self.roll, &mut self.host, &self.p);
+            let button = self.focused_button;
             let mut out = PianoOutput::default();
             let mut ui = |ui: &mut egui::Ui| {
+                // A button elsewhere holding the keyboard focus (Play).
+                if button {
+                    ui.button("Play").request_focus();
+                }
                 out = roll.show(ui, p, &pattern, host, marks, Snap::Step);
             };
             self.d.frame(events, &mut ui);
@@ -2230,6 +2242,24 @@ mod key_tests {
     /// As the window system sends them: Ctrl+C / X as clipboard events,
     /// Ctrl+V as a paste of the system clipboard's text (none while it is
     /// empty), never as keys.
+    /// Spec 0.3.0 §1: a button with the keyboard focus (Play after a
+    /// click) no longer turns the editor keys off.
+    #[test]
+    fn the_keys_work_while_a_button_has_the_focus() {
+        let mut e = Env::new(vec![note(480, 60)]);
+        e.focused_button = true;
+        e.frame(vec![]);
+        assert!(e.d.ctx.memory(|m| m.focused().is_some()));
+        e.press(Key::A, CTRL);
+        e.frame(vec![Event::Copy]);
+        let copied = e.d.copied.clone().expect("copied");
+        e.caret = 1920;
+        e.frame(vec![Event::Paste(copied)]);
+        assert_eq!(e.notes().len(), 2);
+        e.press(Key::B, Modifiers::NONE);
+        assert_eq!(e.roll.tool, Tool::Paint);
+    }
+
     #[test]
     fn clipboard_events_copy_and_paste() {
         let mut e = Env::new(vec![note(480, 60), note(960, 64)]);

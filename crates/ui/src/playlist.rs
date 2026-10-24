@@ -172,6 +172,8 @@ pub(crate) struct PlaylistView {
     pub keys_active: bool,
     /// Where the Playlist was drawn, for the app's key focus.
     pub area: Rect,
+    /// A press inside the Playlist this frame (spec 0.3.0 §1.3).
+    pub pressed: bool,
     /// Times Ctrl+D showed that duplicating moved to Ctrl+B (spec 0.2.7
     /// §3 item 6: at most three).
     ctrl_d_hints: u8,
@@ -246,6 +248,7 @@ impl Default for PlaylistView {
             ctrl_d_hints: 0,
             keys_active: true,
             area: Rect::NOTHING,
+            pressed: false,
         }
     }
 }
@@ -558,7 +561,7 @@ impl PlaylistView {
                 self.zoom *= f;
             }
         }
-        if ctx.egui_wants_keyboard_input() {
+        if ctx.text_edit_focused() {
             self.zoom = self.zoom.clamp(MIN_ZOOM, MAX_ZOOM);
             return None;
         }
@@ -691,6 +694,7 @@ impl PlaylistView {
         self.view = view;
         self.shortcuts(ui, project, &mut out);
         self.area = ui.min_rect();
+        self.pressed = crate::widgets::pressed_in(ui, self.area);
         out
     }
 
@@ -736,7 +740,7 @@ impl PlaylistView {
     /// no text field has focus (spec 0.2.7 §3).
     fn shortcuts(&mut self, ui: &egui::Ui, project: &Project, out: &mut PlaylistOutput) {
         let ctx = ui.ctx().clone();
-        if !self.keys_active || ctx.egui_wants_keyboard_input() {
+        if !self.keys_active || ctx.text_edit_focused() {
             return;
         }
         let (del, dup, deselect) = ctx.input_mut(|i| {

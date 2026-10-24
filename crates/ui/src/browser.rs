@@ -69,6 +69,8 @@ pub(crate) struct BrowserView {
     pub keys_active: bool,
     /// Where the Browser was drawn, for the app's key focus.
     pub area: Option<egui::Rect>,
+    /// A press inside the Browser this frame (spec 0.3.0 §1.3).
+    pub pressed: bool,
 }
 
 impl BrowserView {
@@ -90,6 +92,7 @@ impl BrowserView {
     ) -> Vec<BrowserAction> {
         let mut out = Vec::new();
         self.area = Some(ui.max_rect());
+        self.pressed = crate::widgets::pressed_in(ui, ui.max_rect());
         self.arrows(ui, host);
         self.shown = std::mem::take(&mut self.visible);
         ui.add(
@@ -197,7 +200,7 @@ impl BrowserView {
     /// ↓ and ↑ select the next and previous file drawn and preview it,
     /// as a click does (spec 0.2.9 §7).
     fn arrows(&mut self, ui: &egui::Ui, host: &mut dyn Host) {
-        if !self.keys_active || ui.ctx().egui_wants_keyboard_input() || self.shown.is_empty() {
+        if !self.keys_active || ui.ctx().text_edit_focused() || self.shown.is_empty() {
             return;
         }
         let step = ui.input_mut(|i| {
