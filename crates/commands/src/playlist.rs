@@ -7,8 +7,8 @@
 
 use crate::{Edit, EditError, History};
 use jdance_domain::{
-    AudioAsset, AudioClip, AutomationClip, ClipId, LANE_COLORS, Lane, LaneId, MAX_PATTERN_STEPS,
-    Pattern, PatternClip, PatternId, Playlist, Project, Step, TICKS_PER_STEP,
+    AudioAsset, AudioClip, AutomationClip, ChannelId, ClipId, LANE_COLORS, Lane, LaneId,
+    MAX_PATTERN_STEPS, Pattern, PatternClip, PatternId, Playlist, Project, Step, TICKS_PER_STEP,
 };
 use std::collections::BTreeSet;
 
@@ -405,6 +405,29 @@ pub fn add_pattern(
     pattern.length_steps = p.time_signature.steps_per_bar();
     history.execute(p, Edit::AddPattern { pattern, index })?;
     Ok(id)
+}
+
+/// A new pattern named `name` holding `notes` (from tick 0) for
+/// `channel`, as long as whole bars of the project signature need (spec
+/// 0.3.0 §2.4); notes past the longest pattern are left out. Not added.
+pub fn pattern_with_notes(
+    p: &mut Project,
+    name: impl Into<String>,
+    channel: ChannelId,
+    notes: &[jdance_domain::Note],
+) -> (Pattern, usize) {
+    let mut pattern = Pattern::new(PatternId(p.ids.next()), name);
+    let bar = p.time_signature.steps_per_bar().max(1);
+    let limit = MAX_PATTERN_STEPS * TICKS_PER_STEP;
+    let kept: Vec<_> = notes.iter().filter(|n| n.start < limit).copied().collect();
+    let end = kept.iter().map(|n| n.end().min(limit)).max().unwrap_or(0);
+    let steps = end.div_ceil(TICKS_PER_STEP).div_ceil(bar).max(1) * bar;
+    pattern.length_steps = steps.min(MAX_PATTERN_STEPS / bar * bar).max(bar);
+    let row = pattern.row_mut(channel);
+    row.notes = kept.clone();
+    jdance_domain::assign_note_ids(&mut row.notes);
+    jdance_domain::sort_notes(&mut row.notes);
+    (pattern, notes.len() - kept.len())
 }
 
 /// Adds a lane at the end with the next default color.

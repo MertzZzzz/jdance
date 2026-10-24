@@ -671,4 +671,7 @@ pub struct MidiNotes {
     pub dropped: usize,
     /// The file's first tempo, not applied (§6.8).
     pub tempo_bpm: Option<f64>,
+    /// Tracks and events read, for a file without notes (spec 0.3.0 §3.5).
+    pub tracks: u16,
+    pub events: usize,
 }

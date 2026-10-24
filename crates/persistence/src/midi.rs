@@ -28,6 +28,8 @@ pub struct MidiFile {
     pub notes: Vec<MidiNote>,
     /// The first tempo of the file, if it sets one.
     pub tempo_bpm: Option<f64>,
+    /// Events read in all tracks (meta and SysEx included).
+    pub events: usize,
 }
 
 impl MidiFile {
@@ -58,6 +60,11 @@ impl MidiFile {
 
 /// Reads a Standard MIDI File.
 pub fn read_midi(bytes: &[u8]) -> Result<MidiFile, String> {
+    // RMID: a RIFF wrapper around a whole MIDI file (spec 0.3.0 §3.3).
+    let bytes = match find(bytes, b"MThd") {
+        Some(at) if bytes.starts_with(b"RIFF") => &bytes[at..],
+        _ => bytes,
+    };
     let mut r = Reader { b: bytes, at: 0 };
     if r.take(4)? != b"MThd" {
         return Err("not a MIDI file (no MThd header)".into());
@@ -67,7 +74,9 @@ pub fn read_midi(bytes: &[u8]) -> Result<MidiFile, String> {
         return Err("MIDI header too short".into());
     }
     let format = r.u16()?;
-    let tracks = r.u16()?;
+    // The track count of the header is not trusted: some programs write
+    // a wrong one, and every MTrk chunk is read (§3.1).
+    let _declared_tracks = r.u16()?;
     let division = r.u16()?;
     r.skip(header_len - 6)?;
     if format > 2 {
@@ -83,16 +92,42 @@ pub fn read_midi(bytes: &[u8]) -> Result<MidiFile, String> {
     let mut notes = Vec::new();
     let mut tempo_bpm = None;
     let mut track = 0u16;
-    while r.at < bytes.len() && track < tracks {
+    let mut events = 0usize;
+    let mut first_error = None;
+    while bytes.len() - r.at >= 8 {
         let id = r.take(4)?;
         let len = r.u32()? as usize;
-        let body = r.take(len.min(bytes.len() - r.at))?;
+        let rest = bytes.len() - r.at;
         if id != b"MTrk" {
-            // Unknown chunks are skipped, as the format asks.
+            // Unknown chunks are skipped, as the format asks; garbage is
+            // stepped over to the next track.
+            if id.iter().all(u8::is_ascii_alphanumeric) && len <= rest {
+                r.skip(len)?;
+            } else {
+                match find(&bytes[r.at - 8 + 1..], b"MTrk") {
+                    Some(k) => r.at = r.at - 8 + 1 + k,
+                    None => break,
+                }
+            }
             continue;
         }
-        read_track(body, track, &mut notes, &mut tempo_bpm)?;
+        // A length past the end, or 0 for a track that has events: up to
+        // the next track or the end (§3.2).
+        let len = if len > rest || (len == 0 && rest > 0) {
+            find(&bytes[r.at..], b"MTrk").unwrap_or(rest)
+        } else {
+            len
+        };
+        let body = r.take(len)?;
+        if let Err(e) = read_track(body, track, &mut notes, &mut tempo_bpm, &mut events) {
+            first_error.get_or_insert(e);
+        }
         track += 1;
+    }
+    if notes.is_empty()
+        && let Some(e) = first_error
+    {
+        return Err(e);
     }
     let mut notes: Vec<MidiNote> = notes
         .into_iter()
@@ -112,16 +147,24 @@ pub fn read_midi(bytes: &[u8]) -> Result<MidiFile, String> {
         tracks: track,
         notes,
         tempo_bpm,
+        events,
     })
 }
 
+/// Where `needle` first occurs in `hay`.
+fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    hay.windows(needle.len()).position(|w| w == needle)
+}
+
 /// Notes of one track chunk in file ticks; notes still on at the end
-/// stop there.
+/// stop there, also when the track is damaged (its error is returned
+/// after the notes read so far).
 fn read_track(
     body: &[u8],
     track: u16,
     notes: &mut Vec<MidiNote>,
     tempo_bpm: &mut Option<f64>,
+    events: &mut usize,
 ) -> Result<(), String> {
     let mut r = Reader { b: body, at: 0 };
     let mut now = 0u64;
@@ -141,8 +184,38 @@ fn read_track(
             });
         }
     };
-    while r.at < body.len() {
-        now += u64::from(r.var()?);
+    let result = read_events(
+        &mut r,
+        &mut now,
+        &mut status,
+        &mut on,
+        &mut close,
+        tempo_bpm,
+        events,
+    );
+    while let Some(&(ch, key, _, _)) = on.first() {
+        close(&mut on, ch, key, now);
+    }
+    result
+}
+
+/// Sounding notes: channel, key, start and velocity.
+type Sounding = Vec<(u8, u8, u64, u8)>;
+
+fn read_events(
+    r: &mut Reader<'_>,
+    now: &mut u64,
+    status: &mut u8,
+    on: &mut Sounding,
+    close: &mut impl FnMut(&mut Sounding, u8, u8, u64),
+    tempo_bpm: &mut Option<f64>,
+    events: &mut usize,
+) -> Result<(), String> {
+    let body_len = r.b.len();
+    while r.at < body_len {
+        *now += u64::from(r.var()?);
+        *events += 1;
+        let now = *now;
         let mut first = r.u8()?;
         match first {
             0xFF => {
@@ -166,18 +239,29 @@ fn read_track(
                 r.skip(len)?;
                 continue;
             }
+            // System common and real-time bytes some writers leave in
+            // tracks (spec 0.3.0 §3.4).
+            0xF1 | 0xF3 => {
+                r.skip(1)?;
+                continue;
+            }
+            0xF2 => {
+                r.skip(2)?;
+                continue;
+            }
+            0xF4..=0xFE => continue,
             _ => {}
         }
         // Running status: a data byte repeats the last status.
         let data0 = if first < 0x80 {
-            if status == 0 {
+            if *status == 0 {
                 return Err("MIDI data before any status byte".into());
             }
             let d = first;
-            first = status;
+            first = *status;
             d
         } else {
-            status = first;
+            *status = first;
             r.u8()?
         };
         let ch = first & 0x0F;
@@ -186,16 +270,16 @@ fn read_track(
                 let vel = r.u8()?;
                 let key = data0 & 0x7F;
                 if vel == 0 {
-                    close(&mut on, ch, key, now);
+                    close(on, ch, key, now);
                 } else {
                     // A second note on the same key ends the first.
-                    close(&mut on, ch, key, now);
+                    close(on, ch, key, now);
                     on.push((ch, key, now, vel & 0x7F));
                 }
             }
             0x80 => {
                 r.u8()?;
-                close(&mut on, ch, data0 & 0x7F, now);
+                close(on, ch, data0 & 0x7F, now);
             }
             0xA0 | 0xB0 | 0xE0 => {
                 r.u8()?;
@@ -203,9 +287,6 @@ fn read_track(
             0xC0 | 0xD0 => {}
             _ => return Err(format!("unknown MIDI status {first:#04x}")),
         }
-    }
-    while let Some(&(ch, key, _, _)) = on.first() {
-        close(&mut on, ch, key, now);
     }
     Ok(())
 }
@@ -353,5 +434,40 @@ mod tests {
             (notes[0].start, notes[0].length, notes[0].velocity),
             (0, 960, 1.0)
         );
+    }
+
+    /// Spec 0.3.0 §3: files real programs write that 0.2.9 read as empty.
+    #[test]
+    fn wrong_track_counts_rmid_system_bytes_and_bad_lengths_still_give_notes() {
+        let tempo = track(&[(0, &[0xFF, 0x51, 3, 0x07, 0xA1, 0x20])]);
+        let notes = track(&[(0, &[0xF8]), (0, &[0x90, 60, 100]), (96, &[0x80, 60, 0])]);
+        // The header says one track; the notes are in the second.
+        let mut f = file(1, 96, &[tempo.clone(), notes.clone()]);
+        f[10..12].copy_from_slice(&1u16.to_be_bytes());
+        let m = read_midi(&f).unwrap();
+        assert_eq!(
+            (m.tracks, m.notes.len()),
+            (2, 1),
+            "real-time 0xF8 skipped too"
+        );
+        // RMID: RIFF … "RMID" "data" <len> <the file>.
+        let mut rmid = b"RIFF".to_vec();
+        rmid.extend(((f.len() + 12) as u32).to_le_bytes());
+        rmid.extend(b"RMIDdata");
+        rmid.extend((f.len() as u32).to_le_bytes());
+        rmid.extend(&f);
+        assert_eq!(read_midi(&rmid).unwrap().notes.len(), 1);
+        // A track length of 0 and one past the end.
+        let mut zero = file(0, 96, &[notes.clone()]);
+        zero[18..22].copy_from_slice(&0u32.to_be_bytes());
+        assert_eq!(read_midi(&zero).unwrap().notes.len(), 1);
+        let mut long = file(0, 96, &[notes.clone()]);
+        long[18..22].copy_from_slice(&9999u32.to_be_bytes());
+        assert_eq!(read_midi(&long).unwrap().notes.len(), 1);
+        // A damaged second track keeps the first one's notes.
+        let bad = vec![0x00, 0x90, 64, 100, 0x10, 0xF5];
+        let mut both = file(1, 96, &[notes, bad]);
+        both.truncate(both.len() - 1);
+        assert_eq!(read_midi(&both).unwrap().notes.len(), 2);
     }
 }

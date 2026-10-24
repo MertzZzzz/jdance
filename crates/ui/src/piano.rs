@@ -1475,28 +1475,31 @@ impl PianoRoll {
             // MIDI files dropped from the Browser or the system (§6.5).
             let drop_tick = |x: f32| self.snap_tick((x - grid.left()) / px_tick);
             let pointer = ui.ctx().pointer_latest_pos().filter(|p| grid.contains(*p));
-            if let Some(p) = pointer {
-                if let Some(item) = response.dnd_release_payload::<crate::browser::BrowserItem>()
-                    && let crate::browser::BrowserItem::Midi(path) = &*item
-                {
-                    out.midi = Some(MidiRequest::Drop {
-                        path: path.clone(),
-                        tick: drop_tick(p.x),
-                    });
-                }
-                let dropped = ui.input(|i| {
-                    i.raw
-                        .dropped_files
-                        .iter()
-                        .map(|f| f.path().to_path_buf())
-                        .find(|f| crate::browser::is_midi(f))
+            if let Some(p) = pointer
+                && let Some(item) =
+                    crate::playlist::dnd_release::<crate::browser::BrowserItem>(&response)
+                && let crate::browser::BrowserItem::Midi(path) = &*item
+            {
+                out.midi = Some(MidiRequest::Drop {
+                    path: path.clone(),
+                    tick: drop_tick(p.x),
                 });
-                if let Some(path) = dropped {
-                    out.midi = Some(MidiRequest::Drop {
-                        path,
-                        tick: drop_tick(p.x),
-                    });
-                }
+            }
+            // From the system: where it lands, or at the caret when the
+            // window did not get the pointer (Explorer, spec 0.3.0 §2.3).
+            let dropped = ui.input(|i| {
+                i.raw
+                    .dropped_files
+                    .iter()
+                    .map(|f| f.path().to_path_buf())
+                    .find(|f| crate::browser::is_midi(f))
+            });
+            let over = ui.ctx().pointer_latest_pos().filter(|p| clip.contains(*p));
+            if let Some(path) = dropped
+                && (over.is_some() || ui.ctx().pointer_latest_pos().is_none())
+            {
+                let tick = pointer.map_or(self.caret_tick, |p| drop_tick(p.x));
+                out.midi = Some(MidiRequest::Drop { path, tick });
             }
             h_offset = clip.left() - rect.left();
         });

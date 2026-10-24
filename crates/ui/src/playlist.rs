@@ -287,6 +287,13 @@ pub(crate) enum PlaylistAction {
     CaretPreview(u64),
     /// Open the export with the Selection range (SEL-007).
     RenderSelection,
+    /// A MIDI file as a new pattern and its clip (spec 0.3.0 §2.4);
+    /// `lane: None` = a new lane.
+    ImportMidi {
+        path: PathBuf,
+        lane: Option<LaneId>,
+        start: u64,
+    },
     /// Import a file as an audio clip; `lane: None` = a new lane.
     ImportAudio {
         path: PathBuf,
@@ -1410,7 +1417,7 @@ impl PlaylistView {
         // own pointer positions are empty: use the latest pointer.
         let dnd_pointer = ui.ctx().pointer_latest_pos().filter(|p| rect.contains(*p));
         if let Some(item) = response.dnd_hover_payload::<BrowserItem>()
-            && let BrowserItem::Sample(path) = &*item
+            && let BrowserItem::Sample(path) | BrowserItem::Midi(path) = &*item
             && let Some(p) = dnd_pointer
             && in_lanes(p)
         {
@@ -1436,16 +1443,23 @@ impl PlaylistView {
             });
         }
         if let Some(item) = dnd_release::<BrowserItem>(&response)
-            && let BrowserItem::Sample(path) = &*item
             && let Some(p) = dnd_pointer
             && in_lanes(p)
         {
             let (lane, start) = drop_at(p);
-            out.actions.push(PlaylistAction::ImportAudio {
-                path: path.clone(),
-                lane,
-                start,
-            });
+            match &*item {
+                BrowserItem::Sample(path) => out.actions.push(PlaylistAction::ImportAudio {
+                    path: path.clone(),
+                    lane,
+                    start,
+                }),
+                BrowserItem::Midi(path) => out.actions.push(PlaylistAction::ImportMidi {
+                    path: path.clone(),
+                    lane,
+                    start,
+                }),
+                BrowserItem::Instrument(_) => {}
+            }
         }
         let hover_pos = ui.ctx().pointer_latest_pos().filter(|p| rect.contains(*p));
         let (dropped, hovered): (Vec<PathBuf>, Vec<PathBuf>) = ui.ctx().input(|i| {
@@ -1466,16 +1480,16 @@ impl PlaylistView {
             if let Some(first) = hovered.first() {
                 drop_ghost = Some((p, display_name(first)));
             }
-            // MIDI files go to the Piano Roll (spec 0.2.9 §6.5).
-            let dropped = dropped.into_iter().filter(|p| !crate::browser::is_midi(p));
-            for (k, path) in dropped.enumerate() {
+            for (k, path) in dropped.into_iter().enumerate() {
                 // Several files go on consecutive lanes.
                 let row = lane_at(p.y).map(|l| l + k);
                 let lane = row.and_then(|l| pl.lanes.get(l)).map(|l| l.id);
-                out.actions.push(PlaylistAction::ImportAudio {
-                    path,
-                    lane,
-                    start: snapped(p.x) as u64,
+                let start = snapped(p.x) as u64;
+                // A MIDI file becomes a pattern (spec 0.3.0 §2.4).
+                out.actions.push(if crate::browser::is_midi(&path) {
+                    PlaylistAction::ImportMidi { path, lane, start }
+                } else {
+                    PlaylistAction::ImportAudio { path, lane, start }
                 });
             }
         }

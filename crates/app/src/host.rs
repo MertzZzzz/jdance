@@ -1178,6 +1178,8 @@ impl Host for AudioHost {
             notes,
             dropped,
             tempo_bpm: file.tempo_bpm,
+            tracks: file.tracks,
+            events: file.events,
         })
     }
 

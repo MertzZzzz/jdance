@@ -16,7 +16,8 @@ pub mod sampler;
 pub use mixer::{add_insert, add_send, add_track};
 pub use playlist::{
     Edge, add_clip, add_lane, add_pattern, audio_clip_edge, duplicate_clips, make_unique,
-    new_lane_edit, pattern_clip_edge, slice_audio_clip, slice_pattern_clip, steps_beyond,
+    new_lane_edit, pattern_clip_edge, pattern_with_notes, slice_audio_clip, slice_pattern_clip,
+    steps_beyond,
 };
 
 use jdance_domain::{

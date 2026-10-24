@@ -33,6 +33,15 @@ mod scripts;
 pub use scripts::ScriptJob;
 mod sample_editor;
 mod settings;
+
+/// Why a MIDI file gave no notes, with what it has (spec 0.3.0 §3.5).
+fn no_notes_text(f: &MidiNotes) -> String {
+    format!(
+        "The MIDI file has no notes ({} track(s), {} event(s) read)",
+        f.tracks, f.events
+    )
+}
+
 #[cfg(test)]
 mod test_ui;
 mod theme;
@@ -991,7 +1000,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             }
         };
         if file.notes.is_empty() {
-            self.notify(Notice::info("The MIDI file has no notes"), now);
+            self.notify(Notice::info(no_notes_text(&file)), now);
             return;
         }
         let Some(pattern) = self.project.pattern(self.current_pattern).cloned() else {
@@ -1037,6 +1046,92 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             },
             now,
         );
+    }
+
+    /// A MIDI file dropped on the Playlist: a new pattern named after it
+    /// with the notes in the Piano Roll's channel (else the selected or
+    /// first instrument or sampler, else a new sampler) and its clip at
+    /// `start` (spec 0.3.0 §2.4); one undo step.
+    fn midi_pattern(&mut self, path: &Path, lane: Option<LaneId>, start: u64, now: f64) {
+        let file = match self.host.read_midi(path) {
+            Ok(f) if !f.notes.is_empty() => f,
+            Ok(f) => {
+                self.notify(Notice::info(no_notes_text(&f)), now);
+                return;
+            }
+            Err(e) => {
+                self.notify(
+                    Notice::error(format!("Cannot read {}: {e}", path.display())),
+                    now,
+                );
+                return;
+            }
+        };
+        let name = path
+            .file_stem()
+            .map_or_else(|| "MIDI".to_owned(), |n| n.to_string_lossy().into_owned());
+        let p = &mut self.project;
+        let mut edits = Vec::new();
+        let playable = |c: &jdance_domain::Channel| !c.is_audio();
+        let channel = self
+            .piano
+            .as_ref()
+            .map(|r| r.channel)
+            .filter(|id| p.channel(*id).is_some_and(playable))
+            .or_else(|| {
+                p.channels
+                    .iter()
+                    .find(|c| playable(c) && self.rack_view.selection.contains(&c.id))
+                    .or_else(|| p.channels.iter().find(|c| playable(c)))
+                    .map(|c| c.id)
+            });
+        let channel = match channel {
+            Some(c) => c,
+            None => {
+                let id = ChannelId(p.ids.next());
+                edits.push(Edit::AddChannel {
+                    channel: jdance_domain::Channel::new_sampler(id, name.clone()),
+                    index: p.channels.len(),
+                    rows: Vec::new(),
+                    automation: Vec::new(),
+                });
+                id
+            }
+        };
+        let (pattern, dropped) =
+            jdance_commands::pattern_with_notes(p, name.clone(), channel, &file.notes);
+        let lane = match lane {
+            Some(l) => l,
+            None => {
+                let (id, edit) = new_lane_edit(p, name.clone());
+                edits.push(edit);
+                id
+            }
+        };
+        let clip = ClipId(p.ids.next());
+        let placed = jdance_domain::PatternClip::repeating(clip, lane, &pattern, start, 1);
+        let id = pattern.id;
+        edits.push(Edit::AddPattern {
+            pattern,
+            index: p.patterns.len(),
+        });
+        edits.push(Edit::AddClip(placed));
+        match self.history.execute(&mut self.project, Edit::Batch(edits)) {
+            Ok(()) => {
+                self.sync_needed = true;
+                self.current_pattern = id;
+                self.playlist_view.select_only(&[clip]);
+                let mut text = format!("{} note(s) from {name} in a new pattern", file.notes.len());
+                if dropped + file.dropped > 0 {
+                    text.push_str(&format!(
+                        "; {} past the longest pattern left out",
+                        dropped + file.dropped
+                    ));
+                }
+                self.notify(Notice::info(text), now);
+            }
+            Err(e) => self.notify(Notice::error(format!("MIDI import failed: {e}")), now),
+        }
     }
 
     /// The Stop button: ends a recording, playback, the Browser preview
@@ -1730,6 +1825,10 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                         "audio import is not available".into(),
                     )),
                 }
+            }
+            A::ImportMidi { path, lane, start } => {
+                self.midi_pattern(&path, lane, start, now);
+                Ok(())
             }
             A::Slice { clip, tick } => self.slice_clip(clip, tick),
             A::Open(id) => {
@@ -4521,6 +4620,8 @@ mod pattern_caret_tests {
             notes: vec![note(0, 60), note(480, 64), note(960, 67)],
             dropped: 0,
             tempo_bpm: Some(100.0),
+            tracks: 2,
+            events: 8,
         });
         let steps = a.history.undo_labels().count();
         a.import_midi(
@@ -4675,6 +4776,59 @@ mod pattern_caret_tests {
         assert!(a.channel_settings.is_some());
         a.undo(0.0);
         assert!(a.project.channel(ch).unwrap().is_audio());
+    }
+
+    #[test]
+    fn a_midi_file_on_the_playlist_becomes_a_pattern_and_its_clip() {
+        let mut a = app();
+        let note = |start, key| jdance_domain::Note {
+            id: 0,
+            start,
+            length: 960,
+            key,
+            velocity: 0.7,
+            muted: false,
+        };
+        a.host.midi = Some(MidiNotes {
+            // Ends in the second bar: a two-bar pattern.
+            notes: vec![note(0, 60), note(3_840, 67)],
+            dropped: 0,
+            tempo_bpm: None,
+            tracks: 1,
+            events: 4,
+        });
+        let patterns = a.project.patterns.len();
+        let steps = a.history.undo_labels().count();
+        a.playlist_action(
+            playlist::PlaylistAction::ImportMidi {
+                path: "/lib/riff.mid".into(),
+                lane: None,
+                start: 7_680,
+            },
+            0.0,
+        );
+        assert_eq!(a.project.patterns.len(), patterns + 1);
+        let pat = a.project.patterns.last().unwrap();
+        assert_eq!(pat.name, "riff");
+        assert_eq!(pat.length_steps, 32, "two bars");
+        let ch = a.project.channels[0].id;
+        assert_eq!(
+            pat.row(ch).unwrap().notes.len(),
+            2,
+            "a new sampler holds them"
+        );
+        let clip = a
+            .project
+            .playlist
+            .clips
+            .iter()
+            .find(|c| c.pattern == pat.id)
+            .unwrap();
+        assert_eq!(clip.start, 7_680);
+        assert_eq!(a.history.undo_labels().count(), steps + 1, "one step");
+        a.undo(0.0);
+        assert_eq!(a.project.patterns.len(), patterns);
+        assert!(a.project.channels.is_empty());
     }
 
     #[test]
