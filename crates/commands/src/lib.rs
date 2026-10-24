@@ -1268,6 +1268,46 @@ pub fn remove_automation(
     Ok(())
 }
 
+/// Right click on a lane's lamp (spec 0.3.0 §7): solo it alone; again on
+/// the only solo lane: no solo; `add` (Ctrl) toggles it among the others.
+/// `None` when nothing changes.
+pub fn solo_lane(p: &Project, lane: LaneId, add: bool) -> Option<Edit> {
+    let lanes = &p.playlist.lanes;
+    let me = lanes.iter().find(|l| l.id == lane)?;
+    let edits: Vec<Edit> = if add {
+        vec![Edit::SetLaneSolo(lane, !me.solo)]
+    } else {
+        let alone = me.solo && lanes.iter().all(|l| l.id == lane || !l.solo);
+        lanes
+            .iter()
+            .filter_map(|l| {
+                let want = !alone && l.id == lane;
+                (l.solo != want).then_some(Edit::SetLaneSolo(l.id, want))
+            })
+            .collect()
+    };
+    (!edits.is_empty()).then_some(Edit::Batch(edits))
+}
+
+/// The same for a mixer track's lamp; the master has no solo.
+pub fn solo_track(mixer: &Mixer, track: TrackId, add: bool) -> Option<Edit> {
+    let tracks = &mixer.tracks;
+    let me = tracks.iter().find(|t| t.id == track)?;
+    let edits: Vec<Edit> = if add {
+        vec![Edit::SetTrackSolo(track, !me.solo)]
+    } else {
+        let alone = me.solo && tracks.iter().all(|t| t.id == track || !t.solo);
+        tracks
+            .iter()
+            .filter_map(|t| {
+                let want = !alone && t.id == track;
+                (t.solo != want).then_some(Edit::SetTrackSolo(t.id, want))
+            })
+            .collect()
+    };
+    (!edits.is_empty()).then_some(Edit::Batch(edits))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1762,6 +1802,52 @@ mod tests {
         let mut h = History::default();
         h.execute(&mut p, Edit::AddAsset(asset.clone())).unwrap();
         (p, h, asset)
+    }
+
+    #[test]
+    fn a_right_click_solos_alone_and_again_clears_and_ctrl_adds() {
+        let mut p = Project::new();
+        let mut h = History::default();
+        let (a, b) = (p.playlist.lanes[0].id, p.playlist.lanes[1].id);
+        let solo = |p: &Project| -> Vec<bool> { p.playlist.lanes.iter().map(|l| l.solo).collect() };
+        {
+            let e = solo_lane(&p, a, false).unwrap();
+            h.execute(&mut p, e).unwrap();
+        }
+        assert_eq!(&solo(&p)[..2], [true, false]);
+        {
+            let e = solo_lane(&p, b, false).unwrap();
+            h.execute(&mut p, e).unwrap();
+        }
+        assert_eq!(&solo(&p)[..2], [false, true], "one solo replaces the other");
+        {
+            let e = solo_lane(&p, a, true).unwrap();
+            h.execute(&mut p, e).unwrap();
+        }
+        assert_eq!(&solo(&p)[..2], [true, true], "Ctrl adds");
+        {
+            let e = solo_lane(&p, a, false).unwrap();
+            h.execute(&mut p, e).unwrap();
+        }
+        assert_eq!(&solo(&p)[..2], [true, false]);
+        {
+            let e = solo_lane(&p, a, false).unwrap();
+            h.execute(&mut p, e).unwrap();
+        }
+        assert!(solo(&p).iter().all(|s| !s), "again: no solo");
+        h.undo(&mut p).unwrap();
+        assert_eq!(&solo(&p)[..2], [true, false], "one step");
+        // Tracks: the master never solos.
+        let t = TrackId(p.ids.next());
+        p.mixer
+            .tracks
+            .push(jdance_domain::MixerTrack::new(t, "Drums"));
+        {
+            let e = solo_track(&p.mixer, t, false).unwrap();
+            h.execute(&mut p, e).unwrap();
+        }
+        assert!(p.mixer.track(t).unwrap().solo);
+        assert!(solo_track(&p.mixer, TrackId::MASTER, false).is_none());
     }
 
     #[test]

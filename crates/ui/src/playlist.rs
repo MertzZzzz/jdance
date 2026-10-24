@@ -870,10 +870,20 @@ impl PlaylistView {
                             ui.close();
                         }
                     });
-                let lamp = crate::widgets::lamp(ui, !lane.muted)
-                    .on_hover_text("Mute lane (click) · its pattern and audio clips do not play");
+                let lamp = crate::widgets::lamp(ui, !lane.muted).on_hover_text(
+                    "Mute lane (click) · solo (right-click; Ctrl+right-click adds to the solo)",
+                );
+                if lane.solo {
+                    crate::widgets::solo_ring(ui, &lamp);
+                }
                 if lamp.clicked() {
                     out.edits.push(Edit::SetLaneMuted(lane.id, !lane.muted));
+                }
+                // Spec 0.3.0 §7: the right button solos.
+                if lamp.secondary_clicked() {
+                    let add = ui.input(|i| i.modifiers.command);
+                    out.edits
+                        .extend(jdance_commands::solo_lane(project, lane.id, add));
                 }
                 let mut s = lane.solo;
                 if ui

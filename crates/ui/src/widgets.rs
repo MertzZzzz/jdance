@@ -130,6 +130,12 @@ pub(crate) fn lamp(ui: &mut Ui, on: bool) -> Response {
     resp
 }
 
+/// The accent ring of a soloed lamp (spec 0.3.0 §7.3).
+pub(crate) fn solo_ring(ui: &Ui, lamp: &Response) {
+    ui.painter()
+        .circle_stroke(lamp.rect.center(), 7.5, Stroke::new(1.5, theme::AMBER));
+}
+
 /// A right-button delete gesture: a press starts it, and while the button
 /// is held every point the pointer passes over is reported, including the
 /// path between frames (a fast sweep must not skip small objects).
