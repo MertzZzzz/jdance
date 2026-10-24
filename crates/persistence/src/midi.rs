@@ -458,10 +458,10 @@ mod tests {
         rmid.extend(&f);
         assert_eq!(read_midi(&rmid).unwrap().notes.len(), 1);
         // A track length of 0 and one past the end.
-        let mut zero = file(0, 96, &[notes.clone()]);
+        let mut zero = file(0, 96, std::slice::from_ref(&notes));
         zero[18..22].copy_from_slice(&0u32.to_be_bytes());
         assert_eq!(read_midi(&zero).unwrap().notes.len(), 1);
-        let mut long = file(0, 96, &[notes.clone()]);
+        let mut long = file(0, 96, std::slice::from_ref(&notes));
         long[18..22].copy_from_slice(&9999u32.to_be_bytes());
         assert_eq!(read_midi(&long).unwrap().notes.len(), 1);
         // A damaged second track keeps the first one's notes.

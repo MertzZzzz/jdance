@@ -702,6 +702,10 @@ impl Host for AudioHost {
         self.midi.active()
     }
 
+    fn plugin_loading(&self) -> Option<(usize, usize, String)> {
+        self.plugins.loading()
+    }
+
     fn poll(&mut self) {
         // MIDI notes onto the input channel (spec 0.3.0 §12.3, §12.6).
         for e in self.midi.take() {
@@ -832,6 +836,8 @@ impl Host for AudioHost {
         }
         self.project = project.clone();
         self.project_dir = project_dir.map(Path::to_path_buf);
+        // Plugin modules load on a worker thread (spec 0.3.0 §8.1).
+        self.plugins.preload(project);
         // The capture feeds the engine only while a track monitors (INP-004).
         let live = project
             .mixer

@@ -329,7 +329,7 @@ mod pan_tests {
                     super::edge_scroll(ui, drag);
                     ui.allocate_space(vec2(3000.0, 3000.0));
                 });
-            offset = o.state.offset();
+            offset = o.state.clamped_offset();
         });
         offset
     }

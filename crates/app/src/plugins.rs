@@ -243,10 +243,28 @@ struct Live {
     latency_check: Option<std::time::Instant>,
 }
 
+/// Time the UI thread spends creating instances in one sync (spec 0.3.0
+/// §8.2); what is left waits for the next frame.
+const LOAD_BUDGET: std::time::Duration = std::time::Duration::from_millis(50);
+/// A plugin slower than this to create is reported (§8.4).
+const SLOW_LOAD: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Live instances of the open project's plugin inserts.
 pub struct PluginHost {
     pub catalog: Catalog,
     pub modules: ModuleCache,
+    /// Module files loading on a worker thread (§8.1).
+    preloading: Arc<Mutex<std::collections::HashSet<PathBuf>>>,
+    /// A preload finished since the last poll.
+    preloaded: Arc<std::sync::atomic::AtomicBool>,
+    /// Instances the last sync left for later: (waiting, wanted).
+    progress: (usize, usize),
+    /// Some were left only because the frame's time was used up.
+    over_budget: bool,
+    /// Name of the plugin loading next, for the status line.
+    loading_name: Option<String>,
+    /// How long each class took to create, slow ones reported once.
+    load_times: HashMap<String, std::time::Duration>,
     live: HashMap<PluginTarget, Live>,
     /// Inserts whose plugin could not be created (reported once), with
     /// the reason.
@@ -305,6 +323,12 @@ impl PluginHost {
         Self {
             catalog,
             modules: ModuleCache::default(),
+            preloading: Arc::default(),
+            preloaded: Arc::default(),
+            progress: (0, 0),
+            over_budget: false,
+            loading_name: None,
+            load_times: HashMap::new(),
             live: HashMap::new(),
             failed: HashMap::new(),
             handed: Vec::new(),
@@ -326,6 +350,11 @@ impl PluginHost {
             ..self.setup
         };
         let wanted: HashMap<PluginTarget, &PluginSlot> = plugin_slots(project).collect();
+        let started = std::time::Instant::now();
+        let total = wanted.len();
+        let mut waiting = 0;
+        self.loading_name = None;
+        self.over_budget = false;
         // Drop removed or replaced instances.
         self.live
             .retain(|id, l| wanted.get(id).is_some_and(|s| s.class_id == l.class_id));
@@ -362,6 +391,21 @@ impl PluginHost {
                 }
                 continue;
             }
+            // The module is still loading in the background, or this frame's
+            // time is used up: next frame (spec 0.3.0 §8.1, §8.2).
+            let path = self
+                .catalog
+                .find(&slot.class_id)
+                .map(|d| PathBuf::from(&d.path));
+            let preloading = path
+                .as_ref()
+                .is_some_and(|p| self.preloading.lock().is_ok_and(|set| set.contains(p)));
+            if preloading || started.elapsed() > LOAD_BUDGET {
+                self.over_budget |= !preloading;
+                waiting += 1;
+                self.loading_name.get_or_insert_with(|| slot.name.clone());
+                continue;
+            }
             let marker = marker_path();
             if let Some(path) = &marker
                 && let Ok(bytes) = serde_json::to_vec(&LoadingMarker {
@@ -371,9 +415,23 @@ impl PluginHost {
             {
                 let _ = jdance_persistence::write_atomically(path, &bytes);
             }
+            let t = std::time::Instant::now();
             let created = create_instance(&self.catalog, &self.modules, &slot, &self.setup);
             if let Some(path) = &marker {
                 let _ = std::fs::remove_file(path);
+            }
+            let took = t.elapsed();
+            if took > SLOW_LOAD
+                && self
+                    .load_times
+                    .insert(slot.class_id.clone(), took)
+                    .is_none()
+            {
+                messages.push(format!(
+                    "{} took {:.1} s to load (it reads its content from disk)",
+                    slot.name,
+                    took.as_secs_f64()
+                ));
             }
             match created {
                 Ok((processor, controller)) => {
@@ -402,7 +460,69 @@ impl PluginHost {
                 }
             }
         }
+        self.progress = (waiting, total);
         messages
+    }
+
+    /// Starts loading the module files of `project`'s plugins on a worker
+    /// thread, so creating the instances later does not wait for them
+    /// (spec 0.3.0 §8.1).
+    pub fn preload(&self, project: &Project) {
+        let paths: std::collections::BTreeSet<PathBuf> = plugin_slots(project)
+            .filter_map(|(_, s)| self.catalog.find(&s.class_id))
+            .map(|d| PathBuf::from(&d.path))
+            .collect();
+        for path in paths {
+            let loaded = self.modules.lock().is_ok_and(|m| m.contains_key(&path));
+            let Ok(mut set) = self.preloading.lock() else {
+                return;
+            };
+            if loaded || !set.insert(path.clone()) {
+                continue;
+            }
+            drop(set);
+            let (modules, preloading, done, file) = (
+                Arc::clone(&self.modules),
+                Arc::clone(&self.preloading),
+                Arc::clone(&self.preloaded),
+                path.clone(),
+            );
+            let spawned = std::thread::Builder::new()
+                .name("jdance-plugin-preload".into())
+                .spawn(move || {
+                    // Loaded outside the lock: the UI may use other modules
+                    // meanwhile. A failure is reported when the instance is
+                    // created.
+                    if let Ok(m) = Vst3Module::load(&file)
+                        && let Ok(mut map) = modules.lock()
+                    {
+                        map.entry(file.clone()).or_insert_with(|| Arc::new(m));
+                    }
+                    if let Ok(mut set) = preloading.lock() {
+                        set.remove(&file);
+                    }
+                    done.store(true, std::sync::atomic::Ordering::Release);
+                });
+            // No thread: the instance loads the module itself.
+            if spawned.is_err()
+                && let Ok(mut set) = self.preloading.lock()
+            {
+                set.remove(&path);
+            }
+        }
+    }
+
+    /// Instances still to load and all wanted (§8.3), with the next one's
+    /// name; `None` when everything is loaded.
+    pub fn loading(&self) -> Option<(usize, usize, String)> {
+        let (waiting, total) = self.progress;
+        (waiting > 0).then(|| {
+            (
+                total - waiting,
+                total,
+                self.loading_name.clone().unwrap_or_default(),
+            )
+        })
     }
 
     /// The engine slot for `id`, used while compiling. A waiting instance
@@ -476,7 +596,11 @@ impl PluginHost {
     pub fn poll(&mut self) -> bool {
         use jdance_plugin_api::PluginEvent::{LatencyChanged, ReloadRequested};
         const LATENCY_CHECK: std::time::Duration = std::time::Duration::from_secs(2);
-        let mut recompile = false;
+        // Instances left for later, or a module that finished loading.
+        let preloaded = self
+            .preloaded
+            .swap(false, std::sync::atomic::Ordering::AcqRel);
+        let mut recompile = self.progress.0 > 0 && (self.over_budget || preloaded);
         let now = std::time::Instant::now();
         for l in self.live.values_mut() {
             for e in l.controller.poll() {
@@ -710,9 +834,23 @@ mod instrument_tests {
                 controller_state: Vec::new(),
             },
         ));
+        // Spec 0.3.0 §8.1: the module loads on a worker thread; until then
+        // the instance waits and the status says so.
+        host.preload(&p);
         let messages = host.sync(&p, 48_000, 1);
         assert!(messages.is_empty(), "{messages:?}");
-        assert!(host.controller(PluginTarget::Channel(id)).is_some());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while host.controller(PluginTarget::Channel(id)).is_none() {
+            assert!(std::time::Instant::now() < deadline, "the preload ended");
+            if let Some((done, total, name)) = host.loading() {
+                assert_eq!((done, total, name.as_str()), (0, 1, "JD Test Synth"));
+                assert!(host.poll() || host.preloading.lock().unwrap().contains(bundle));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            host.sync(&p, 48_000, 1);
+        }
+        assert!(host.loading().is_none());
+        assert!(host.modules.lock().unwrap().contains_key(bundle));
         let rt = host.supply(PluginTarget::Channel(id), 1);
         assert!(rt.has_instance());
     }

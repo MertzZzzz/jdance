@@ -361,6 +361,11 @@ pub trait Host {
     fn midi_active(&self) -> bool {
         false
     }
+    /// Plugins of the project still loading (spec 0.3.0 §8.3): loaded,
+    /// wanted and the next one's name.
+    fn plugin_loading(&self) -> Option<(usize, usize, String)> {
+        None
+    }
     fn set_mode(&mut self, mode: TransportMode);
     /// Clicks `beats` beats while stopped, then plays (MET-021); Stop
     /// cancels the count-in.

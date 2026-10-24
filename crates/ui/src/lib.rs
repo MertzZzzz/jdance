@@ -1598,6 +1598,14 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             if counting {
                 ui.ctx().request_repaint_after(std::time::Duration::from_millis(125));
             }
+            // Plugins still loading (spec 0.3.0 §8.3).
+            if let Some((done, total, name)) = self.host.plugin_loading() {
+                ui.label(
+                    egui::RichText::new(format!("Loading plugins {done}/{total} · {name}"))
+                        .color(theme::MUTED),
+                );
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+            }
             // MIDI activity (spec 0.3.0 §12.4).
             let midi = self.host.midi_active();
             let (r, resp) = ui.allocate_exact_size(egui::vec2(14.0, 28.0), egui::Sense::hover());
