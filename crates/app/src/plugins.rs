@@ -249,6 +249,20 @@ const LOAD_BUDGET: std::time::Duration = std::time::Duration::from_millis(50);
 /// A plugin slower than this to create is reported (§8.4).
 const SLOW_LOAD: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// Reads a plugin's binary through once, into the system's file cache.
+/// Errors are left to the real load.
+fn warm_up(bundle: &Path) {
+    use std::io::Read;
+    let Ok(binary) = jdance_plugin_vst3::binary_path(bundle) else {
+        return;
+    };
+    let Ok(mut f) = std::fs::File::open(binary) else {
+        return;
+    };
+    let mut buf = vec![0u8; 1 << 20];
+    while matches!(f.read(&mut buf), Ok(n) if n > 0) {}
+}
+
 /// Live instances of the open project's plugin inserts.
 pub struct PluginHost {
     pub catalog: Catalog,
@@ -464,9 +478,15 @@ impl PluginHost {
         messages
     }
 
-    /// Starts loading the module files of `project`'s plugins on a worker
-    /// thread, so creating the instances later does not wait for them
-    /// (spec 0.3.0 §8.1).
+    /// Reads the module files of `project`'s plugins on a worker thread,
+    /// so loading them later on the UI thread finds them in the system's
+    /// file cache instead of waiting for the disk (spec 0.3.0 §8.1).
+    ///
+    /// Only the file is read there. The module itself (`InitDll`,
+    /// `ModuleEntry`, the factory) is loaded on the UI thread: plugins
+    /// built with JUCE and others tie their window message loop to the
+    /// thread that initialises them, and from a worker thread their
+    /// editors stayed black and hung (0.3.1).
     pub fn preload(&self, project: &Project) {
         let paths: std::collections::BTreeSet<PathBuf> = plugin_slots(project)
             .filter_map(|(_, s)| self.catalog.find(&s.class_id))
@@ -481,8 +501,7 @@ impl PluginHost {
                 continue;
             }
             drop(set);
-            let (modules, preloading, done, file) = (
-                Arc::clone(&self.modules),
+            let (preloading, done, file) = (
                 Arc::clone(&self.preloading),
                 Arc::clone(&self.preloaded),
                 path.clone(),
@@ -490,14 +509,7 @@ impl PluginHost {
             let spawned = std::thread::Builder::new()
                 .name("jdance-plugin-preload".into())
                 .spawn(move || {
-                    // Loaded outside the lock: the UI may use other modules
-                    // meanwhile. A failure is reported when the instance is
-                    // created.
-                    if let Ok(m) = Vst3Module::load(&file)
-                        && let Ok(mut map) = modules.lock()
-                    {
-                        map.entry(file.clone()).or_insert_with(|| Arc::new(m));
-                    }
+                    warm_up(&file);
                     if let Ok(mut set) = preloading.lock() {
                         set.remove(&file);
                     }
@@ -834,9 +846,18 @@ mod instrument_tests {
                 controller_state: Vec::new(),
             },
         ));
-        // Spec 0.3.0 §8.1: the module loads on a worker thread; until then
-        // the instance waits and the status says so.
+        // Spec 0.3.0 §8.1: the module file is read on a worker thread;
+        // until then the instance waits and the status says so. The module
+        // itself loads on this (the UI) thread only (0.3.1: JUCE editors
+        // stayed black when it was initialised elsewhere).
         host.preload(&p);
+        while !host.preloading.lock().unwrap().is_empty() {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(
+            !host.modules.lock().unwrap().contains_key(bundle),
+            "the worker only reads the file"
+        );
         let messages = host.sync(&p, 48_000, 1);
         assert!(messages.is_empty(), "{messages:?}");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
