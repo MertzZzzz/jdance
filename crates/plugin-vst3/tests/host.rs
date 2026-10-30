@@ -131,6 +131,17 @@ fn scanner_crash_and_hang_are_contained() {
 }
 
 #[test]
+fn plugin_output_on_stdout_does_not_break_the_scan() {
+    let scanner = Path::new(env!("CARGO_BIN_EXE_jdance-plugin-scanner"));
+    let mut cmd = Command::new(scanner);
+    cmd.arg(bundle()).env("JDANCE_TEST_FX_FAULT", "chatty");
+    match run_scanner(cmd, Duration::from_secs(30)) {
+        ScanOutcome::Ok(d) => assert_eq!(d.len(), 8),
+        f => panic!("{f:?}"),
+    }
+}
+
+#[test]
 fn gain_follows_parameter_changes() {
     let (mut p, mut c) = open("JD Test Gain", None);
     let x = ramp(1000);

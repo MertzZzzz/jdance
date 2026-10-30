@@ -135,6 +135,16 @@ pub fn run_scanner(mut cmd: Command, timeout: Duration) -> ScanOutcome {
             format!("scanner exited with {status}: {detail}")
         });
     }
+    // The scanner prints its JSON on one line, but plugins may print to
+    // stdout too while they load (VPS Avenger: "Warning: thread locking
+    // is not implemented"): the last line that parses wins.
+    let found = out
+        .lines()
+        .rev()
+        .find_map(|line| serde_json::from_str::<Vec<PluginDescriptor>>(line.trim()).ok());
+    if let Some(d) = found {
+        return ScanOutcome::Ok(d);
+    }
     match serde_json::from_str::<Vec<PluginDescriptor>>(&out) {
         Ok(d) => ScanOutcome::Ok(d),
         Err(e) => ScanOutcome::Failed(format!("invalid scanner output: {e}")),

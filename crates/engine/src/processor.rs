@@ -352,7 +352,7 @@ impl EngineProcessor {
             }
             for ch in &mut s.channels {
                 if let Some(inst) = &mut ch.instrument {
-                    inst.hush.reset(0.0);
+                    inst.hush_tail();
                 }
             }
             if !live && let Some(l) = &mut s.limiter {
