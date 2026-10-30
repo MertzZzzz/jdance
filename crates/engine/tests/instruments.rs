@@ -428,3 +428,56 @@ fn stop_silences_an_instrument_tail_until_the_next_note() {
     let out = render(&mut e, 2_048, 256);
     assert!(out[512..].iter().all(|v| *v == level));
 }
+
+/// Plays a level of its own while `on` is set, without notes (a preset
+/// or beat preview started in the plugin's editor).
+struct Previewing(Arc<std::sync::atomic::AtomicBool>);
+
+impl PluginProcessor for Previewing {
+    fn process(
+        &mut self,
+        _: &mut [f32],
+        _: &mut [f32],
+        _: Option<(&[f32], &[f32])>,
+        _: &Transport,
+    ) {
+    }
+
+    fn process_instrument(&mut self, l: &mut [f32], r: &mut [f32], _: &[NoteEvent], _: &Transport) {
+        let v = if self.0.load(std::sync::atomic::Ordering::Relaxed) {
+            0.5
+        } else {
+            0.0
+        };
+        l.fill(v);
+        r.fill(v);
+    }
+
+    fn latency_samples(&self) -> u32 {
+        0
+    }
+
+    fn has_sidechain_input(&self) -> bool {
+        false
+    }
+}
+
+#[test]
+fn plugin_preview_after_stop_is_heard_once_the_tail_is_over() {
+    let on = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (p, _, pid) = project(&[], Vec::new());
+    let plugin = PluginRt::fresh(Box::new(Previewing(Arc::clone(&on))));
+    let (mut h, mut e) = create_engine(SR);
+    h.set_snapshot(compile(&p, pid, Some(plugin))).unwrap();
+    h.play().unwrap();
+    render(&mut e, 4_096, 256);
+    h.stop().unwrap();
+    // Silent after Stop: no tail left.
+    render(&mut e, SR as usize / 2, 256);
+    // A preview in the plugin's editor, with no notes from the host.
+    on.store(true, std::sync::atomic::Ordering::Relaxed);
+    let out = render(&mut e, 4_096, 256);
+    let level = out[4_095];
+    assert!(level > 0.1, "the preview is heard: {level}");
+    assert!(out[1_024..].iter().all(|v| *v == level));
+}

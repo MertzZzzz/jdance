@@ -478,6 +478,8 @@ const SIGNAL: f32 = 1e-5;
 
 /// Ramp of the after-Stop silence of plugin instruments, in samples.
 const HUSH_RAMP: u32 = 64;
+/// Silence after which an instrument's tail counts as over, in samples.
+const TAIL_OVER: u32 = 8_192;
 
 /// Notes per block and sounding notes per instrument channel.
 pub const MAX_INSTRUMENT_EVENTS: usize = 512;
@@ -498,8 +500,11 @@ pub struct InstrumentRt {
     sounding: Vec<(u64, u8, i32)>,
     next_id: i32,
     /// After Stop the plugin's release tail is not heard (VST3 has no
-    /// realtime reset); the next note brings the output back.
-    pub hush: Smoothed,
+    /// realtime reset); the next note, playback, or the end of the tail
+    /// brings the output back.
+    hush: Smoothed,
+    /// Samples the plugin has been silent while hushed.
+    quiet: u32,
 }
 
 impl InstrumentRt {
@@ -511,7 +516,14 @@ impl InstrumentRt {
             sounding: Vec::with_capacity(MAX_SOUNDING_NOTES),
             next_id: 0,
             hush: Smoothed::new(1.0, HUSH_RAMP),
+            quiet: 0,
         }
+    }
+
+    /// Silences the plugin's tail at once (Stop).
+    pub fn hush_tail(&mut self) {
+        self.hush.reset(0.0);
+        self.quiet = 0;
     }
 
     fn push(&mut self, e: jdance_plugin_api::NoteEvent) {
@@ -637,6 +649,20 @@ impl InstrumentRt {
             }
         }
         self.events.clear();
+        if self.hush.target() == 0.0 {
+            // Once the tail has died away, or playback starts, sound the
+            // plugin makes on its own is heard again: a preset or beat
+            // preview, its own sequencer (Addictive Drums).
+            let loud = l.iter().chain(r.iter()).any(|v| v.abs() > SIGNAL);
+            self.quiet = if loud {
+                0
+            } else {
+                self.quiet.saturating_add(l.len() as u32)
+            };
+            if transport.playing || self.quiet >= TAIL_OVER {
+                self.hush.set_target(1.0);
+            }
+        }
         if self.hush.is_ramping() || self.hush.current() != 1.0 {
             for (a, b) in l.iter_mut().zip(r.iter_mut()) {
                 let g = self.hush.next_value();
@@ -649,6 +675,7 @@ impl InstrumentRt {
     pub fn take_state(&mut self, old: &mut InstrumentRt) {
         self.plugin.take_state(&mut old.plugin);
         self.hush = old.hush;
+        self.quiet = old.quiet;
         if self.plugin.processor.is_some() && old.plugin.processor.is_none() {
             // Same instance: keep its sounding notes.
             std::mem::swap(&mut self.sounding, &mut old.sounding);

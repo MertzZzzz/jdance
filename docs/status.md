@@ -575,3 +575,11 @@ Linux, тест окна редактора под Xvfb), clippy `-D warnings` �
 |---|---|---|
 | Окна инструментов VST3 не зависают: модуль загружается в потоке интерфейса, в фоне только читается файл (spec 0.3.0 §8.1 уточнён) | PASS | `app` тест `instrument_channels_get_live_instances`: после предзагрузки модуль не в кеше, пока его не загрузит поток интерфейса; с реальным плагином на JUCE в контейнере не проверялось |
 | Windows MSI 0.3.1 | — | workflow `Release` |
+
+## Релиз 0.3.2 (исправление)
+
+| Пункт | Статус | Артефакт / комментарий |
+|---|---|---|
+| Звук, который VST-инструмент играет сам (превью пресета, Addictive Drums), слышен после Stop: глушение хвоста снимается после ~8192 сэмплов тишины инструмента или с запуском транспорта, а не только со следующей нотой | PASS | `engine` тесты `plugin_preview_after_stop_is_heard_once_the_tail_is_over`, `stop_silences_an_instrument_tail_until_the_next_note`; с Addictive Drums 2 вручную не проверялось |
+| Строки плагина в stdout сканера не блокируют модуль (VPS Avenger: «Warning: thread locking is not implemented») | PASS | `plugin-vst3` тест `plugin_output_on_stdout_does_not_break_the_scan` (тестовый плагин, `JDANCE_TEST_FX_FAULT=chatty`); вывод сканера 0.3.1 для Avenger воспроизведён локально |
+| Windows MSI 0.3.2 | — | workflow `Release` |

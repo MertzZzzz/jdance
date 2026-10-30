@@ -28,7 +28,8 @@
 //!   asking. Its controller state is a report of what the host did.
 //!
 //! `JDANCE_TEST_FX_FAULT=crash|hang` makes `GetPluginFactory` abort or
-//! never return, for scanner blocklist and timeout tests.
+//! never return, for scanner blocklist and timeout tests; `chatty` makes
+//! it print a line to stdout, as some plugins do.
 
 // VST3 enum types differ between Windows and other platforms, so casts
 // that are no-ops on one OS are needed on another.
@@ -1453,6 +1454,9 @@ extern "system" fn GetPluginFactory() -> *mut IPluginFactory {
         Ok("hang") => loop {
             std::thread::sleep(std::time::Duration::from_secs(3600));
         },
+        Ok("chatty") => {
+            println!("Warning: thread locking is not implemented");
+        }
         _ => {}
     }
     ComWrapper::new(Factory)
