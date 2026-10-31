@@ -458,6 +458,12 @@ pub trait Host {
     fn read_midi(&mut self, _path: &Path) -> Result<MidiNotes, String> {
         Err("MIDI files are not available here".into())
     }
+    /// The mouse cursor on the screen, in physical pixels, where the
+    /// system says (Windows). Files dropped from another window come
+    /// without a position.
+    fn cursor_screen_px(&self) -> Option<(f32, f32)> {
+        None
+    }
 
     /// Recording devices of the current backend.
     fn input_devices(&mut self) -> Vec<InputDevice> {

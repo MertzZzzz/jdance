@@ -1069,6 +1069,34 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
         );
     }
 
+    /// A MIDI file dropped on the Channel Rack: its notes at the start of
+    /// the current pattern, in the channel it was dropped on, else the
+    /// Piano Roll's channel, else the first instrument or sampler. The
+    /// Piano Roll opens on that channel.
+    fn rack_midi(&mut self, to: Option<ChannelId>, path: PathBuf, now: f64) {
+        let to = to
+            .or_else(|| self.piano.as_ref().map(|p| p.channel))
+            .or_else(|| {
+                let channels = &self.project.channels;
+                channels
+                    .iter()
+                    .find(|c| c.instrument().is_some())
+                    .or_else(|| channels.iter().find(|c| !c.is_audio()))
+                    .map(|c| c.id)
+            });
+        let Some(id) = to else {
+            self.notify(
+                Notice::info("Add an instrument or sampler channel, then drop the MIDI file on it"),
+                now,
+            );
+            return;
+        };
+        if self.piano.as_ref().is_none_or(|p| p.channel != id) {
+            self.piano = Some(piano::PianoRoll::new(id));
+        }
+        self.import_midi(piano::MidiRequest::Drop { path, tick: 0 }, now);
+    }
+
     /// A MIDI file dropped on the Playlist: a new pattern named after it
     /// with the notes in the Piano Roll's channel (else the selected or
     /// first instrument or sampler, else a new sampler) and its clip at
@@ -4135,6 +4163,30 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
 }
 
 impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
+    /// Files dragged in from another window (a beat out of a drum
+    /// plugin's editor, Explorer) drop without a position: the window got
+    /// no mouse moves during the drag. The cursor is where they dropped,
+    /// so the rack row or roll under it takes them, as with a mouse drag.
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        if raw.dropped_files.is_empty() {
+            return;
+        }
+        let Some((x, y)) = self.host.cursor_screen_px() else {
+            return;
+        };
+        let Some(inner) = raw
+            .viewports
+            .get(&raw.viewport_id)
+            .and_then(|v| v.inner_rect)
+        else {
+            return;
+        };
+        let pos = egui::pos2(x, y) / ctx.pixels_per_point() - inner.min.to_vec2();
+        if inner.translate(-inner.min.to_vec2()).contains(pos) {
+            raw.events.push(egui::Event::PointerMoved(pos));
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let now = ctx.input(|i| i.time);
@@ -4282,6 +4334,9 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
         let mut piano_out = piano::PianoOutput::default();
         if let Some(id) = out.open_piano.take() {
             self.piano = Some(piano::PianoRoll::new(id));
+        }
+        if let Some((to, path)) = out.midi.take() {
+            self.rack_midi(to, path, now);
         }
         if self
             .piano
@@ -4765,6 +4820,51 @@ mod pattern_caret_tests {
         clip.pattern = pat;
         p.playlist.clips.push(clip);
         JdanceApp::new(StubHost::default(), NoStore, p, None)
+    }
+
+    #[test]
+    fn a_midi_file_dropped_on_a_rack_channel_fills_that_channel() {
+        let mut a = app();
+        let kick =
+            jdance_commands::add_sampler_channel(&mut a.history, &mut a.project, "Kick").unwrap();
+        let drums =
+            jdance_commands::add_sampler_channel(&mut a.history, &mut a.project, "Drums").unwrap();
+        a.current_pattern = a.project.patterns[0].id;
+        a.piano = Some(piano::PianoRoll::new(kick));
+        let note = |start, key| jdance_domain::Note {
+            id: 0,
+            start,
+            length: 120,
+            key,
+            velocity: 0.8,
+            muted: false,
+        };
+        a.host.midi = Some(MidiNotes {
+            notes: vec![note(0, 36), note(480, 38)],
+            dropped: 0,
+            tempo_bpm: None,
+            tracks: 1,
+            events: 6,
+        });
+        // A beat dragged out of a drum plugin onto the channel's row.
+        a.rack_midi(Some(drums), "AD2Beat.mid".into(), 0.0);
+        assert_eq!(a.piano.as_ref().map(|p| p.channel), Some(drums));
+        let keys: Vec<u8> = a.project.patterns[0]
+            .row(drums)
+            .unwrap()
+            .notes
+            .iter()
+            .map(|n| n.key)
+            .collect();
+        assert_eq!(keys, [36, 38]);
+        assert!(
+            a.project.patterns[0]
+                .row(kick)
+                .is_none_or(|r| r.notes.is_empty())
+        );
+        // Not on a row: the Piano Roll's channel.
+        a.rack_midi(None, "AD2Beat.mid".into(), 0.0);
+        assert_eq!(a.project.patterns[0].row(drums).unwrap().notes.len(), 4);
     }
 
     #[test]
