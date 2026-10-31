@@ -69,6 +69,10 @@ pub(crate) struct RackOutput {
     pub to_sampler: Option<ChannelId>,
     /// «Remove unused audio channels» (ACH-034).
     pub remove_unused: bool,
+    /// A MIDI file's notes into the current pattern: into this channel
+    /// (dropped on its row), or `None` for one the app picks (dropped on
+    /// empty rack space).
+    pub midi: Option<(Option<ChannelId>, std::path::PathBuf)>,
 }
 
 /// Which channels the rack lists (ACH-032); a view setting.
@@ -158,13 +162,16 @@ impl RackView {
         let current_step = marks.playhead.map(step_of);
         let caret_step = marks.caret.map(step_of);
 
-        let dropped: Vec<std::path::PathBuf> = ui.ctx().input(|i| {
-            i.raw
-                .dropped_files
-                .iter()
-                .map(|f| f.path().to_path_buf())
-                .collect()
-        });
+        // MIDI files are notes, not samples (a beat dragged out of a drum
+        // plugin such as Addictive Drums became a sampler of the .mid).
+        let (midi_dropped, dropped): (Vec<std::path::PathBuf>, Vec<std::path::PathBuf>) =
+            ui.ctx().input(|i| {
+                i.raw
+                    .dropped_files
+                    .iter()
+                    .map(|f| f.path().to_path_buf())
+                    .partition(|f| crate::browser::is_midi(f))
+            });
         let hovering_files = ui.ctx().input(|i| !i.raw.hovered_files.is_empty());
         let pointer = ui.ctx().input(|i| i.pointer.hover_pos());
         let primary_down = ui.ctx().input(|i| i.pointer.primary_down());
@@ -309,7 +316,10 @@ impl RackView {
                             crate::browser::BrowserItem::Instrument(d) => {
                                 out.new_instruments.push(d.clone())
                             }
-                            crate::browser::BrowserItem::Midi(_) => {}
+                            crate::browser::BrowserItem::Midi(p) => {
+                                let to = (!ch.is_audio()).then_some(ch.id);
+                                out.midi = Some((to, p.clone()));
+                            }
                         }
                     }
                     if (hovering_files || dragging_in) && pointer.is_some_and(|p| rect.contains(p))
@@ -330,11 +340,18 @@ impl RackView {
                             .push((Edit::SetChannelSample(ch.id, Some(sample_ref(file))), false));
                         dropped_on_row = true;
                     }
+                    if !ch.is_audio()
+                        && let (Some(p), Some(file)) = (pointer, midi_dropped.first())
+                        && rect.contains(p)
+                    {
+                        out.midi = Some((Some(ch.id), file.clone()));
+                        dropped_on_row = true;
+                    }
                 }
                 ui.add_space(6.0);
                 ui.label(
                 RichText::new(
-                    "Drop WAV or MP3 files here to add channels, or onto a channel to replace its sample",
+                    "Drop WAV or MP3 files here to add channels, or onto a channel to replace its sample; a MIDI file onto a channel puts its notes there",
                 )
                 .size(11.0)
                 .color(theme::MUTED),
@@ -355,7 +372,7 @@ impl RackView {
                     out.new_channels.push((stem(p), Some(sample_ref(p))));
                 }
                 crate::browser::BrowserItem::Instrument(d) => out.new_instruments.push(d.clone()),
-                crate::browser::BrowserItem::Midi(_) => {}
+                crate::browser::BrowserItem::Midi(p) => out.midi = Some((None, p.clone())),
             }
         }
 
@@ -382,6 +399,9 @@ impl RackView {
             .pointer_latest_pos()
             .is_some_and(|p| ui.max_rect().contains(p));
         if !dropped_on_row && over_rack {
+            if let Some(file) = midi_dropped.into_iter().next() {
+                out.midi = Some((None, file));
+            }
             for file in dropped {
                 let name = file
                     .file_stem()

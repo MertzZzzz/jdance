@@ -1256,6 +1256,16 @@ impl Host for AudioHost {
         })
     }
 
+    #[cfg(windows)]
+    #[allow(unsafe_code)]
+    fn cursor_screen_px(&self) -> Option<(f32, f32)> {
+        use windows_sys::Win32::Foundation::POINT;
+        use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+        let mut p = POINT { x: 0, y: 0 };
+        // SAFETY: writes the point; fails without a desktop (returns 0).
+        (unsafe { GetCursorPos(&mut p) } != 0).then_some((p.x as f32, p.y as f32))
+    }
+
     fn sample_status(
         &self,
         sample: &SampleRef,

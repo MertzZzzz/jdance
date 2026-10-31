@@ -50,6 +50,11 @@ impl NativeWindow {
         })
     }
 
+    /// One coordinate system here (Windows has one per DPI awareness).
+    pub fn scope(&self) -> Option<()> {
+        None
+    }
+
     /// AppKit scales views itself (backing scale factor).
     #[allow(dead_code)]
     pub fn scale(&self) -> f32 {

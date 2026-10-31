@@ -81,7 +81,8 @@ fn main() {
 
     // A resizable editor with content scaling that takes its size while
     // attaching without asking the frame: the window follows it, in every
-    // scaling mode (the test screen has scale 1).
+    // scaling mode. 520 × 340 at the screen's scale (1 on CI; Windows
+    // gives a plugin that scales itself the screen's scale).
     let (p, c) = instantiate(&module, &class("JD Test Strict"), &SETUP, None).unwrap();
     for scaling in EditorScaling::ALL {
         let mut e = c
@@ -89,8 +90,9 @@ fn main() {
             .unwrap()
             .expect("the strict class has an editor");
         assert!(e.poll());
-        assert_eq!(e.view_size(), (520, 340), "{scaling:?}");
-        assert_eq!(e.size(), (520, 340), "window follows the view, {scaling:?}");
+        let (w, h) = e.view_size();
+        assert!(w >= 520 && w * 340 == h * 520, "{scaling:?}: {w} × {h}");
+        assert_eq!(e.size(), (w, h), "window follows the view, {scaling:?}");
         drop(e);
     }
     drop(c);

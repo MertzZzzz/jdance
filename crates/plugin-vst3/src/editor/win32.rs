@@ -6,7 +6,8 @@ use std::collections::HashSet;
 use std::ffi::c_void;
 use std::sync::{Mutex, OnceLock};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows_sys::Win32::Graphics::Gdi::{BLACK_BRUSH, GetStockObject, HBRUSH};
+use windows_sys::Win32::Graphics::Gdi::{BLACK_BRUSH, GetDC, GetStockObject, HBRUSH, ReleaseDC};
+use windows_sys::Win32::Graphics::OpenGL::GetPixelFormat;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
@@ -14,12 +15,12 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, CW_USEDEFAULT, CallNextHookEx, CreateWindowExW, DefWindowProcW,
-    DestroyWindow, DispatchMessageW, GA_ROOT, GW_CHILD, GetAncestor, GetClassNameW, GetClientRect,
-    GetWindow, GetWindowRect, GetWindowThreadProcessId, IDC_ARROW, LoadCursorW, MSG, PM_REMOVE,
-    PeekMessageW, RegisterClassW, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetWindowPos,
-    SetWindowsHookExW, ShowWindow, TranslateMessage, WH_GETMESSAGE, WM_CLOSE, WM_DPICHANGED,
-    WM_KEYDOWN, WM_KEYUP, WM_NULL, WM_SETFOCUS, WNDCLASSW, WS_CAPTION, WS_CLIPCHILDREN,
-    WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU, WS_THICKFRAME,
+    DestroyWindow, DispatchMessageW, GA_ROOT, GW_CHILD, GW_HWNDNEXT, GetAncestor, GetClassNameW,
+    GetClientRect, GetWindow, GetWindowRect, GetWindowThreadProcessId, IDC_ARROW, LoadCursorW, MSG,
+    PM_REMOVE, PeekMessageW, RegisterClassW, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER,
+    SetWindowPos, SetWindowsHookExW, ShowWindow, TranslateMessage, WH_GETMESSAGE, WM_CLOSE,
+    WM_DPICHANGED, WM_KEYDOWN, WM_KEYUP, WM_NULL, WM_SETFOCUS, WNDCLASSW, WS_CAPTION,
+    WS_CLIPCHILDREN, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU, WS_THICKFRAME,
 };
 
 /// The frame never paints over the plugin's own window (WS_CLIPCHILDREN):
@@ -39,6 +40,7 @@ mod dpi {
     pub const PER_MONITOR_V2: Context = -4;
 
     type SetThreadContext = unsafe extern "system" fn(Context) -> Context;
+    type GetWindowContext = unsafe extern "system" fn(HWND) -> Context;
     type GetDpiForWindow = unsafe extern "system" fn(HWND) -> u32;
     type AdjustForDpi = unsafe extern "system" fn(*mut RECT, u32, i32, u32, u32) -> i32;
 
@@ -69,6 +71,13 @@ mod dpi {
     pub fn enter(context: Context) -> Scope {
         let set = lookup!(c"SetThreadDpiAwarenessContext", SetThreadContext);
         Scope(set.map(|f| unsafe { f(context) }).filter(|old| *old != 0))
+    }
+
+    /// The DPI awareness `hwnd` was created with, if the system says.
+    pub fn of_window(hwnd: HWND) -> Option<Context> {
+        lookup!(c"GetWindowDpiAwarenessContext", GetWindowContext)
+            .map(|f| unsafe { f(hwnd) })
+            .filter(|c| *c != 0)
     }
 
     impl Drop for Scope {
@@ -245,6 +254,8 @@ fn owner() -> HWND {
 pub struct NativeWindow {
     hwnd: HWND,
     style: u32,
+    /// The window's DPI awareness: sizes are read and set in it.
+    context: Option<dpi::Context>,
 }
 
 impl NativeWindow {
@@ -271,7 +282,11 @@ impl NativeWindow {
         if hwnd.is_null() {
             return Err(PluginError::Failed("CreateWindowExW failed".into()));
         }
-        let w = Self { hwnd, style };
+        let w = Self {
+            hwnd,
+            style,
+            context: dpi::of_window(hwnd),
+        };
         // The exact client size at the monitor's DPI, then shown.
         w.resize(width, height);
         unsafe { ShowWindow(hwnd, SW_SHOW) };
@@ -281,6 +296,15 @@ impl NativeWindow {
 
     pub fn parent(&self) -> *mut c_void {
         self.hwnd
+    }
+
+    /// Puts this thread in the window's DPI awareness until dropped. The
+    /// app's thread is per-monitor aware; a window Windows scales measures
+    /// in unscaled pixels, and so does the plugin inside it. Mixing them
+    /// took the scaled size for a user resize and shrank the window below
+    /// the plugin (Serum, VPS Avenger, OTT at 125 %).
+    pub fn scope(&self) -> Option<DpiScope> {
+        self.context.map(dpi::enter)
     }
 
     /// Scale of the window's monitor (1.0 = 96 DPI); 1.0 for a window
@@ -315,6 +339,25 @@ impl NativeWindow {
                 r.bottom - r.top + height as i32 - ch as i32,
             );
         }
+    }
+
+    /// Whether the plugin's window, or one inside it, is set up for
+    /// OpenGL (has a pixel format).
+    pub fn draws_opengl(&self) -> bool {
+        fn any_gl(first: HWND) -> bool {
+            let mut w = first;
+            while !w.is_null() {
+                let dc = unsafe { GetDC(w) };
+                let format = unsafe { GetPixelFormat(dc) };
+                unsafe { ReleaseDC(w, dc) };
+                if format > 0 || any_gl(unsafe { GetWindow(w, GW_CHILD) }) {
+                    return true;
+                }
+                w = unsafe { GetWindow(w, GW_HWNDNEXT) };
+            }
+            false
+        }
+        any_gl(unsafe { GetWindow(self.hwnd, GW_CHILD) })
     }
 
     pub fn size(&self) -> (u32, u32) {
