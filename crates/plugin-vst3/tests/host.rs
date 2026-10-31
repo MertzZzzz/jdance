@@ -130,6 +130,45 @@ fn scanner_crash_and_hang_are_contained() {
     }
 }
 
+/// Windows hands out `WM_TIMER` only when no other message, not even a
+/// repaint, waits; the app always has a repaint waiting. A timer posted
+/// behind other messages still runs (VPS Avenger draws on one).
+#[cfg(windows)]
+#[test]
+#[allow(unsafe_code)]
+fn plugin_timers_run_behind_other_messages() {
+    use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::System::Threading::GetCurrentThreadId;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        KillTimer, PostThreadMessageW, SetTimer, WM_USER,
+    };
+    static FIRED: AtomicU32 = AtomicU32::new(0);
+    unsafe extern "system" fn tick(_: HWND, _: u32, _: usize, _: u32) {
+        FIRED.fetch_add(1, Relaxed);
+    }
+    // SAFETY: a thread timer with a plain callback, removed at the end.
+    let id = unsafe { SetTimer(std::ptr::null_mut(), 0, 1, Some(tick)) };
+    assert_ne!(id, 0);
+    // Messages waiting in front of the timer the whole time, as the app's
+    // always are; nothing here takes them out.
+    for _ in 0..8 {
+        // SAFETY: posts to this thread's own queue.
+        unsafe { PostThreadMessageW(GetCurrentThreadId(), WM_USER, 0, 0) };
+    }
+    // When the timer falls due depends on the system clock tick (about
+    // 16 ms, longer on a busy machine): call as the app does, every frame,
+    // until it runs.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while FIRED.load(Relaxed) == 0 && std::time::Instant::now() < deadline {
+        jdance_plugin_vst3::run_plugin_timers();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    // SAFETY: the timer made above.
+    unsafe { KillTimer(std::ptr::null_mut(), id) };
+    assert!(FIRED.load(Relaxed) > 0, "the due timer ran");
+}
+
 #[test]
 fn plugin_output_on_stdout_does_not_break_the_scan() {
     let scanner = Path::new(env!("CARGO_BIN_EXE_jdance-plugin-scanner"));

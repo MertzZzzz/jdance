@@ -56,6 +56,9 @@ unsafe impl Sync for Core {}
 
 impl Drop for Core {
     fn drop(&mut self) {
+        // Plugins drawing with OpenGL may release their context here.
+        #[cfg(windows)]
+        let _gl = crate::editor::GlGuard::new();
         unsafe {
             if let Some(p) = &self.processor
                 && self.processing

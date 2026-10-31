@@ -683,8 +683,10 @@ impl PluginHost {
         self.live.values().any(|l| l.editor.is_some())
     }
 
-    /// Runs open editors; closes those the user closed.
+    /// Runs open editors; closes those the user closed. Plugin timers run
+    /// too, with or without an editor (Windows).
     pub fn poll_editors(&mut self) {
+        jdance_plugin_vst3::run_plugin_timers();
         for l in self.live.values_mut() {
             if let Some(e) = &mut l.editor
                 && !e.poll()

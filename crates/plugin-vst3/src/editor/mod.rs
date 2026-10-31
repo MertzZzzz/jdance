@@ -12,6 +12,8 @@ use x11::NativeWindow;
 #[cfg(windows)]
 mod win32;
 #[cfg(windows)]
+pub(crate) use win32::GlGuard;
+#[cfg(windows)]
 use win32::NativeWindow;
 
 #[cfg(target_os = "macos")]
@@ -45,6 +47,13 @@ static SPACE_PRESSES: AtomicU32 = AtomicU32::new(0);
 /// stays with the plugin where the platform can tell (Windows).
 pub fn take_space_presses() -> u32 {
     SPACE_PRESSES.swap(0, Ordering::Relaxed)
+}
+
+/// Runs plugin timers that the app's own redraws hold back (Windows);
+/// call every UI frame, editors open or not. Elsewhere a no-op.
+pub fn run_plugin_timers() {
+    #[cfg(windows)]
+    win32::run_timers();
 }
 
 #[cfg_attr(target_os = "macos", allow(dead_code))]
@@ -225,6 +234,10 @@ pub struct Vst3Editor {
     content_scale: Option<(ComPtr<IPlugViewContentScaleSupport>, Cell<f32>)>,
     attached: bool,
     _keep_alive: Arc<dyn Any + Send + Sync>,
+    /// Set when closing; dropped after the window and the plugin's
+    /// reference (Windows, see [`win32::GlGuard`]).
+    #[cfg(windows)]
+    restore_gl: Option<win32::GlGuard>,
 }
 
 /// Whether Windows scales the editor window (DPI-unaware window) instead
@@ -256,6 +269,8 @@ impl Vst3Editor {
         scaling: EditorScaling,
     ) -> Result<Option<Self>, PluginError> {
         use vst3::Steinberg::Vst::IEditControllerTrait;
+        #[cfg(windows)]
+        let _gl = win32::GlGuard::new();
         let view = unsafe { controller.createView(c"editor".as_ptr()) };
         let Some(view) = (unsafe { ComPtr::from_raw(view) }) else {
             return Ok(None);
@@ -329,6 +344,8 @@ impl Vst3Editor {
             content_scale,
             attached: false,
             _keep_alive: keep_alive,
+            #[cfg(windows)]
+            restore_gl: None,
         };
         editor.follow_view_size();
         if unsafe { editor.view.attached(editor.window.parent(), PLATFORM) } != kResultOk {
@@ -355,6 +372,8 @@ impl Vst3Editor {
     /// Runs the editor's event handling; call every UI frame. Returns
     /// `false` once the user closed the window.
     pub fn poll(&mut self) -> bool {
+        #[cfg(windows)]
+        let _gl = win32::GlGuard::new();
         if !self.window.poll() {
             return false;
         }
@@ -417,6 +436,12 @@ impl Vst3Editor {
 
 impl Drop for Vst3Editor {
     fn drop(&mut self) {
+        // The last field: the app's context is away until the windows and
+        // the plugin's reference are gone.
+        #[cfg(windows)]
+        {
+            self.restore_gl = Some(win32::GlGuard::new());
+        }
         let _scope = self.window.scope();
         unsafe {
             if self.attached {

@@ -6,8 +6,12 @@ use std::collections::HashSet;
 use std::ffi::c_void;
 use std::sync::{Mutex, OnceLock};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows_sys::Win32::Graphics::Gdi::{BLACK_BRUSH, GetDC, GetStockObject, HBRUSH, ReleaseDC};
-use windows_sys::Win32::Graphics::OpenGL::GetPixelFormat;
+use windows_sys::Win32::Graphics::Gdi::{
+    BLACK_BRUSH, GetDC, GetStockObject, HBRUSH, HDC, ReleaseDC,
+};
+use windows_sys::Win32::Graphics::OpenGL::{
+    GetPixelFormat, HGLRC, wglGetCurrentContext, wglGetCurrentDC, wglMakeCurrent,
+};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
@@ -19,7 +23,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetClientRect, GetWindow, GetWindowRect, GetWindowThreadProcessId, IDC_ARROW, LoadCursorW, MSG,
     PM_REMOVE, PeekMessageW, RegisterClassW, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER,
     SetWindowPos, SetWindowsHookExW, ShowWindow, TranslateMessage, WH_GETMESSAGE, WM_CLOSE,
-    WM_DPICHANGED, WM_KEYDOWN, WM_KEYUP, WM_NULL, WM_SETFOCUS, WNDCLASSW, WS_CAPTION,
+    WM_DPICHANGED, WM_KEYDOWN, WM_KEYUP, WM_NULL, WM_SETFOCUS, WM_TIMER, WNDCLASSW, WS_CAPTION,
     WS_CLIPCHILDREN, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU, WS_THICKFRAME,
 };
 
@@ -117,6 +121,69 @@ pub fn dpi_scope(system: bool) -> DpiScope {
     } else {
         dpi::PER_MONITOR_V2
     })
+}
+
+/// Runs the due timers of this thread: plugins' thread timers and those
+/// of their hidden windows. Windows makes `WM_TIMER` only when no other
+/// message, not even a repaint, is waiting; the app redraws every frame
+/// while playing or while an editor is open, so its window always has a
+/// repaint waiting and plugin timers never fired. Plugins that draw or
+/// load on a timer stood still: VPS Avenger ignored clicks (it repaints
+/// through a timer on a hidden window), JUCE plugins stopped loading
+/// content. Asked for by type, a due timer is handed out at once.
+pub fn run_timers() {
+    let _gl = GlGuard::new();
+    let mut msg: MSG = unsafe { std::mem::zeroed() };
+    // Bounded: a timer handler that sets a 0 ms timer cannot hold the
+    // thread.
+    for _ in 0..32 {
+        if unsafe {
+            PeekMessageW(
+                &mut msg,
+                std::ptr::null_mut(),
+                WM_TIMER,
+                WM_TIMER,
+                PM_REMOVE,
+            )
+        } == 0
+        {
+            break;
+        }
+        unsafe {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+}
+
+/// Keeps the app's OpenGL context away from a plugin while the UI thread
+/// calls into it, and current again afterwards. Plugins that draw with
+/// OpenGL switch contexts and leave none current; VPS Avenger, closing,
+/// deletes its textures without making its own context current, so it
+/// deleted the app's: the app's window went black for good. With no
+/// context current, such calls do nothing.
+pub struct GlGuard {
+    context: HGLRC,
+    dc: HDC,
+}
+
+impl GlGuard {
+    pub fn new() -> Self {
+        let context = unsafe { wglGetCurrentContext() };
+        let dc = unsafe { wglGetCurrentDC() };
+        if !context.is_null() {
+            unsafe { wglMakeCurrent(std::ptr::null_mut(), std::ptr::null_mut()) };
+        }
+        Self { context, dc }
+    }
+}
+
+impl Drop for GlGuard {
+    fn drop(&mut self) {
+        if unsafe { wglGetCurrentContext() } != self.context {
+            unsafe { wglMakeCurrent(self.dc, self.context) };
+        }
+    }
 }
 
 /// Windows the user asked to close (by address).
