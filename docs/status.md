@@ -583,3 +583,11 @@ Linux, тест окна редактора под Xvfb), clippy `-D warnings` �
 | Звук, который VST-инструмент играет сам (превью пресета, Addictive Drums), слышен после Stop: глушение хвоста снимается после ~8192 сэмплов тишины инструмента или с запуском транспорта, а не только со следующей нотой | PASS | `engine` тесты `plugin_preview_after_stop_is_heard_once_the_tail_is_over`, `stop_silences_an_instrument_tail_until_the_next_note`; с Addictive Drums 2 вручную не проверялось |
 | Строки плагина в stdout сканера не блокируют модуль (VPS Avenger: «Warning: thread locking is not implemented») | PASS | `plugin-vst3` тест `plugin_output_on_stdout_does_not_break_the_scan` (тестовый плагин, `JDANCE_TEST_FX_FAULT=chatty`); вывод сканера 0.3.1 для Avenger воспроизведён локально |
 | Windows MSI 0.3.2 | — | workflow `Release` |
+
+## Релиз 0.3.3 (исправление)
+
+| Пункт | Статус | Артефакт / комментарий |
+|---|---|---|
+| Окно редактора, которое масштабирует Windows, не уменьшается ниже плагина: размеры читаются и задаются в DPI-контексте окна (`NativeWindow::scope`), а не потока интерфейса | PASS | все 19 VST3 плагинов машины разработчика при 125 %: размер окна = размер плагина, снимки экрана целиком (Serum, OTT, VPS Avenger раньше обрезались); тест `editor` не зависит от масштаба экрана |
+| Плагин на OpenGL без своего масштабирования в режиме Automatic открывается в per-monitor окне (`draws_opengl`) | PASS | VPS Avenger: целиком и чётко; автоматического теста нет (тестовый плагин не рисует OpenGL) |
+| Windows MSI 0.3.3 | — | workflow `Release` |

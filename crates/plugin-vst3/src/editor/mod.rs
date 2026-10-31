@@ -92,6 +92,7 @@ impl IPlugFrameTrait for PlugFrame {
         if new_size.is_null() {
             return kInvalidArgument;
         }
+        let _scope = self.window.scope();
         let (w, h) = rect_size(unsafe { &*new_size });
         self.window.resize(w, h);
         self.agreed.set((w, h));
@@ -267,6 +268,35 @@ impl Vst3Editor {
         let scale_support = view.cast::<IPlugViewContentScaleSupport>();
         let system = system_scaled(scaling, scale_support.is_some());
         let resizable = unsafe { view.canResize() } == kResultTrue;
+        let editor = Self::attach(
+            view.clone(),
+            scale_support,
+            Arc::clone(&keep_alive),
+            title,
+            resizable,
+            system,
+        )?;
+        // Windows does not stretch what a plugin draws with OpenGL in a
+        // window it scales: the picture keeps its unscaled size, shifted
+        // and cut off (VPS Avenger). Automatic opens such a plugin again at
+        // the screen's resolution: sharp and complete, only smaller.
+        #[cfg(windows)]
+        if system && scaling == EditorScaling::Auto && editor.window.draws_opengl() {
+            drop(editor);
+            return Self::attach(view, None, keep_alive, title, resizable, false).map(Some);
+        }
+        Ok(Some(editor))
+    }
+
+    /// Shows `view` in a new window, DPI-unaware when `system` (Windows).
+    fn attach(
+        view: ComPtr<IPlugView>,
+        scale_support: Option<ComPtr<IPlugViewContentScaleSupport>>,
+        keep_alive: Arc<dyn Any + Send + Sync>,
+        title: &str,
+        resizable: bool,
+        system: bool,
+    ) -> Result<Self, PluginError> {
         // Windows: the window and everything the plugin creates while it
         // attaches get the chosen DPI awareness.
         #[cfg(windows)]
@@ -310,7 +340,7 @@ impl Vst3Editor {
         // Some plugins settle on their size while attaching without
         // asking the frame: the window follows.
         editor.follow_view_size();
-        Ok(Some(editor))
+        Ok(editor)
     }
 
     /// Resizes the window to the plugin's own size when they differ.
@@ -328,6 +358,9 @@ impl Vst3Editor {
         if !self.window.poll() {
             return false;
         }
+        // Sizes in the window's own DPI awareness (Windows), also for
+        // what the plugin does in the calls below.
+        let _scope = self.window.scope();
         #[cfg(target_os = "linux")]
         self.frame.run_loop.dispatch();
         // Moved to a screen with another scale (Windows): tell the plugin;
@@ -369,11 +402,13 @@ impl Vst3Editor {
 
     /// Content size in pixels.
     pub fn size(&self) -> (u32, u32) {
+        let _scope = self.window.scope();
         self.window.size()
     }
 
     /// The plugin's own idea of its size.
     pub fn view_size(&self) -> (u32, u32) {
+        let _scope = self.window.scope();
         let mut r = rect(0, 0);
         unsafe { self.view.getSize(&mut r) };
         rect_size(&r)
@@ -382,6 +417,7 @@ impl Vst3Editor {
 
 impl Drop for Vst3Editor {
     fn drop(&mut self) {
+        let _scope = self.window.scope();
         unsafe {
             if self.attached {
                 self.view.removed();

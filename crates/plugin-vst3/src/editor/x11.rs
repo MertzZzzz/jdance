@@ -132,6 +132,11 @@ impl NativeWindow {
         self.window as usize as *mut c_void
     }
 
+    /// One coordinate system here (Windows has one per DPI awareness).
+    pub fn scope(&self) -> Option<()> {
+        None
+    }
+
     pub fn resize(&self, width: u32, height: u32) {
         let (w, h) = (width.clamp(1, 16_384), height.clamp(1, 16_384));
         let _ = self
