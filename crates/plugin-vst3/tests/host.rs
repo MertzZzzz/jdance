@@ -150,13 +150,20 @@ fn plugin_timers_run_behind_other_messages() {
     // SAFETY: a thread timer with a plain callback, removed at the end.
     let id = unsafe { SetTimer(std::ptr::null_mut(), 0, 1, Some(tick)) };
     assert_ne!(id, 0);
-    std::thread::sleep(Duration::from_millis(30));
-    // Messages waiting in front of the timer, as the app's always are.
+    // Messages waiting in front of the timer the whole time, as the app's
+    // always are; nothing here takes them out.
     for _ in 0..8 {
         // SAFETY: posts to this thread's own queue.
         unsafe { PostThreadMessageW(GetCurrentThreadId(), WM_USER, 0, 0) };
     }
-    jdance_plugin_vst3::run_plugin_timers();
+    // When the timer falls due depends on the system clock tick (about
+    // 16 ms, longer on a busy machine): call as the app does, every frame,
+    // until it runs.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while FIRED.load(Relaxed) == 0 && std::time::Instant::now() < deadline {
+        jdance_plugin_vst3::run_plugin_timers();
+        std::thread::sleep(Duration::from_millis(5));
+    }
     // SAFETY: the timer made above.
     unsafe { KillTimer(std::ptr::null_mut(), id) };
     assert!(FIRED.load(Relaxed) > 0, "the due timer ran");
