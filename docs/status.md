@@ -601,3 +601,18 @@ Linux, тест окна редактора под Xvfb), clippy `-D warnings` �
 | Таймеры плагинов срабатывают, когда окно приложения постоянно перерисовывается (редактор открыт, воспроизведение): `run_plugin_timers` каждый кадр | PASS | `plugin-vst3` тест `plugin_timers_run_behind_other_messages`; вручную: VPS Avenger отвечает на клики, Addictive Drums 2 загружает биты |
 | Контекст OpenGL приложения снят на время вызовов плагина в потоке интерфейса (`GlGuard`: открытие, опрос и закрытие редактора, таймеры, уничтожение экземпляра) | PASS | вручную: после закрытия окна VPS Avenger окно jdance рисуется (в 0.3.3 — чёрное); автоматического теста нет (тестовый плагин не рисует OpenGL) |
 | Windows MSI 0.3.4 | — | workflow `Release` |
+
+## Релиз 0.3.5 (штампы и слайд-ноты, [spec-0.3.5](spec/spec-0.3.5.md))
+
+| Пункт | Статус | Артефакт / комментарий |
+|---|---|---|
+| Таблицы и генерация штампов: аккорды, Advanced, Automatic chord, гаммы, Fill, Flam, Roll, Slide up; отсечение по 127 (§1–§5) | PASS | `commands` тесты `stamps::*` |
+| Меню Stamp, Only one, Shift+N, постановка щелчком и перетаскиванием, одна отмена (§1) | PASS | `ui` тест `a_stamp_places_its_chord_and_only_one_resets_it`; перетаскивание — без автотеста |
+| `Note.slide`, формат 19, миграция 18 → 19 (§6.1–6.2) | PASS | `persistence` тест `slide_notes_round_trip_and_v18_notes_are_not_slides` |
+| Флажок Slide в Note properties (§6.3) | PASS | `ui` тест `properties_set_and_keep_the_slide_flag` |
+| Инструменты Tools сохраняют флаг slide у оставленных нот (§6.5) | PASS | по коду (`note_tools::run`), отдельного теста нет |
+| Переключатель Slide, вид слайд-нот, без прослушивания (§7) | PASS | `ui` тест `the_slide_switch_draws_slide_notes`; вид — вручную не проверялся (нет дисплея) |
+| Скольжение голоса сэмплера (§8.4, RT) | PASS | `dsp` тест `a_glide_reaches_its_rate_and_stays` |
+| Слайд в движке: скольжение, сложение, тишина без ноты, мьют, слайд в одном тике с нотой (§8) | PASS | `engine` тесты `a_slide_note_glides_*`, `slides_add_up`, `a_slide_alone_or_muted_does_nothing`, `a_slide_on_the_note_start_*` |
+| Каналы VST3 не получают слайд-ноты (§9) | PASS | по коду (`processor.rs`), отдельного теста нет |
+| Windows MSI 0.3.5 | — | workflow `Release` |

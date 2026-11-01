@@ -12,6 +12,7 @@ pub mod note_tools;
 pub mod notes;
 mod playlist;
 pub mod sampler;
+pub mod stamps;
 
 pub use mixer::{add_insert, add_send, add_track};
 pub use playlist::{
@@ -1371,6 +1372,7 @@ mod tests {
             key,
             velocity: 0.8,
             muted: false,
+            slide: false,
         }
     }
 

@@ -21,6 +21,7 @@ use egui::{
 };
 use jdance_commands::Edit;
 use jdance_commands::notes::{self, Scale, ScaleMode};
+use jdance_commands::stamps::{self, Speed, Stamp};
 use jdance_domain::{
     ChannelId, ChannelSource, MAX_NOTES_PER_ROW, MAX_PATTERN_STEPS, Note, Pattern, PatternId,
     Project, TICKS_PER_STEP, TimeSignature,
@@ -33,6 +34,8 @@ const LANE_H: f32 = 96.0;
 const EDGE_GRAB: f32 = 6.0;
 const NEW_VELOCITY: f32 = 0.8;
 const SELECTED: Color32 = Color32::from_rgb(0x7D, 0xBB, 0xFF);
+/// Slide notes (spec 0.3.5 §7.2).
+const SLIDE: Color32 = Color32::from_rgb(0xB4, 0x8C, 0xF0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Tool {
@@ -100,6 +103,12 @@ enum DragKind {
     /// The Mute tool swept over notes: they all get `muted`.
     Mute {
         muted: bool,
+    },
+    /// Placing a stamp at `at` on `key`: its length follows the pointer
+    /// (spec 0.3.5 §1.5).
+    Stamp {
+        at: u32,
+        key: u8,
     },
 }
 
@@ -217,6 +226,12 @@ pub(crate) struct PianoRoll {
     /// gives it the editor keys.
     pub pressed: bool,
     hover_hint: &'static str,
+    /// The stamp Draw and Paint place instead of one note (spec 0.3.5 §1).
+    stamp: Option<Stamp>,
+    /// Back to single notes after one stamp.
+    only_one: bool,
+    /// New notes are slide notes (§7.1).
+    slide_mode: bool,
 }
 
 /// The caret moved on the Piano Roll ruler, as a pattern position.
@@ -367,6 +382,84 @@ impl PianoRoll {
             area: Rect::NOTHING,
             pressed: false,
             hover_hint: "",
+            stamp: None,
+            only_one: true,
+            slide_mode: false,
+        }
+    }
+
+    /// The notes of the current stamp at `at` on `key`, `len` long, that
+    /// fit beside `existing` notes (§1.10, §1.11).
+    fn stamp_notes(&self, stamp: Stamp, existing: usize, at: u32, key: u8, len: u32) -> Vec<Note> {
+        let mut out = stamps::stamp(stamp, at, key, len, NEW_VELOCITY, self.scale);
+        if self.slide_mode && stamp != Stamp::SlideUp {
+            for n in &mut out {
+                n.slide = true;
+            }
+        }
+        out.truncate(MAX_NOTES_PER_ROW.saturating_sub(existing));
+        out
+    }
+
+    /// The Stamp menu (§1.2).
+    fn stamp_menu(&mut self, ui: &mut egui::Ui) {
+        ui.checkbox(&mut self.only_one, "Only one")
+            .on_hover_text("Back to single notes after one stamp");
+        ui.separator();
+        let mut chosen: Option<Option<Stamp>> = None;
+        let current = self.stamp;
+        let mut pick = |ui: &mut egui::Ui, s: Option<Stamp>, label: &str| {
+            if ui.selectable_label(current == s, label).clicked() {
+                chosen = Some(s);
+                ui.close();
+            }
+        };
+        let heading = |ui: &mut egui::Ui, text: &str| {
+            ui.label(RichText::new(text).size(10.5).color(theme::MUTED));
+        };
+        let none = format!("(none)  ·  {}", crate::bindings::STAMP_NONE.label());
+        pick(ui, None, &none);
+        pick(ui, Some(Stamp::AutoChord), "Automatic chord");
+        heading(ui, "Melodic — chords");
+        ui.menu_button("Advanced", |ui| {
+            for (i, c) in stamps::ADVANCED_CHORDS.iter().enumerate() {
+                pick(ui, Some(Stamp::Advanced(i)), c.name);
+            }
+        });
+        for (i, c) in stamps::CHORDS.iter().enumerate() {
+            pick(ui, Some(Stamp::Chord(i)), c.name);
+        }
+        heading(ui, "Melodic — scales");
+        ui.menu_button("Scales", |ui| {
+            for (i, c) in stamps::SCALES.iter().enumerate() {
+                pick(ui, Some(Stamp::Scale(i)), c.name);
+            }
+        });
+        heading(ui, "Percussions");
+        for n in stamps::FILLS {
+            pick(ui, Some(Stamp::Fill(n)), &Stamp::Fill(n).name());
+        }
+        for sp in Speed::ALL {
+            pick(ui, Some(Stamp::Flam(sp)), &Stamp::Flam(sp).name());
+        }
+        for sp in Speed::ALL {
+            for dynamic in [true, false] {
+                let s = Stamp::Roll { speed: sp, dynamic };
+                pick(ui, Some(s), &s.name());
+            }
+        }
+        heading(ui, "Special");
+        pick(ui, Some(Stamp::SlideUp), "Slide up");
+        if let Some(s) = chosen {
+            self.set_stamp(s);
+        }
+    }
+
+    fn set_stamp(&mut self, stamp: Option<Stamp>) {
+        self.stamp = stamp;
+        // A stamp is placed by Draw (or Paint) (§1.3).
+        if stamp.is_some() && !matches!(self.tool, Tool::Draw | Tool::Paint) {
+            self.tool = Tool::Draw;
         }
     }
 
@@ -544,6 +637,25 @@ impl PianoRoll {
                     self.tool = t;
                 }
             }
+            let stamp_text = self
+                .stamp
+                .map_or_else(|| "Stamp".to_owned(), |s| format!("Stamp: {}", s.name()));
+            let stamp_text = if self.stamp.is_some() {
+                RichText::new(stamp_text).color(theme::AMBER)
+            } else {
+                RichText::new(stamp_text)
+            };
+            ui.menu_button(stamp_text, |ui| self.stamp_menu(ui))
+                .response
+                .on_hover_text("Draw and Paint place a chord, a scale or a drum figure");
+            let slide_color = if self.slide_mode { SLIDE } else { theme::TEXT };
+            ui.toggle_value(
+                &mut self.slide_mode,
+                RichText::new("Slide").color(slide_color),
+            )
+            .on_hover_text(
+                "New notes are slide notes: they do not sound, the notes under them glide to their key (sampler channels)",
+            );
             ui.separator();
             ui.label(RichText::new("SNAP").size(11.0).color(theme::MUTED));
             egui::ComboBox::from_id_salt("piano_snap")
@@ -902,6 +1014,11 @@ impl PianoRoll {
                         theme::MUTED.gamma_multiply(0.35),
                         Stroke::new(1.0, theme::MUTED),
                     )
+                } else if n.slide {
+                    (
+                        SLIDE.gamma_multiply(0.35 + 0.35 * n.velocity),
+                        Stroke::new(1.0, SLIDE),
+                    )
                 } else {
                     (
                         theme::AMBER.gamma_multiply(0.55 + 0.45 * n.velocity),
@@ -910,7 +1027,38 @@ impl PianoRoll {
                 };
                 painter.rect_filled(r, CornerRadius::same(3), fill);
                 painter.rect_stroke(r, CornerRadius::same(3), stroke, StrokeKind::Inside);
-                if r.width() > 26.0 && key_h >= 12.0 {
+                if n.slide {
+                    // Towards its key from the note it glides (§7.2).
+                    let from = notes
+                        .iter()
+                        .filter(|o| !o.slide && o.start <= n.start && o.end() > n.start)
+                        .map(|o| o.key)
+                        .max();
+                    let (c, h) = (pos2(r.left() + 6.0, r.center().y), (r.height() / 2.0 - 1.5).max(2.0));
+                    let tri = match from {
+                        Some(k) if n.key > k => vec![
+                            pos2(c.x - h, c.y + h),
+                            pos2(c.x + h, c.y + h),
+                            pos2(c.x, c.y - h),
+                        ],
+                        Some(k) if n.key < k => vec![
+                            pos2(c.x - h, c.y - h),
+                            pos2(c.x + h, c.y - h),
+                            pos2(c.x, c.y + h),
+                        ],
+                        _ => vec![
+                            pos2(c.x - h, c.y - h),
+                            pos2(c.x - h, c.y + h),
+                            pos2(c.x + h, c.y),
+                        ],
+                    };
+                    painter.add(egui::Shape::convex_polygon(
+                        tri,
+                        Color32::from_rgb(0xF2, 0xEA, 0xFF),
+                        Stroke::NONE,
+                    ));
+                }
+                if r.width() > 26.0 && key_h >= 12.0 && !n.slide {
                     painter.with_clip_rect(r.intersect(clip)).text(
                         pos2(r.left() + 4.0, r.center().y),
                         egui::Align2::LEFT_CENTER,
@@ -1129,6 +1277,9 @@ impl PianoRoll {
                     "Drag: move · Shift+drag: copy · then Shift: keep key, Ctrl: keep time · edges: length · right click: delete · double click: properties"
                 }
                 Some(p) if on_grid(p) => match self.tool {
+                    Tool::Draw | Tool::Paint if self.stamp.is_some() => {
+                        "Stamp: click places it, drag sets its length · Shift+N: no stamp"
+                    }
                     Tool::Draw | Tool::Paint => {
                         "Click: note · Shift+drag: note with its length · Ctrl+drag: select · Alt: no snap"
                     }
@@ -1227,6 +1378,24 @@ impl PianoRoll {
                         }
                     }
                     (Some(i), _) => self.selection = vec![notes[i]],
+                    (None, Tool::Draw | Tool::Paint) if self.stamp.is_some() => {
+                        let stamp = self.stamp.expect("checked");
+                        let (at, key) = (self.snap_tick(to_tick(p.x)), to_key(p.y));
+                        let placed =
+                            self.stamp_notes(stamp, notes.len(), at, key, self.new_len.max(1));
+                        if !placed.is_empty() {
+                            let mut new = notes.clone();
+                            new.extend(placed.iter().copied());
+                            self.commit(&mut out, pattern, new, placed.clone());
+                            if let Some(n) = placed.iter().find(|n| !n.slide) {
+                                self.sound(host, Some(n.key));
+                                self.audition_until = now + 0.25;
+                            }
+                        }
+                        if self.only_one {
+                            self.stamp = None;
+                        }
+                    }
                     (None, Tool::Draw | Tool::Paint) => {
                         if notes.len() < MAX_NOTES_PER_ROW {
                             let n = Note {
@@ -1236,13 +1405,17 @@ impl PianoRoll {
                                 key: to_key(p.y),
                                 velocity: NEW_VELOCITY,
                                 muted: false,
+                                slide: self.slide_mode,
                             };
                             let mut new = notes.clone();
                             new.push(n);
                             self.commit(&mut out, pattern, new, vec![n]);
-                            // A short audition of the new note.
-                            self.sound(host, Some(n.key));
-                            self.audition_until = now + 0.25;
+                            // A short audition of the new note (slides do
+                            // not sound, §7.3).
+                            if !n.slide {
+                                self.sound(host, Some(n.key));
+                                self.audition_until = now + 0.25;
+                            }
                         }
                     }
                     (None, _) => self.selection.clear(),
@@ -1301,6 +1474,10 @@ impl PianoRoll {
                         None => DragKind::Move,
                     },
                     None => match self.tool {
+                        Tool::Draw | Tool::Paint if self.stamp.is_some() => DragKind::Stamp {
+                            at: self.snap_tick(to_tick(p.x)),
+                            key: to_key(p.y),
+                        },
                         // Shift+drag adds a note and sets its length.
                         Tool::Draw | Tool::Paint if shift => DragKind::Create,
                         Tool::Draw => DragKind::Create,
@@ -1336,10 +1513,13 @@ impl PianoRoll {
                             key: to_key(p.y),
                             velocity: NEW_VELOCITY,
                             muted: false,
+                            slide: self.slide_mode,
                         };
                         dragged.push(original.len());
                         original.push(n);
-                        self.sound(host, Some(n.key));
+                        if !n.slide {
+                            self.sound(host, Some(n.key));
+                        }
                     }
                     _ => {}
                 }
@@ -1431,6 +1611,7 @@ impl PianoRoll {
                                     key,
                                     velocity: NEW_VELOCITY,
                                     muted: false,
+                                    slide: self.slide_mode,
                                 });
                             }
                             t += step;
@@ -1439,6 +1620,23 @@ impl PianoRoll {
                         if new.len() != notes.len() {
                             out.edits.push((self.set(pattern, new), true));
                             self.sound(host, Some(key));
+                        }
+                    }
+                    DragKind::Stamp { at, key } => {
+                        if let Some(stamp) = self.stamp {
+                            let end = self.snap_tick(to_tick(p.x));
+                            let len = end.saturating_sub(at).max(self.min_len());
+                            let placed = self.stamp_notes(stamp, d.original.len(), at, key, len);
+                            let mut new = d.original.clone();
+                            new.extend(placed.iter().copied());
+                            if new != notes {
+                                self.new_len = len;
+                                out.edits.push((self.set(pattern, new), true));
+                                self.selection = placed.clone();
+                                if let Some(n) = placed.iter().find(|n| !n.slide) {
+                                    self.sound(host, Some(n.key));
+                                }
+                            }
                         }
                     }
                     DragKind::Erase => {
@@ -1469,7 +1667,12 @@ impl PianoRoll {
                     }
                 }
             }
-            if response.drag_stopped_by(PointerButton::Primary) && self.drag.take().is_some() {
+            if response.drag_stopped_by(PointerButton::Primary)
+                && let Some(d) = self.drag.take()
+            {
+                if matches!(d.kind, DragKind::Stamp { .. }) && self.only_one {
+                    self.stamp = None;
+                }
                 self.last_paint = None;
                 out.end_gesture = true;
                 self.sound(host, None);
@@ -1807,6 +2010,9 @@ impl PianoRoll {
                 }
             }
         }
+        if !self.typing && take(b::STAMP_NONE) {
+            self.stamp = None;
+        }
         if take(b::SNAP_TOGGLE) {
             out.snap = Some(if self.snap_choice == Snap::Off {
                 self.last_snap
@@ -2049,6 +2255,7 @@ mod tests {
             key: 60,
             velocity: 0.7,
             muted: false,
+            slide: false,
         };
         let (a, b) = slice_note(n, 480).unwrap();
         assert_eq!((a.start, a.length, b.start, b.length), (240, 240, 480, 720));
@@ -2152,6 +2359,7 @@ mod key_tests {
             key,
             velocity: 0.8,
             muted: false,
+            slide: false,
         }
     }
 
@@ -2366,6 +2574,68 @@ mod key_tests {
         e.roll.keys_active = false;
         e.press(Key::B, Modifiers::NONE);
         assert_eq!(e.roll.tool, Tool::Draw);
+    }
+
+    impl Env {
+        /// A click on the grid, a little right of the keyboard.
+        fn click_grid(&mut self, dx: f32) {
+            let a = self.roll.area;
+            let p = pos2(a.left() + KEYBOARD_W + dx, a.top() + 160.0);
+            let (roll, host, pr) = (&mut self.roll, &mut self.host, &self.p);
+            let pattern = pr.patterns[0].clone();
+            let marks = crate::rack::PatternMarks {
+                playhead: None,
+                caret: Some(0),
+            };
+            let mut edits = Vec::new();
+            let mut ui = |ui: &mut egui::Ui| {
+                let out = roll.show(ui, pr, &pattern, host, marks, Snap::Step);
+                edits.extend(out.edits.into_iter().map(|(e, _)| e));
+            };
+            self.d.click(p, &mut ui);
+            for e in edits {
+                self.h.execute(&mut self.p, e).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn a_stamp_places_its_chord_and_only_one_resets_it() {
+        let mut e = Env::new(vec![]);
+        let major = stamps::CHORDS
+            .iter()
+            .position(|c| c.name == "Major")
+            .unwrap();
+        e.roll.set_stamp(Some(Stamp::Chord(major)));
+        e.roll.only_one = true;
+        e.click_grid(100.0);
+        let notes = e.notes();
+        let root = notes.iter().map(|n| n.key).min().expect("notes placed");
+        let mut keys: Vec<u8> = notes.iter().map(|n| n.key - root).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, [0, 4, 7]);
+        assert!(notes.iter().all(|n| n.start == notes[0].start && !n.slide));
+        assert_eq!(e.roll.selection.len(), 3, "the stamp is selected");
+        assert_eq!(e.roll.stamp, None, "Only one");
+        // Without Only one the stamp stays; Shift+N clears it.
+        e.roll.only_one = false;
+        e.roll.set_stamp(Some(Stamp::Fill(4)));
+        e.click_grid(300.0);
+        assert_eq!(e.roll.stamp, Some(Stamp::Fill(4)));
+        assert_eq!(e.notes().len(), 4);
+        e.press(Key::N, Modifiers::SHIFT);
+        assert_eq!(e.roll.stamp, None);
+    }
+
+    #[test]
+    fn the_slide_switch_draws_slide_notes() {
+        let mut e = Env::new(vec![]);
+        e.roll.slide_mode = true;
+        e.click_grid(100.0);
+        let notes = e.notes();
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].slide);
+        assert_eq!(e.roll.sounding, None, "a slide note is not auditioned");
     }
 
     #[test]

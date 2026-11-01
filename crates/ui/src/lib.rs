@@ -4838,6 +4838,7 @@ mod pattern_caret_tests {
             key,
             velocity: 0.8,
             muted: false,
+            slide: false,
         };
         a.host.midi = Some(MidiNotes {
             notes: vec![note(0, 36), note(480, 38)],
@@ -4881,6 +4882,7 @@ mod pattern_caret_tests {
             key,
             velocity: 0.5,
             muted: false,
+            slide: false,
         };
         a.host.midi = Some(MidiNotes {
             notes: vec![note(0, 60), note(480, 64), note(960, 67)],
@@ -5056,6 +5058,7 @@ mod pattern_caret_tests {
             key,
             velocity: 0.7,
             muted: false,
+            slide: false,
         };
         a.host.midi = Some(MidiNotes {
             // Ends in the second bar: a two-bar pattern.

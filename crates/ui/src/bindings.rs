@@ -166,6 +166,8 @@ pub(crate) const TOOL_SLICE: Binding = Binding {
 pub(crate) const TOOL_SPEED: Binding = Binding::new("Speed tool", Scope::Playlist, NONE, Key::S);
 pub(crate) const IMPORT_MIDI: Binding =
     Binding::new("Import a MIDI file at the caret", PianoRoll, CMD, Key::M);
+pub(crate) const STAMP_NONE: Binding =
+    Binding::new("No stamp (single notes)", PianoRoll, SHIFT, Key::N);
 pub(crate) const SNAP_TOGGLE: Binding =
     Binding::new("Snap on / off", PianoRoll, NONE, Key::Backspace);
 pub(crate) const MOVE_LEFT: Binding =
@@ -221,6 +223,7 @@ pub(crate) const ALL: &[Binding] = &[
     TOOL_SLICE,
     TOOL_SPEED,
     IMPORT_MIDI,
+    STAMP_NONE,
     SNAP_TOGGLE,
     MOVE_LEFT,
     MOVE_RIGHT,

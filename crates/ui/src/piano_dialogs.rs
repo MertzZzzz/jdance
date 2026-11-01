@@ -28,6 +28,8 @@ pub(crate) struct Props {
     pub length: Option<u32>,
     pub key: Option<u8>,
     pub velocity: Option<f32>,
+    /// Slide notes (spec 0.3.5 §6.3).
+    pub slide: Option<bool>,
 }
 
 fn same<T: PartialEq + Copy>(mut it: impl Iterator<Item = T>) -> Option<T> {
@@ -42,6 +44,7 @@ impl Props {
             length: same(notes.iter().map(|n| n.length)),
             key: same(notes.iter().map(|n| n.key)),
             velocity: same(notes.iter().map(|n| n.velocity)),
+            slide: same(notes.iter().map(|n| n.slide)),
         }
     }
 
@@ -63,6 +66,9 @@ impl Props {
             }
             if let Some(v) = self.velocity {
                 n.velocity = v.clamp(0.0, 1.0);
+            }
+            if let Some(v) = self.slide {
+                n.slide = v;
             }
         }
         out
@@ -271,6 +277,10 @@ fn props_ui(ui: &mut egui::Ui, p: &mut Props, sig: jdance_domain::TimeSignature)
     opt_field(ui, "Velocity", &mut p.velocity, 0.8, |ui, v| {
         ui.add(egui::Slider::new(v, 0.0..=1.0).fixed_decimals(2))
     });
+    opt_field(ui, "Slide", &mut p.slide, true, |ui, v| {
+        ui.checkbox(v, "")
+            .on_hover_text("A slide note does not sound: it glides the notes under it to its key")
+    });
 }
 
 #[cfg(test)]
@@ -285,7 +295,23 @@ mod tests {
             key,
             velocity,
             muted: false,
+            slide: false,
         }
+    }
+
+    #[test]
+    fn properties_set_and_keep_the_slide_flag() {
+        let slide = Note {
+            slide: true,
+            ..n(0, 72, 0.8)
+        };
+        let notes = [n(0, 60, 0.8), slide];
+        let mut p = Props::of(&notes);
+        assert_eq!(p.slide, None, "mixed");
+        assert_eq!(p.apply(&notes, &[0, 1]), notes, "kept while mixed");
+        p.slide = Some(false);
+        assert!(p.apply(&notes, &[0, 1]).iter().all(|n| !n.slide));
+        assert_eq!(Props::of(&[slide]).slide, Some(true));
     }
 
     #[test]

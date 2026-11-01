@@ -172,6 +172,9 @@ pub struct StepEvent {
     /// Gate length in samples (one step for steps), cut at the end of the
     /// pattern repetition. One-shot samplers ignore it.
     pub length: u64,
+    /// A slide note: no voice; the channel's sounding voices glide to
+    /// `key` over `length` (spec 0.3.5 §8).
+    pub slide: bool,
 }
 
 #[derive(Debug)]
@@ -926,7 +929,8 @@ pub fn compile_full(
         bind_automation(project, &mut snapshot, &to_sample);
     }
     // Overlapping clips keep all events (no de-duplication).
-    snapshot.events.sort_by_key(|e| (e.pos, e.channel));
+    // Slides after the notes of the same moment: they glide them (§8.7).
+    snapshot.events.sort_by_key(|e| (e.pos, e.slide, e.channel));
     snapshot
 }
 
@@ -1058,6 +1062,7 @@ fn push_pattern_events(
                 velocity: step.velocity,
                 key: ROOT_KEY,
                 length: gate_end.saturating_sub(pos).max(1),
+                slide: false,
             });
         }
         // Notes start inside the pattern; gated notes end at the
@@ -1075,6 +1080,7 @@ fn push_pattern_events(
                 velocity: n.velocity,
                 key: n.key,
                 length: end.saturating_sub(pos).max(1),
+                slide: n.slide,
             });
         }
     }
