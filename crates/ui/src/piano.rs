@@ -191,6 +191,17 @@ pub(crate) struct PianoRoll {
     tool_dialog: Option<crate::note_tools_ui::ToolDialog>,
     /// Its preview: drawn instead of the notes until Apply or Cancel.
     preview: Option<Vec<Note>>,
+    /// The Tools menu item under the pointer, previewed on the grid with
+    /// its last settings (UI-RD §10.7); set again every frame it stays.
+    menu_hover: Option<jdance_commands::note_tools::Tool>,
+    /// What the preview pill names: the tool and its count.
+    preview_label: Option<(String, String)>,
+    /// Listen: the result plays in a loop (UI-RD §10.7).
+    pub listen: bool,
+    /// A / B held: the original plays instead.
+    original: bool,
+    /// A / B of the preview pill held (read the next frame).
+    pill_original: bool,
     /// Grid of the quick tools: the last snap that was not off.
     last_grid: u32,
     script_dialog: Option<crate::scripts::ScriptDialog>,
@@ -258,6 +269,9 @@ pub(crate) struct PianoOutput {
     pub caret: Option<CaretRequest>,
     /// A MIDI file's notes into this roll (spec 0.2.9 §6).
     pub midi: Option<MidiRequest>,
+    /// Listening to a tool's result (UI-RD §10.7): the notes of this
+    /// channel and pattern to play instead of the real ones.
+    pub listen: Option<(PatternId, ChannelId, Vec<Note>)>,
 }
 
 /// Where a MIDI file comes from and where its notes go.
@@ -413,6 +427,11 @@ impl PianoRoll {
             audition_until: 0.0,
             last_paint: None,
             tool_dialog: None,
+            menu_hover: None,
+            preview_label: None,
+            listen: false,
+            original: false,
+            pill_original: false,
             preview: None,
             last_grid: TICKS_PER_STEP,
             script_dialog: None,
@@ -787,6 +806,7 @@ impl PianoRoll {
             let highlight = self.scale.is_some();
             let mut tool = None;
             let mut script = None;
+            let mut hover = None;
             egui::Popup::menu(&tools_button).show(|ui| {
                 ui.set_min_width(260.0);
                 let mut open = |ui: &mut egui::Ui, glyph: G, label: &str, keys: &str, d: Dialog, enabled: bool| {
@@ -817,10 +837,12 @@ impl PianoRoll {
                         "Opens with a preview; Apply is one undo step".to_owned()
                     };
                     let keys = crate::note_tools_ui::keys(&t).map(crate::note_tools_ui::key_text).unwrap_or_default();
-                    if crate::widgets::menu_item_on(ui, Some(crate::note_tools_ui::glyph(&t)), &label, &keys, enabled)
-                        .on_hover_text(tip)
-                        .clicked()
-                    {
+                    let item = crate::widgets::menu_item_on(ui, Some(crate::note_tools_ui::glyph(&t)), &label, &keys, enabled)
+                        .on_hover_text(tip);
+                    if item.hovered() && enabled && !t.is_generator() {
+                        hover = Some(crate::note_tools_ui::last_settings(ui.ctx(), t.clone()));
+                    }
+                    if item.clicked() {
                         tool = Some(t);
                     }
                 }
@@ -863,6 +885,10 @@ impl PianoRoll {
             });
             if let Some(d) = chosen {
                 self.dialog = Some(d);
+            }
+            if hover.is_some() {
+                self.menu_hover = hover;
+                ui.ctx().request_repaint();
             }
             if let Some(t) = tool {
                 self.start_tool(ui.ctx(), t, pattern, notes, out);
@@ -929,13 +955,37 @@ impl PianoRoll {
         let sel = indices(&notes, &self.selection);
         self.scripts = host.scripts();
         let input = self.tool_input(pattern, &notes, &sel);
+        let hovered = self.menu_hover.take();
+        self.preview_label = None;
         self.preview = match &mut self.tool_dialog {
-            Some(d) => d.preview(&input).map(|o| o.notes.clone()),
-            None => self
-                .script_dialog
-                .as_ref()
-                .and_then(|d| d.preview().map(<[Note]>::to_vec)),
+            Some(d) => {
+                let p = d.preview(&input).map(|o| o.notes.clone());
+                if p.is_some() {
+                    self.preview_label =
+                        Some((d.tool.name().to_owned(), d.summary().unwrap_or_default()));
+                }
+                p
+            }
+            None => match (&self.script_dialog, hovered) {
+                (Some(d), _) => d.preview().map(<[Note]>::to_vec),
+                // UI-RD §10.7: the hovered Tools item, with its last
+                // settings, previewed on the grid.
+                (None, Some(t)) => match jdance_commands::note_tools::run(&t, &input) {
+                    Ok(Some(o)) => {
+                        self.preview_label = Some((
+                            t.name().to_owned(),
+                            format!("{} of {} changed", o.select.len(), o.notes.len()),
+                        ));
+                        Some(o.notes)
+                    }
+                    _ => None,
+                },
+                (None, None) => None,
+            },
         };
+        if self.tool_dialog.is_none() {
+            self.listen = false;
+        }
 
         self.header(ui, project, pattern, &notes, &mut out);
         ui.add_space(4.0);
@@ -1889,6 +1939,58 @@ impl PianoRoll {
         });
         self.scroll_offset = scroll_out.state.clamped_offset();
         self.view_w = scroll_out.inner_rect.width() - KEYBOARD_W;
+        // The preview pill over the grid (UI-RD §10.7, board R5 · Tools).
+        self.pill_original &= self.preview.is_some();
+        if let (Some((name, count)), true) = (self.preview_label.clone(), self.preview.is_some()) {
+            let view = scroll_out.inner_rect;
+            let at = pos2(view.left() + KEYBOARD_W + 12.0, view.top() + RULER_H + 8.0);
+            let dialog = self.tool_dialog.is_some();
+            // Drawn in the roll's own layer: windows stay above it.
+            let room = egui::Rect::from_min_size(at, vec2(view.width() - KEYBOARD_W - 24.0, 34.0));
+            // A child Ui: nothing below the roll moves.
+            let mut pill = ui.new_child(egui::UiBuilder::new().max_rect(room));
+            {
+                let ui = &mut pill;
+                egui::Frame::new()
+                    .fill(theme::LCD)
+                    .stroke(Stroke::new(1.0, theme::PREVIEW))
+                    .corner_radius(9)
+                    .inner_margin(egui::Margin::symmetric(10, 5))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let (r, _) = ui.allocate_exact_size(vec2(13.0, 13.0), Sense::hover());
+                            crate::icons::paint(ui, crate::icons::Glyph::Listen, r, theme::PREVIEW);
+                            ui.label(RichText::new("Preview ·").color(theme::MUTED));
+                            ui.label(RichText::new(name).strong());
+                            ui.label(
+                                RichText::new(count)
+                                    .font(theme::mono(10.0))
+                                    .color(theme::DIM),
+                            );
+                            if dialog {
+                                if crate::note_tools_ui::listen_button(ui, self.listen, true)
+                                    .clicked()
+                                {
+                                    self.listen = !self.listen;
+                                }
+                                let ab = ui
+                                    .add(
+                                        egui::Button::new(
+                                            RichText::new("A / B").font(theme::mono(11.0)),
+                                        )
+                                        .min_size(vec2(48.0, 24.0)),
+                                    )
+                                    .on_hover_text("Hold to hear the original");
+                                self.pill_original = ab.is_pointer_button_down_on();
+                            } else {
+                                ui.label(
+                                    RichText::new("click to open").size(10.5).color(theme::DIM),
+                                );
+                            }
+                        });
+                    });
+            }
+        }
 
         self.velocity_lane(ui, pattern, &notes, px_tick, h_offset, &mut out);
         ui.horizontal(|ui| {
@@ -1962,16 +2064,32 @@ impl PianoRoll {
         }
         if let Some(mut d) = self.tool_dialog.take() {
             let input = self.tool_input(pattern, &notes, &sel);
-            let r = d.show(ui.ctx(), &input);
+            let r = d.show(ui.ctx(), &input, self.listen);
             if let Some(o) = r.apply {
                 let select = o.select.iter().map(|&i| o.notes[i]).collect();
                 self.commit(&mut out, pattern, o.notes, select);
             }
+            self.listen ^= r.listen;
+            self.original = r.original || self.pill_original;
             if !r.close {
                 self.tool_dialog = Some(d);
             } else {
                 self.preview = None;
+                self.listen = false;
             }
+        }
+        // Listening (UI-RD §10.7): the result, or the original while A / B
+        // is held, plays instead of the real notes.
+        if self.listen
+            && self.tool_dialog.is_some()
+            && let Some(p) = &self.preview
+        {
+            let play = if self.original {
+                notes.clone()
+            } else {
+                p.clone()
+            };
+            out.listen = Some((pattern.id, self.channel, play));
         }
         if let Some(mut d) = self.dialog.take() {
             let idx = indices(&notes, &self.selection);
@@ -2503,6 +2621,17 @@ impl PianoRoll {
     }
 
     /// Releases a note still sounding (the roll is closing).
+    /// Space while a Tools dialog is open: Listen on / off (UI-RD §10.7);
+    /// `false` when no dialog takes it.
+    pub fn toggle_listen(&mut self) -> bool {
+        if self.tool_dialog.is_some() && self.preview.is_some() {
+            self.listen = !self.listen;
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn release(&mut self, host: &mut dyn Host) {
         self.sound(host, None);
         self.stop_typing(host);

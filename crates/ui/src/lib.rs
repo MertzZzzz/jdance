@@ -413,6 +413,10 @@ pub struct JdanceApp<H: Host, S: ProjectStore> {
     export_artist: String,
     /// The file Export writes, once chosen (UI-RD §10.11).
     export_file: Option<PathBuf>,
+    /// Listening to a Piano Roll tool's result (UI-RD §10.7): the engine
+    /// plays these notes of a channel and pattern instead of the real
+    /// ones until Listen ends.
+    listening: Option<(PatternId, ChannelId, Vec<jdance_domain::Note>)>,
     auto_close_after: Option<u32>,
     frames: u32,
 }
@@ -516,6 +520,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             export_title: String::new(),
             export_artist: String::new(),
             export_file: None,
+            listening: None,
             auto_close_after: None,
             frames: 0,
         }
@@ -1223,9 +1228,47 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             m.count_in ^= k.count_in;
             self.host.set_metronome(m);
         }
-        if k.space {
+        if k.space
+            && !self
+                .piano
+                .as_mut()
+                .is_some_and(piano::PianoRoll::toggle_listen)
+        {
             self.toggle_play();
         }
+    }
+
+    /// Listen (UI-RD §10.7): the engine gets the project with `notes` in
+    /// place of the channel's notes, loops the pattern and plays; when
+    /// listening ends, the real project returns and the transport stops.
+    fn listen(&mut self, want: Option<(PatternId, ChannelId, Vec<jdance_domain::Note>)>) {
+        if want == self.listening {
+            return;
+        }
+        let dir = self.project_dir().map(Path::to_path_buf);
+        match &want {
+            Some((pattern, channel, notes)) => {
+                let mut p = self.project.clone();
+                if let Some(pat) = p.pattern_mut(*pattern) {
+                    pat.row_mut(*channel).notes.clone_from(notes);
+                }
+                self.host.set_project(&p, dir.as_deref());
+                if self.listening.is_none() {
+                    self.host.set_mode(TransportMode::Pattern(*pattern));
+                    if !self.host.transport().playing {
+                        self.host.seek_ticks(self.pattern_caret);
+                        self.host.play();
+                    }
+                }
+            }
+            None => {
+                self.host.stop();
+                self.host.set_project(&self.project, dir.as_deref());
+                // The mode of the main window comes back.
+                self.mode_sent = None;
+            }
+        }
+        self.listening = want;
     }
 
     /// Ctrl+L (UI-VIS-064, ACH-033): the selected Channel Rack channels,
@@ -5403,6 +5446,7 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
         {
             self.lfo_dialog = Some(lfo_dialog::LfoDialog::new(range, ch.track));
         }
+        self.listen(piano_out.listen.take());
         self.lfo_window(&ctx, now);
         if let Some(snap) = piano_out.snap {
             self.snap = snap;
@@ -5665,7 +5709,7 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
         } else {
             TransportMode::Pattern(self.current_pattern)
         };
-        if self.mode_sent != Some(mode) {
+        if self.listening.is_none() && self.mode_sent != Some(mode) {
             let to_song = mode == TransportMode::Song && self.mode_sent.is_some();
             self.mode_sent = Some(mode);
             self.host.set_mode(mode);
@@ -5692,8 +5736,13 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
 
         if self.sync_needed {
             self.sync_needed = false;
-            let dir = self.project_dir().map(Path::to_path_buf);
-            self.host.set_project(&self.project, dir.as_deref());
+            if let Some(l) = self.listening.take() {
+                // An edit while listening: listen to it on the new project.
+                self.listen(Some(l));
+            } else {
+                let dir = self.project_dir().map(Path::to_path_buf);
+                self.host.set_project(&self.project, dir.as_deref());
+            }
         }
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.title()));
         // Plugin editors need their events and timers run (PLG-062).
@@ -6173,6 +6222,42 @@ mod pattern_caret_tests {
 mod export_tests {
     use super::*;
     use crate::test_ui::{NoStore, StubHost};
+
+    #[test]
+    fn listening_plays_the_result_then_brings_the_project_back() {
+        let mut p = Project::new();
+        let ch = ChannelId(p.ids.next());
+        p.channels
+            .push(jdance_domain::Channel::new_sampler(ch, "Lead"));
+        let pat = p.patterns[0].id;
+        let note = |key| jdance_domain::Note {
+            id: 0,
+            start: 0,
+            length: 240,
+            key,
+            velocity: 0.8,
+            muted: false,
+            slide: false,
+        };
+        p.patterns[0].row_mut(ch).notes.push(note(60));
+        let mut a = JdanceApp::new(StubHost::default(), NoStore, p, None);
+        a.song_mode = true;
+        a.listen(Some((pat, ch, vec![note(64)])));
+        let sent = a.host.engine_project.clone().unwrap();
+        assert_eq!(sent.patterns[0].row(ch).unwrap().notes[0].key, 64);
+        assert_eq!(a.host.mode, Some(TransportMode::Pattern(pat)));
+        assert!(a.host.transport.playing);
+        assert_eq!(
+            a.project.patterns[0].row(ch).unwrap().notes[0].key,
+            60,
+            "the project itself is unchanged"
+        );
+        a.listen(None);
+        assert!(!a.host.transport.playing);
+        let sent = a.host.engine_project.clone().unwrap();
+        assert_eq!(sent.patterns[0].row(ch).unwrap().notes[0].key, 60);
+        assert_eq!(a.mode_sent, None, "the window's mode is sent again");
+    }
 
     #[test]
     fn the_export_file_sits_by_the_project_and_follows_the_range() {

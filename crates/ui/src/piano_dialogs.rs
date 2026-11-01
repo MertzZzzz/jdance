@@ -6,7 +6,7 @@
 use crate::piano::key_name;
 use crate::theme;
 use crate::toolbar::bars_text;
-use egui::RichText;
+use egui::{RichText, vec2};
 use jdance_commands::notes::{self, Scale, ScaleMode};
 use jdance_domain::{MAX_PATTERN_STEPS, Note, TICKS_PER_STEP};
 
@@ -89,7 +89,7 @@ impl Dialog {
     pub fn title(&self) -> &'static str {
         match self {
             Self::Transpose { .. } => "Transpose",
-            Self::Scale { .. } => "Scale helper",
+            Self::Scale { .. } => "Scale",
             Self::Properties(_) => "Note properties",
         }
     }
@@ -127,6 +127,56 @@ impl Dialog {
                 ui.add_space(4.0);
                 let mut apply = None;
                 let mut error = None;
+                // Notes the Fit button moves (UI-RD §10.8).
+                let mut outside = 0;
+                if let Self::Scale { scale, highlight } = self {
+                    ui.set_width(330.0);
+                    crate::widgets::caption(ui, "Tonic");
+                    egui::Grid::new("scale_tonic")
+                        .num_columns(6)
+                        .spacing([5.0, 5.0])
+                        .show(ui, |ui| {
+                            for (i, n) in NAMES.iter().enumerate() {
+                                if scale_tile(ui, n, scale.tonic == i as u8, vec2(50.0, 28.0))
+                                    .clicked()
+                                {
+                                    scale.tonic = i as u8;
+                                }
+                                if i % 6 == 5 {
+                                    ui.end_row();
+                                }
+                            }
+                        });
+                    ui.add_space(6.0);
+                    crate::widgets::caption(ui, "Mode");
+                    for m in ScaleMode::ALL {
+                        if mode_row(ui, m, scale.mode == m).clicked() {
+                            scale.mode = m;
+                        }
+                    }
+                    ui.add_space(6.0);
+                    if crate::widgets::switch_row(
+                        ui,
+                        highlight,
+                        theme::SCALE_UI,
+                        "Highlight keys of the scale",
+                    )
+                    .changed()
+                    {
+                        out.highlight = Some(highlight.then_some(*scale));
+                    }
+                    if *highlight {
+                        out.highlight = Some(Some(*scale));
+                    }
+                    outside = notes
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, n)| {
+                            (selected.is_empty() || selected.contains(i)) && !scale.contains(n.key)
+                        })
+                        .count();
+                    apply = Some(notes::fit_to_scale(notes, selected, *scale));
+                }
                 egui::Grid::new("piano_dialog_grid")
                     .num_columns(2)
                     .spacing([12.0, 8.0])
@@ -144,47 +194,10 @@ impl Dialog {
                             }
                         }
                         Self::Scale { scale, highlight } => {
-                            ui.label("Tonic");
-                            egui::ComboBox::from_id_salt("tonic")
-                                .selected_text(NAMES[usize::from(scale.tonic % 12)])
-                                .show_ui(ui, |ui| {
-                                    for (i, n) in NAMES.iter().enumerate() {
-                                        ui.selectable_value(&mut scale.tonic, i as u8, *n);
-                                    }
-                                });
+                            // UI-RD §5 (board R5 · Scale): tonic tiles, the
+                            // modes with their steps, the highlight switch.
                             ui.end_row();
-                            ui.label("Mode");
-                            egui::ComboBox::from_id_salt("mode")
-                                .selected_text(scale.mode.name())
-                                .show_ui(ui, |ui| {
-                                    for m in ScaleMode::ALL {
-                                        ui.selectable_value(&mut scale.mode, m, m.name());
-                                    }
-                                });
-                            ui.end_row();
-                            ui.label("Rows");
-                            if ui
-                                .checkbox(highlight, "Highlight keys of the scale")
-                                .changed()
-                            {
-                                out.highlight = Some(highlight.then_some(*scale));
-                            }
-                            ui.end_row();
-                            ui.label("Notes");
-                            let outside = notes
-                                .iter()
-                                .enumerate()
-                                .filter(|(i, n)| {
-                                    (selected.is_empty() || selected.contains(i))
-                                        && !scale.contains(n.key)
-                                })
-                                .count();
-                            ui.label(format!("{outside} outside the scale"));
-                            ui.end_row();
-                            if *highlight {
-                                out.highlight = Some(Some(*scale));
-                            }
-                            apply = Some(notes::fit_to_scale(notes, selected, *scale));
+                            let _ = (scale, highlight);
                         }
                         Self::Properties(p) => {
                             props_ui(ui, p, sig);
@@ -201,25 +214,52 @@ impl Dialog {
                 }
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    let label = match self {
-                        Self::Scale { .. } => "Fit notes to scale",
-                        _ => "Apply",
-                    };
                     let enabled = apply.as_deref().is_some_and(|a| a != notes) && count > 0;
-                    if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
-                        out.notes = apply.take();
-                        if !matches!(self, Self::Scale { .. }) {
+                    if matches!(self, Self::Scale { .. }) {
+                        // Fit with the count of notes it moves; Close is
+                        // the main button (the dialog stays open).
+                        // The count in `OUT_OF_SCALE` red (UI-RD §1.1).
+                        let mut text = egui::text::LayoutJob::default();
+                        let font = egui::FontId::proportional(12.0);
+                        text.append(
+                            "Fit notes to scale",
+                            0.0,
+                            egui::TextFormat::simple(font.clone(), theme::TEXT),
+                        );
+                        if outside > 0 {
+                            text.append(
+                                &outside.to_string(),
+                                8.0,
+                                egui::TextFormat::simple(theme::mono(11.5), theme::ERROR),
+                            );
+                        }
+                        if ui
+                            .add_enabled(
+                                enabled,
+                                egui::Button::new(text).min_size(vec2(200.0, 28.0)),
+                            )
+                            .on_hover_text("Moves the notes outside the scale to its nearest key")
+                            .on_disabled_hover_text("Every note is in the scale")
+                            .clicked()
+                        {
+                            out.notes = apply.take();
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if crate::widgets::primary_button(ui, "Close", true).clicked() {
+                                out.close = true;
+                            }
+                        });
+                        return;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if crate::widgets::primary_button(ui, "Apply", enabled).clicked() {
+                            out.notes = apply.take();
                             out.close = true;
                         }
-                    }
-                    let close = if matches!(self, Self::Scale { .. }) {
-                        "Close"
-                    } else {
-                        "Cancel"
-                    };
-                    if ui.button(close).clicked() {
-                        out.close = true;
-                    }
+                        if crate::widgets::outline_button(ui, "Cancel").clicked() {
+                            out.close = true;
+                        }
+                    });
                 });
                 if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                     out.close = true;
@@ -281,6 +321,77 @@ fn props_ui(ui: &mut egui::Ui, p: &mut Props, sig: jdance_domain::TimeSignature)
         ui.checkbox(v, "")
             .on_hover_text("A slide note does not sound: it glides the notes under it to its key")
     });
+}
+
+/// A tonic tile: selected = `SCALE_UI` outline.
+fn scale_tile(ui: &mut egui::Ui, text: &str, on: bool, size: egui::Vec2) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+    let (fill, stroke) = if on {
+        (theme::SCALE_UI.gamma_multiply(0.15), theme::SCALE_UI)
+    } else if resp.hovered() {
+        (theme::RAISED, theme::LINE_STRONG)
+    } else {
+        (theme::FIELD, theme::LINE)
+    };
+    let p = ui.painter();
+    p.rect(
+        rect,
+        6.0,
+        fill,
+        egui::Stroke::new(1.0, stroke),
+        egui::StrokeKind::Inside,
+    );
+    p.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        text,
+        theme::mono(11.5),
+        if on { theme::TEXT } else { theme::MUTED },
+    );
+    let name = text.to_owned();
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, on, &name));
+    resp
+}
+
+/// A mode row: name and its steps in semitones ("2 1 2 2 1 2 2").
+fn mode_row(ui: &mut egui::Ui, m: ScaleMode, on: bool) -> egui::Response {
+    let (rect, resp) =
+        ui.allocate_exact_size(vec2(ui.available_width(), 22.0), egui::Sense::click());
+    let p = ui.painter();
+    if on {
+        p.rect_filled(rect, 4.0, theme::SCALE_UI.gamma_multiply(0.14));
+        p.rect_filled(
+            egui::Rect::from_min_size(rect.min, vec2(3.0, rect.height())),
+            1.5,
+            theme::SCALE_UI,
+        );
+    } else if resp.hovered() {
+        p.rect_filled(rect, 4.0, theme::RAISED);
+    }
+    let fg = if on { theme::TEXT } else { theme::MUTED };
+    p.text(
+        rect.left_center() + vec2(9.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        m.name(),
+        egui::FontId::proportional(12.0),
+        fg,
+    );
+    let iv = m.intervals();
+    let steps: Vec<String> = iv
+        .iter()
+        .zip(iv.iter().skip(1).chain(std::iter::once(&12)))
+        .map(|(a, b)| (b - a).to_string())
+        .collect();
+    p.text(
+        rect.right_center() - vec2(8.0, 0.0),
+        egui::Align2::RIGHT_CENTER,
+        steps.join(" "),
+        theme::mono(10.5),
+        fg,
+    );
+    let name = m.name().to_owned();
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, on, &name));
+    resp
 }
 
 #[cfg(test)]
