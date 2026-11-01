@@ -119,6 +119,8 @@ pub enum Edit {
         polyphony: u16,
         mono: bool,
     },
+    /// Pitch bend range of a plugin channel, for slides (spec 0.3.6 §6).
+    SetChannelBendRange(ChannelId, u8),
     /// Sample playback settings (markers, loop, envelope, root key).
     SetSampler(ChannelId, SamplerSettings),
     SetChannelSample(ChannelId, Option<SampleRef>),
@@ -284,6 +286,7 @@ pub enum MergeKey {
     Limiter,
     Notes(PatternId, ChannelId),
     ChannelPlayback(ChannelId),
+    ChannelBendRange(ChannelId),
     Sampler(ChannelId),
     Automation(AutomationId),
     /// An audio or automation clip.
@@ -309,6 +312,7 @@ impl Edit {
             Edit::SetChannelColor(..) => "Change channel color",
             Edit::MoveChannel(..) => "Move channel",
             Edit::SetChannelPlayback { .. } => "Change channel settings",
+            Edit::SetChannelBendRange(..) => "Change pitch bend range",
             Edit::SetSampler(..) => "Change sampler",
             Edit::SetChannelSample(..) => "Change sample",
             Edit::SetMasterVolume(_) => "Change master volume",
@@ -390,6 +394,7 @@ impl Edit {
             } => Some(MergeKey::Notes(*pattern, *channel)),
             Edit::SetAutomation { id, lane: Some(_) } => Some(MergeKey::Automation(*id)),
             Edit::SetChannelPlayback { channel, .. } => Some(MergeKey::ChannelPlayback(*channel)),
+            Edit::SetChannelBendRange(id, _) => Some(MergeKey::ChannelBendRange(*id)),
             Edit::SetSampler(id, _) => Some(MergeKey::Sampler(*id)),
             _ => None,
         }
@@ -771,6 +776,16 @@ impl Edit {
                 ch.polyphony = *polyphony;
                 ch.mono = *mono;
                 Ok(old)
+            }
+            Edit::SetChannelBendRange(id, range) => {
+                if !(1..=jdance_domain::MAX_PITCH_BEND_RANGE).contains(range) {
+                    return Err(EditError::OutOfRange(f64::from(*range)));
+                }
+                let ch = p.channel_mut(*id).ok_or(EditError::NoSuchChannel(*id))?;
+                Ok(Edit::SetChannelBendRange(
+                    *id,
+                    std::mem::replace(&mut ch.pitch_bend_range, *range),
+                ))
             }
             Edit::SetSampler(id, settings) => {
                 settings.validate().map_err(EditError::Arrangement)?;

@@ -17,6 +17,8 @@ const SR: u32 = 48_000;
 
 /// (absolute sample, key, note on) per event.
 type EventLog = Arc<Mutex<Vec<(u64, u8, bool)>>>;
+/// (absolute sample, key, semitones) per tuning event (slides).
+type TuningLog = Arc<Mutex<Vec<(u64, u8, f32)>>>;
 /// 120 BPM: one step = 6000 samples; a 16-step pattern = 96 000.
 const STEP: u64 = 6_000;
 
@@ -24,6 +26,7 @@ const STEP: u64 = 6_000;
 /// sounds and for `release` samples after the last note-off (a tail).
 struct FakeSynth {
     log: EventLog,
+    tunings: TuningLog,
     clock: u64,
     held: Vec<u8>,
     latency: u32,
@@ -52,6 +55,12 @@ impl PluginProcessor for FakeSynth {
         for i in 0..left.len() {
             while let Some(e) = events.get(k).filter(|e| e.offset as usize == i) {
                 k += 1;
+                if let NoteKind::Tuning { semitones, .. } = e.kind {
+                    if let Ok(mut l) = self.tunings.try_lock() {
+                        l.push((self.clock + i as u64, e.key, semitones));
+                    }
+                    continue;
+                }
                 let on = matches!(e.kind, NoteKind::On { .. });
                 if let Ok(mut l) = self.log.try_lock() {
                     l.push((self.clock + i as u64, e.key, on));
@@ -117,8 +126,13 @@ fn project(steps: &[u32], notes: Vec<Note>) -> (Project, ChannelId, PatternId) {
 }
 
 fn synth(log: &EventLog, latency: u32) -> PluginRt {
+    synth_tuned(log, &Arc::new(Mutex::new(Vec::new())), latency)
+}
+
+fn synth_tuned(log: &EventLog, tunings: &TuningLog, latency: u32) -> PluginRt {
     PluginRt::fresh(Box::new(FakeSynth {
         log: Arc::clone(log),
+        tunings: Arc::clone(tunings),
         clock: 0,
         held: Vec::with_capacity(64),
         latency,
@@ -407,6 +421,7 @@ fn stop_silences_an_instrument_tail_until_the_next_note() {
     let (p, id, pid) = project(&[], Vec::new());
     let plugin = PluginRt::fresh(Box::new(FakeSynth {
         log: Arc::clone(&log),
+        tunings: Arc::new(Mutex::new(Vec::new())),
         clock: 0,
         held: Vec::with_capacity(64),
         latency: 0,
@@ -485,4 +500,103 @@ fn plugin_preview_after_stop_is_heard_once_the_tail_is_over() {
     let level = out[4_095];
     assert!(level > 0.1, "the preview is heard: {level}");
     assert!(out[1_024..].iter().all(|v| *v == level));
+}
+
+fn note(step: u32, steps: u32, key: u8, slide: bool) -> Note {
+    Note {
+        id: 0,
+        start: step * TICKS_PER_STEP,
+        length: steps * TICKS_PER_STEP,
+        key,
+        velocity: 1.0,
+        muted: false,
+        slide,
+    }
+}
+
+#[test]
+fn slides_on_plugins_send_tuning_points_and_no_note() {
+    let log = Arc::new(Mutex::new(Vec::with_capacity(64)));
+    let tunings = Arc::new(Mutex::new(Vec::with_capacity(4096)));
+    // A3 for 4 steps, a slide to A4 over step 1, then a new note on step 6.
+    let notes = vec![
+        note(0, 4, 57, false),
+        note(1, 1, 69, true),
+        note(6, 1, 60, false),
+    ];
+    let (p, _, pid) = project(&[], notes);
+    let (mut h, mut e) = create_engine(SR);
+    h.set_snapshot(compile(&p, pid, Some(synth_tuned(&log, &tunings, 0))))
+        .unwrap();
+    h.play().unwrap();
+    // Odd blocks; no allocation while gliding.
+    let (mut l, mut r) = (vec![0.0; 333], vec![0.0; 333]);
+    e.render(&mut l, &mut r);
+    // The fake synth's log locks: macOS mutexes allocate on first use.
+    drop(tunings.lock());
+    drop(log.lock());
+    reset_violations();
+    rt_section(|| {
+        for _ in 0..(8 * STEP as usize).div_ceil(333) {
+            e.render(&mut l, &mut r);
+        }
+    });
+    assert_eq!(violations(), 0, "no allocation in the audio thread");
+    // The slide is no note.
+    assert_eq!(
+        *log.lock().unwrap(),
+        [
+            (0, 57, true),
+            (4 * STEP, 57, false),
+            (6 * STEP, 60, true),
+            (7 * STEP, 60, false)
+        ]
+    );
+    let t = tunings.lock().unwrap();
+    let glide: Vec<_> = t.iter().filter(|x| x.1 == 57).collect();
+    assert_eq!(glide.first().map(|x| (x.0, x.2)), Some((STEP, 0.0)));
+    // Every 64 samples, rising linearly in semitones.
+    assert!(
+        glide
+            .windows(2)
+            .all(|w| w[1].0 - w[0].0 <= 64 && w[1].2 >= w[0].2)
+    );
+    let mid = glide.iter().find(|x| x.0 == STEP + 3_008).unwrap();
+    assert!((mid.2 - 12.0 * 3_008.0 / 6_000.0).abs() < 1e-3, "{mid:?}");
+    assert_eq!(glide.last().map(|x| (x.0, x.2)), Some((2 * STEP, 12.0)));
+    // The next note plays at its own pitch.
+    assert_eq!(
+        t.iter().filter(|x| x.1 == 60).copied().collect::<Vec<_>>(),
+        [(6 * STEP, 60, 0.0)]
+    );
+}
+
+#[test]
+fn slides_on_plugins_add_up_and_move_chords_together() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let tunings = Arc::new(Mutex::new(Vec::with_capacity(4096)));
+    // C–G for 6 steps; the top (G) slides to C an octave above C, so
+    // both rise 5 semitones; then down 7 from there.
+    let notes = vec![
+        note(0, 6, 60, false),
+        note(0, 6, 67, false),
+        note(1, 1, 72, true),
+        note(3, 1, 65, true),
+    ];
+    let (p, _, pid) = project(&[], notes);
+    let (mut h, mut e) = create_engine(SR);
+    h.set_snapshot(compile(&p, pid, Some(synth_tuned(&log, &tunings, 0))))
+        .unwrap();
+    h.play().unwrap();
+    render(&mut e, 7 * STEP as usize, 512);
+    let t = tunings.lock().unwrap();
+    let at = |key: u8, pos: u64| {
+        t.iter()
+            .rev()
+            .find(|x| x.1 == key && x.0 <= pos)
+            .map(|x| x.2)
+            .unwrap()
+    };
+    assert_eq!((at(60, 2 * STEP), at(67, 2 * STEP)), (5.0, 5.0));
+    assert_eq!((at(60, 4 * STEP), at(67, 4 * STEP)), (-2.0, -2.0));
 }

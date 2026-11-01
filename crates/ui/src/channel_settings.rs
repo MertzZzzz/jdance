@@ -317,6 +317,28 @@ impl ChannelSettingsWindow {
                         .push((playback(ch.pitch, ch.polyphony, mono), false));
                 }
                 ui.end_row();
+
+                if ch.instrument().is_some() {
+                    // Slides on plugins without per-note tuning (spec
+                    // 0.3.6 §6).
+                    ui.label("Pitch bend range");
+                    let mut range = ch.pitch_bend_range;
+                    let r = ui
+                        .add(
+                            egui::DragValue::new(&mut range)
+                                .range(1..=jdance_domain::MAX_PITCH_BEND_RANGE)
+                                .suffix(" semitones"),
+                        )
+                        .on_hover_text(
+                            "Slide notes reach plugins without per-note tuning as pitch bend: \
+                             set the same range in the plugin",
+                        );
+                    if r.changed() {
+                        out.edits.push((Edit::SetChannelBendRange(id, range), true));
+                    }
+                    out.end_gesture |= r.drag_stopped() || r.lost_focus();
+                    ui.end_row();
+                }
             });
         ui.add_space(10.0);
         if ch.is_audio() {

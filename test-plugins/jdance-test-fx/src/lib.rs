@@ -12,7 +12,12 @@
 //!   (id, sample offset, value) into its component state, has a
 //!   non-automatable parameter, and echoes the gain as an output
 //!   parameter change.
-//! - **JD Test Synth**: sine voices from note events.
+//! - **JD Test Synth**: sine voices from note events; its controller
+//!   lists the Note Expression "Tuning" type, and tuning values bend
+//!   their note (logged as [`LOG_TUNING`]).
+//! - **JD Test Bend Synth**: the synth without note expressions; its
+//!   controller maps MIDI pitch bend to [`P_BEND`] (±[`BEND_RANGE`]
+//!   semitones), which bends every voice and is logged.
 //! - **JD Test Drums**: the synth with a stereo main output and separate
 //!   outputs (one stereo, three mono), like multi-output drum
 //!   instruments; it accepts only its own bus arrangement.
@@ -56,6 +61,10 @@ const P_GAIN: ParamID = 0;
 const P_FIXED: ParamID = 1;
 const P_OUT: ParamID = 2;
 const P_BYPASS: ParamID = 3;
+/// The bend synth's pitch bend parameter (through `IMidiMapping`).
+pub const P_BEND: ParamID = 77;
+/// Semitones at full bend of the bend synth.
+pub const BEND_RANGE: f64 = 12.0;
 
 const STATE_MAGIC: &[u8; 4] = b"JDTF";
 const CTRL_MAGIC: &[u8; 4] = b"CTRL";
@@ -70,9 +79,10 @@ enum Mode {
     Drums = 5,
     Mono = 6,
     Strict = 7,
+    BendSynth = 8,
 }
 
-const MODES: [Mode; 8] = [
+const MODES: [Mode; 9] = [
     Mode::Gain,
     Mode::Latency,
     Mode::Sidechain,
@@ -81,6 +91,7 @@ const MODES: [Mode; 8] = [
     Mode::Drums,
     Mode::Mono,
     Mode::Strict,
+    Mode::BendSynth,
 ];
 
 /// The factory got a host context that is an `IHostApplication`.
@@ -114,6 +125,7 @@ impl Mode {
             Mode::Drums => "JD Test Drums",
             Mode::Mono => "JD Test Mono",
             Mode::Strict => "JD Test Strict",
+            Mode::BendSynth => "JD Test Bend Synth",
         }
     }
 
@@ -132,6 +144,7 @@ impl Mode {
             Mode::Latency
             | Mode::Sidechain
             | Mode::Synth
+            | Mode::BendSynth
             | Mode::Drums
             | Mode::Mono
             | Mode::Strict => &[P_GAIN],
@@ -194,14 +207,18 @@ struct Dsp {
     delay: [[f32; LATENCY]; 2],
     pos: usize,
     log: Vec<(ParamID, i32, f64)>,
-    /// Synth voices: (key, phase increment per sample, phase, amplitude).
-    voices: Vec<(u8, f64, f64, f32)>,
+    /// Synth voices: (key, tuning in semitones, phase, amplitude, note id).
+    voices: Vec<(u8, f64, f64, f32, i32)>,
     sample_rate: f64,
+    /// Pitch bend of the bend synth, semitones.
+    bend: f64,
 }
 
 /// Synth event log entries use these ids: (id, offset, key).
 pub const LOG_NOTE_ON: u32 = 0x1000;
 pub const LOG_NOTE_OFF: u32 = 0x1001;
+/// A tuning expression: (id, offset, semitones).
+pub const LOG_TUNING: u32 = 0x1002;
 
 struct Processor {
     mode: Mode,
@@ -232,6 +249,7 @@ impl Processor {
                 log: Vec::with_capacity(LOG_CAPACITY),
                 voices: Vec::with_capacity(32),
                 sample_rate: 48_000.0,
+                bend: 0.0,
             }),
             host: Mutex::new(None),
             peer: Mutex::new(None),
@@ -285,7 +303,7 @@ impl Processor {
     fn input_buses(&self) -> i32 {
         match self.mode {
             Mode::Sidechain => 2,
-            Mode::Synth | Mode::Drums => 0,
+            Mode::Synth | Mode::BendSynth | Mode::Drums => 0,
             _ => 1,
         }
     }
@@ -299,7 +317,7 @@ impl Processor {
     }
 
     fn is_instrument(&self) -> bool {
-        matches!(self.mode, Mode::Synth | Mode::Drums)
+        matches!(self.mode, Mode::Synth | Mode::BendSynth | Mode::Drums)
     }
 
     /// The bus's own arrangement.
@@ -352,6 +370,7 @@ impl Processor {
         }
         let on = Event_::EventTypes_::kNoteOnEvent as u16;
         let off = Event_::EventTypes_::kNoteOffEvent as u16;
+        let expression = Event_::EventTypes_::kNoteExpressionValueEvent as u16;
         let outs = if data.numOutputs > 0 && unsafe { (*data.outputs).numChannels } == 2 {
             unsafe { std::slice::from_raw_parts((*data.outputs).__field0.channelBuffers32, 2) }
         } else {
@@ -365,11 +384,24 @@ impl Processor {
                 let (key, id) = if e.r#type == on {
                     let note = unsafe { e.__field0.noteOn };
                     let key = note.pitch.clamp(0, 127) as u8;
-                    let inc = 440.0 * 2f64.powf((f64::from(key) - 69.0) / 12.0) / dsp.sample_rate;
                     if dsp.voices.len() < dsp.voices.capacity() {
-                        dsp.voices.push((key, inc, 0.0, note.velocity * 0.25));
+                        dsp.voices
+                            .push((key, 0.0, 0.0, note.velocity * 0.25, note.noteId));
                     }
                     (key, LOG_NOTE_ON)
+                } else if e.r#type == expression {
+                    let x = unsafe { e.__field0.noteExpressionValue };
+                    if x.typeId != NoteExpressionTypeIDs_::kTuningTypeID as NoteExpressionTypeID {
+                        continue;
+                    }
+                    let semis = (x.value - 0.5) * 240.0;
+                    for v in dsp.voices.iter_mut().filter(|v| v.4 == x.noteId) {
+                        v.1 = semis;
+                    }
+                    if dsp.log.len() < LOG_CAPACITY {
+                        dsp.log.push((LOG_TUNING, e.sampleOffset, semis));
+                    }
+                    continue;
                 } else if e.r#type == off {
                     let key = unsafe { e.__field0.noteOff }.pitch.clamp(0, 127) as u8;
                     if let Some(v) = dsp.voices.iter().position(|v| v.0 == key) {
@@ -384,9 +416,11 @@ impl Processor {
                 }
             }
             let mut y = 0.0f32;
+            let (bend, sr) = (dsp.bend, dsp.sample_rate);
             for v in &mut dsp.voices {
                 y += (v.2 * std::f64::consts::TAU).sin() as f32 * v.3;
-                v.2 = (v.2 + v.1).fract();
+                let inc = 440.0 * 2f64.powf((f64::from(v.0) + v.1 + bend - 69.0) / 12.0) / sr;
+                v.2 = (v.2 + inc).fract();
             }
             for ch in outs {
                 unsafe { *ch.add(i) = y * gain };
@@ -676,6 +710,12 @@ impl IAudioProcessorTrait for Processor {
                     match id {
                         P_GAIN => self.gain.store(value.to_bits(), Ordering::Relaxed),
                         P_BYPASS => self.bypass.store(value > 0.5, Ordering::Relaxed),
+                        P_BEND if self.mode == Mode::BendSynth => {
+                            dsp.bend = (value - 0.5) * 2.0 * BEND_RANGE;
+                            if dsp.log.len() < LOG_CAPACITY {
+                                dsp.log.push((id, offset, value));
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -785,7 +825,84 @@ impl Report {
 }
 
 impl Class for Controller {
-    type Interfaces = (IEditController, IConnectionPoint);
+    type Interfaces = (
+        IEditController,
+        IConnectionPoint,
+        INoteExpressionController,
+        IMidiMapping,
+    );
+}
+
+impl INoteExpressionControllerTrait for Controller {
+    unsafe fn getNoteExpressionCount(&self, bus: i32, channel: i16) -> i32 {
+        i32::from(self.mode == Mode::Synth && bus == 0 && channel == 0)
+    }
+
+    unsafe fn getNoteExpressionInfo(
+        &self,
+        bus: i32,
+        channel: i16,
+        index: i32,
+        info: *mut NoteExpressionTypeInfo,
+    ) -> tresult {
+        if unsafe { self.getNoteExpressionCount(bus, channel) } <= index || index < 0 {
+            return kInvalidArgument;
+        }
+        let info = unsafe { &mut *info };
+        info.typeId = NoteExpressionTypeIDs_::kTuningTypeID as NoteExpressionTypeID;
+        copy_wstring("Tuning", &mut info.title);
+        copy_wstring("Tun", &mut info.shortTitle);
+        copy_wstring("st", &mut info.units);
+        info.valueDesc.minimum = 0.0;
+        info.valueDesc.maximum = 1.0;
+        info.valueDesc.defaultValue = 0.5;
+        info.associatedParameterId = u32::MAX;
+        info.flags = NoteExpressionTypeInfo_::NoteExpressionTypeFlags_::kIsBipolar as i32;
+        kResultOk
+    }
+
+    unsafe fn getNoteExpressionStringByValue(
+        &self,
+        _bus: i32,
+        _channel: i16,
+        _id: NoteExpressionTypeID,
+        _value: NoteExpressionValue,
+        _string: *mut String128,
+    ) -> tresult {
+        kNotImplemented
+    }
+
+    unsafe fn getNoteExpressionValueByString(
+        &self,
+        _bus: i32,
+        _channel: i16,
+        _id: NoteExpressionTypeID,
+        _string: *const TChar,
+        _value: *mut NoteExpressionValue,
+    ) -> tresult {
+        kNotImplemented
+    }
+}
+
+impl IMidiMappingTrait for Controller {
+    unsafe fn getMidiControllerAssignment(
+        &self,
+        bus: i32,
+        channel: i16,
+        number: CtrlNumber,
+        id: *mut ParamID,
+    ) -> tresult {
+        if self.mode == Mode::BendSynth
+            && bus == 0
+            && channel == 0
+            && number == ControllerNumbers_::kPitchBend as CtrlNumber
+        {
+            unsafe { *id = P_BEND };
+            kResultOk
+        } else {
+            kResultFalse
+        }
+    }
 }
 
 impl Controller {
@@ -1350,7 +1467,7 @@ impl IPluginFactory2Trait for Factory {
         };
         let sub = match mode {
             Mode::Sidechain => "Fx|Dynamics",
-            Mode::Synth => "Instrument|Synth",
+            Mode::Synth | Mode::BendSynth => "Instrument|Synth",
             Mode::Drums => "Instrument|Drum",
             _ => "Fx",
         };

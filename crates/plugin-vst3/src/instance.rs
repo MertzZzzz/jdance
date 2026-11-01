@@ -424,6 +424,7 @@ pub fn instantiate(
         core.processing = true;
 
         let params = read_params(&controller);
+        let tuning = tuning_route(&controller);
         let core = Arc::new(core);
         let (to_rt, from_ui) = rtrb::RingBuffer::new(PARAM_QUEUE);
         let (to_ui, from_rt) = rtrb::RingBuffer::new(PARAM_QUEUE);
@@ -436,6 +437,10 @@ pub fn instantiate(
             from_ui,
             to_ui,
         );
+        let processor = Vst3Processor {
+            tuning,
+            ..processor
+        };
         let controller = Vst3Controller {
             core,
             controller,
@@ -445,6 +450,68 @@ pub fn instantiate(
         };
         Ok((processor, controller))
     }
+}
+
+/// How a note's pitch offset reaches the plugin (spec 0.3.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TuningRoute {
+    /// Not at all: slides are not heard.
+    None,
+    /// Per-note Note Expression "Tuning".
+    Expression,
+    /// MIDI pitch bend through the parameter it is mapped to.
+    Bend(ParamID),
+}
+
+/// Per-note tuning when the controller lists it on bus 0, channel 0;
+/// else pitch bend when it maps one there.
+unsafe fn tuning_route(controller: &ComPtr<IEditController>) -> TuningRoute {
+    if let Some(ne) = controller.cast::<INoteExpressionController>() {
+        let n = unsafe { ne.getNoteExpressionCount(0, 0) };
+        for i in 0..n.clamp(0, 256) {
+            let mut info: NoteExpressionTypeInfo = unsafe { std::mem::zeroed() };
+            if unsafe { ne.getNoteExpressionInfo(0, 0, i, &mut info) } == kResultOk
+                && info.typeId == NoteExpressionTypeIDs_::kTuningTypeID as NoteExpressionTypeID
+            {
+                return TuningRoute::Expression;
+            }
+        }
+    }
+    if let Some(mm) = controller.cast::<IMidiMapping>() {
+        let mut id: ParamID = 0;
+        if unsafe {
+            mm.getMidiControllerAssignment(
+                0,
+                0,
+                ControllerNumbers_::kPitchBend as CtrlNumber,
+                &mut id,
+            )
+        } == kResultOk
+        {
+            return TuningRoute::Bend(id);
+        }
+    }
+    TuningRoute::None
+}
+
+/// The normalized pitch bend for `semitones` with `range` at full bend.
+fn bend_value(semitones: f32, range: f32) -> f64 {
+    (0.5 + f64::from(semitones) / (2.0 * f64::from(range.max(1.0)))).clamp(0.0, 1.0)
+}
+
+/// A tuning expression event: Tuning spans ±120 semitones around 0.5.
+fn tuning_event(e: &NoteEvent, base: usize, semitones: f32) -> Event {
+    let mut ev: Event = unsafe { std::mem::zeroed() };
+    ev.busIndex = 0;
+    ev.sampleOffset = (e.offset as usize).saturating_sub(base) as i32;
+    ev.flags = Event_::EventFlags_::kIsLive as u16;
+    ev.r#type = Event_::EventTypes_::kNoteExpressionValueEvent as u16;
+    ev.__field0.noteExpressionValue = NoteExpressionValueEvent {
+        typeId: NoteExpressionTypeIDs_::kTuningTypeID as NoteExpressionTypeID,
+        noteId: e.note_id,
+        value: (0.5 + f64::from(semitones) / 240.0).clamp(0.0, 1.0),
+    };
+    ev
 }
 
 /// Left becomes the mix of left and right, for a mono bus.
@@ -473,6 +540,7 @@ fn vst_event(e: &NoteEvent, base: usize) -> Event {
                 noteId: e.note_id,
             };
         }
+        NoteKind::Tuning { semitones, .. } => return tuning_event(e, base, semitones),
         NoteKind::Off => {
             ev.r#type = Event_::EventTypes_::kNoteOffEvent as u16;
             ev.__field0.noteOff = NoteOffEvent {
@@ -517,6 +585,8 @@ pub struct Vst3Processor {
     to_ui: rtrb::Producer<(u32, f64)>,
     /// Automation points for the next call: (id, offset, value).
     automation: Vec<(u32, u32, f64)>,
+    /// Where note tuning goes (slide notes).
+    tuning: TuningRoute,
     /// Keeps the plugin alive; dropped last.
     _core: Arc<Core>,
 }
@@ -573,6 +643,7 @@ impl Vst3Processor {
             from_ui,
             to_ui,
             automation: Vec::with_capacity(AUTOMATION_POINTS),
+            tuning: TuningRoute::None,
             _core: core,
         };
         // The main and sidechain buses get the host's left and right
@@ -799,6 +870,26 @@ impl PluginProcessor for Vst3Processor {
             // Events of this chunk, offsets relative to its start.
             while let Some(e) = events.get(next).filter(|e| (e.offset as usize) < done + n) {
                 next += 1;
+                if let NoteKind::Tuning {
+                    semitones,
+                    bend_range,
+                } = e.kind
+                {
+                    match self.tuning {
+                        TuningRoute::Expression if self.buses.has_events => {
+                            self.events.push(tuning_event(e, done, semitones));
+                        }
+                        TuningRoute::Bend(id) => {
+                            // One bend for the channel: a later point at
+                            // the same offset replaces the earlier one.
+                            let offset = (e.offset as usize).saturating_sub(done) as i32;
+                            self.in_changes
+                                .add(id, offset, bend_value(semitones, bend_range));
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
                 if self.buses.has_events {
                     self.events.push(vst_event(e, done));
                 }

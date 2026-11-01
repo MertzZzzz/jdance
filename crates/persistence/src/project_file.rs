@@ -14,7 +14,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 pub const FORMAT_TAG: &str = "jdance-project";
-pub const CURRENT_FORMAT_VERSION: u32 = 19;
+pub const CURRENT_FORMAT_VERSION: u32 = 20;
 pub const PROJECT_EXTENSION: &str = "jdance";
 
 /// Saves `project` to `path` atomically. Sample paths inside the project
@@ -230,6 +230,10 @@ fn migrate(version: u32, mut project: Value) -> Result<Value, PersistError> {
     if v == 18 {
         // v19 (0.3.5) added slide notes (absent = an ordinary note).
         v = 19;
+    }
+    if v == 19 {
+        // v20 (0.3.6) added the pitch bend range of channels (absent = 2).
+        v = 20;
     }
     match v {
         CURRENT_FORMAT_VERSION => Ok(project),
@@ -596,6 +600,7 @@ fn validate(p: &Project) -> Result<(), PersistError> {
         }
         if c.pitch.abs() > jdance_domain::MAX_CHANNEL_PITCH
             || c.polyphony > jdance_domain::MAX_POLYPHONY
+            || !(1..=jdance_domain::MAX_PITCH_BEND_RANGE).contains(&c.pitch_bend_range)
         {
             return bad(format!("channel {:?} has invalid pitch/polyphony", c.id));
         }
@@ -821,12 +826,36 @@ mod tests {
         p.mixer.tracks.push(t);
         save_project(&path, &p).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("\"format_version\": 19"), "{text}");
+        assert!(text.contains("\"format_version\": 20"), "{text}");
         assert_eq!(load_project(&path).unwrap(), p, "signature and track input");
 
-        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 19, "project": p});
+        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 20, "project": p});
         v["project"]["time_signature"]["denominator"] = serde_json::json!(3);
         assert!(parse_project(v.to_string().as_bytes()).is_err(), "SIG-001");
+    }
+
+    #[test]
+    fn the_pitch_bend_range_round_trips_and_defaults_to_2() {
+        let mut p = sample_project("a.wav");
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("bend.jdance");
+        save_project(&file, &p).unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(
+            !text.contains("pitch_bend_range"),
+            "the default is not written"
+        );
+        p.channels[0].pitch_bend_range = 12;
+        save_project(&file, &p).unwrap();
+        assert_eq!(load_project(&file).unwrap(), p);
+        // A 0.3.5 file (v19): range 2.
+        p.channels[0].pitch_bend_range = 2;
+        let v = serde_json::json!({"format": FORMAT_TAG, "format_version": 19, "project": p});
+        let loaded = parse_project(v.to_string().as_bytes()).unwrap();
+        assert_eq!(loaded.channels[0].pitch_bend_range, 2);
+        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 20, "project": p});
+        v["project"]["channels"][0]["pitch_bend_range"] = serde_json::json!(0);
+        assert!(parse_project(v.to_string().as_bytes()).is_err());
     }
 
     #[test]
