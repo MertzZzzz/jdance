@@ -105,6 +105,83 @@ impl RangeKind {
 }
 
 /// "Bars 5:1 – 9:1 (4 bars, 0:08.000)" (EXP-003).
+/// A Range card of the export dialog: glyph, name and a note on the
+/// right; selected = blue.
+fn range_card(
+    ui: &mut egui::Ui,
+    glyph: icons::Glyph,
+    name: &str,
+    note: &str,
+    on: bool,
+) -> egui::Response {
+    let (rect, resp) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 32.0), egui::Sense::click());
+    let enabled = ui.is_enabled();
+    let (fill, stroke) = if on {
+        (theme::BLUE_BG, theme::BLUE)
+    } else if resp.hovered() && enabled {
+        (theme::RAISED, theme::LINE_STRONG)
+    } else {
+        (theme::FIELD, theme::LINE)
+    };
+    let p = ui.painter();
+    p.rect(
+        rect,
+        7.0,
+        fill,
+        egui::Stroke::new(1.0, stroke),
+        egui::StrokeKind::Inside,
+    );
+    let fg = if enabled { theme::TEXT } else { theme::DIM };
+    icons::paint_with(
+        p,
+        glyph,
+        egui::Rect::from_center_size(
+            rect.left_center() + egui::vec2(18.0, 0.0),
+            egui::vec2(14.0, 14.0),
+        ),
+        fg,
+    );
+    p.text(
+        rect.left_center() + egui::vec2(32.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        name,
+        egui::FontId::proportional(12.0),
+        fg,
+    );
+    let room = rect.width() - 100.0;
+    let galley = widgets::fit_galley(
+        ui.painter(),
+        note,
+        theme::mono(9.5),
+        theme::DIM,
+        room.max(20.0),
+    );
+    p.galley(
+        rect.right_center() - egui::vec2(10.0 + galley.size().x, galley.size().y / 2.0),
+        galley,
+        theme::DIM,
+    );
+    let name = name.to_owned();
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, enabled, on, &name));
+    resp
+}
+
+/// `~/Music/demo.wav`: the home folder shortened.
+fn home_short(path: &Path) -> String {
+    let text = path.display().to_string();
+    match std::env::var_os("HOME").map(PathBuf::from) {
+        Some(home) if !home.as_os_str().is_empty() && path.starts_with(&home) => {
+            format!(
+                "~/{}",
+                path.strip_prefix(&home)
+                    .map_or(text.clone(), |p| p.display().to_string())
+            )
+        }
+        _ => text,
+    }
+}
+
 fn selection_text(start: u64, end: u64, project: &Project) -> String {
     let sig = project.time_signature;
     let at = |t: u64| {
@@ -334,6 +411,8 @@ pub struct JdanceApp<H: Host, S: ProjectStore> {
     export_mp3: Option<jdance_domain::Mp3Options>,
     export_title: String,
     export_artist: String,
+    /// The file Export writes, once chosen (UI-RD §10.11).
+    export_file: Option<PathBuf>,
     auto_close_after: Option<u32>,
     frames: u32,
 }
@@ -436,6 +515,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             export_mp3: None,
             export_title: String::new(),
             export_artist: String::new(),
+            export_file: None,
             auto_close_after: None,
             frames: 0,
         }
@@ -619,131 +699,309 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
         self.export_dialog = Some((options, estimate));
     }
 
+    /// UI-RD §7 (board R5 · Export): Range as cards, the tail, Format,
+    /// and the file to write (§10.11); Export writes it without another
+    /// dialog.
     fn export_dialog(&mut self, ctx: &egui::Context) {
+        use icons::Glyph as G;
         let Some((mut options, estimate)) = self.export_dialog else {
             return;
         };
         let song_empty = self.project.arrangement_end_ticks() == 0;
         let selection = self.selection();
         let mut choice = None;
+        let ext = options.extension();
+        let mut file = self
+            .export_file
+            .clone()
+            .unwrap_or_else(|| self.default_export_file(&options));
+        // The extension follows the format.
+        if file.extension().and_then(|e| e.to_str()) != Some(ext) {
+            file.set_extension(ext);
+        }
         egui::Modal::new(egui::Id::unique("export")).show(ctx, |ui| {
-            ui.heading("Export audio");
-            egui::Grid::new("export_grid")
-                .num_columns(2)
-                .show(ui, |ui| {
-                    ui.label("Range");
-                    ui.horizontal(|ui| {
-                        let kind = RangeKind::of(options.range);
-                        for (k, name) in [
-                            (RangeKind::Song, "Song"),
-                            (RangeKind::Pattern, "Pattern"),
-                            (RangeKind::Selection, "Selection"),
-                        ] {
-                            let enabled = k != RangeKind::Selection || selection.is_some();
-                            if ui
-                                .add_enabled(enabled, egui::Button::selectable(kind == k, name))
-                                .on_disabled_hover_text(
-                                    "Shift+drag on the Playlist ruler to select a range",
+            ui.set_width(540.0);
+            widgets::dialog_title(ui, G::Export, "Export audio");
+            ui.add_space(8.0);
+            widgets::caption(ui, "Range");
+            let sig = self.project.time_signature;
+            let bars = |t: u64| {
+                let (b, beats, _) = sig.split(t);
+                b + u64::from(beats > 0)
+            };
+            let song_bars = bars(self.project.arrangement_end_ticks());
+            let pattern_note = match &options.range {
+                ExportRange::Pattern { pattern, loops } => self
+                    .project
+                    .pattern(*pattern)
+                    .map_or_else(String::new, |p| format!("{} × {loops}", p.name)),
+                _ => self
+                    .project
+                    .pattern(self.current_pattern)
+                    .map_or_else(String::new, |p| {
+                        format!("{} × {}", p.name, self.export_loops)
+                    }),
+            };
+            let selection_note =
+                selection.map_or("none".to_owned(), |(a, b)| format!("{} bars", bars(b - a)));
+            ui.columns(3, |cols| {
+                let kind = RangeKind::of(options.range);
+                for (ui, (k, g, name, note)) in cols.iter_mut().zip([
+                    (
+                        RangeKind::Song,
+                        G::Song,
+                        "Song",
+                        format!("{song_bars} bars"),
+                    ),
+                    (
+                        RangeKind::Pattern,
+                        G::Pattern,
+                        "Pattern",
+                        pattern_note.clone(),
+                    ),
+                    (
+                        RangeKind::Selection,
+                        G::Select,
+                        "Selection",
+                        selection_note.clone(),
+                    ),
+                ]) {
+                    let enabled = k != RangeKind::Selection || selection.is_some();
+                    let r = ui
+                        .add_enabled_ui(enabled, |ui| range_card(ui, g, name, &note, kind == k))
+                        .inner
+                        .on_disabled_hover_text(
+                            "Shift+drag on the Playlist ruler to select a range",
+                        );
+                    if r.clicked() {
+                        options.range = self.export_range(k);
+                    }
+                }
+            });
+            ui.add_space(6.0);
+            widgets::card(ui, None, "", |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    match &mut options.range {
+                        ExportRange::Selection { start, end } => {
+                            // EXP-003.
+                            ui.label(selection_text(*start, *end, &self.project));
+                        }
+                        ExportRange::Pattern { loops, .. } => {
+                            ui.label("Loops");
+                            ui.add(egui::DragValue::new(loops).range(1..=256));
+                        }
+                        ExportRange::Song => {
+                            ui.label(
+                                egui::RichText::new(format!("Song · {song_bars} bars"))
+                                    .color(theme::MUTED),
+                            );
+                        }
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut options.tail_seconds)
+                                .range(0.0..=MAX_EXPORT_TAIL_SECONDS)
+                                .speed(0.1)
+                                .suffix(" s"),
+                        )
+                        .on_hover_text("Effects ring on after the last note");
+                        ui.label("Tail");
+                    });
+                });
+                if let Some(w) = options.tail_warning(estimate) {
+                    ui.label(egui::RichText::new(w).size(11.0).color(theme::WARN));
+                }
+            });
+            ui.add_space(6.0);
+            widgets::caption(ui, "Format");
+            ui.horizontal(|ui| {
+                widgets::segmented(ui, |ui| {
+                    if widgets::button(
+                        ui,
+                        None,
+                        "WAV",
+                        options.mp3.is_none(),
+                        widgets::Look::Blue,
+                        "",
+                    )
+                    .clicked()
+                    {
+                        options.mp3 = None;
+                    }
+                    if widgets::button(
+                        ui,
+                        None,
+                        "MP3",
+                        options.mp3.is_some(),
+                        widgets::Look::Blue,
+                        "",
+                    )
+                    .clicked()
+                    {
+                        options.mp3.get_or_insert_with(Mp3Options::default);
+                    }
+                });
+                if options.mp3.is_none() {
+                    ui.label(egui::RichText::new("Samples").color(theme::MUTED));
+                    egui::ComboBox::from_id_salt("export_format")
+                        .width(ui.available_width() - 8.0)
+                        .selected_text(options.format.label())
+                        .show_ui(ui, |ui| {
+                            for f in ExportFormat::ALL {
+                                ui.selectable_value(&mut options.format, f, f.label());
+                            }
+                        });
+                }
+            });
+            if let Some(m) = &mut options.mp3 {
+                widgets::card(ui, None, "", |ui| {
+                    ui.set_width(ui.available_width());
+                    egui::Grid::new("mp3_grid").num_columns(2).show(ui, |ui| {
+                        ui.label("Bitrate");
+                        ui.horizontal(|ui| {
+                            widgets::segmented(ui, |ui| {
+                                for k in [128u16, 192, 256, 320] {
+                                    if widgets::button(
+                                        ui,
+                                        None,
+                                        &k.to_string(),
+                                        m.kbps == k,
+                                        widgets::Look::Blue,
+                                        "",
+                                    )
+                                    .clicked()
+                                    {
+                                        m.kbps = k;
+                                    }
+                                }
+                            });
+                            ui.label(egui::RichText::new("kbit/s CBR, stereo").color(theme::MUTED));
+                        });
+                        ui.end_row();
+                        ui.label("Sample rate");
+                        widgets::segmented(ui, |ui| {
+                            for (r, t) in [(44_100u32, "44.1 kHz"), (48_000, "48 kHz")] {
+                                if widgets::button(
+                                    ui,
+                                    None,
+                                    t,
+                                    m.sample_rate == r,
+                                    widgets::Look::Blue,
+                                    "",
                                 )
                                 .clicked()
-                            {
-                                options.range = self.export_range(k);
+                                {
+                                    m.sample_rate = r;
+                                }
+                            }
+                        });
+                        ui.end_row();
+                        ui.label("Title");
+                        ui.text_edit_singleline(&mut self.export_title);
+                        ui.end_row();
+                        ui.label("Artist");
+                        ui.text_edit_singleline(&mut self.export_artist);
+                        ui.end_row();
+                    });
+                });
+            }
+            ui.add_space(6.0);
+            widgets::caption(ui, "File");
+            widgets::card(ui, None, "", |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    let (r, _) =
+                        ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+                    icons::paint(ui, G::Folder, r, theme::MUTED);
+                    let room = (ui.available_width() - 90.0).max(60.0);
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(room, 26.0),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            ui.set_width(room);
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(home_short(&file)).font(theme::mono(11.5)),
+                                )
+                                .truncate(),
+                            )
+                            .on_hover_text(file.display().to_string());
+                        },
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if widgets::button(
+                            ui,
+                            None,
+                            "Change…",
+                            false,
+                            widgets::Look::Raised,
+                            "Choose the folder and name",
+                        )
+                        .clicked()
+                        {
+                            let filter = if options.mp3.is_some() {
+                                "MP3 audio"
+                            } else {
+                                "WAV audio"
+                            };
+                            let mut dialog = rfd::FileDialog::new()
+                                .add_filter(filter, &[ext])
+                                .set_file_name(
+                                    file.file_name()
+                                        .map(|n| n.to_string_lossy().into_owned())
+                                        .unwrap_or_default(),
+                                );
+                            if let Some(d) = file.parent() {
+                                dialog = dialog.set_directory(d);
+                            }
+                            if let Some(mut f) = dialog.save_file() {
+                                if f.extension().is_none() {
+                                    f.set_extension(ext);
+                                }
+                                file = f;
                             }
                         }
                     });
-                    ui.end_row();
-                    if let ExportRange::Selection { start, end } = options.range {
-                        // EXP-003.
-                        ui.label("Selection");
-                        ui.label(selection_text(start, end, &self.project));
-                        ui.end_row();
-                    }
-                    if let ExportRange::Pattern { pattern, loops } = &mut options.range {
-                        let name = self
-                            .project
-                            .pattern(*pattern)
-                            .map_or("?", |p| p.name.as_str());
-                        ui.label("Loops");
-                        ui.horizontal(|ui| {
-                            ui.add(egui::DragValue::new(loops).range(1..=256));
-                            ui.label(format!("of \"{name}\""));
-                        });
-                        ui.end_row();
-                    }
-                    ui.label("Tail");
-                    ui.add(
-                        egui::DragValue::new(&mut options.tail_seconds)
-                            .range(0.0..=MAX_EXPORT_TAIL_SECONDS)
-                            .speed(0.1)
-                            .suffix(" s"),
-                    );
-                    ui.end_row();
-                    ui.label("Format");
-                    ui.horizontal(|ui| {
-                        if ui.selectable_label(options.mp3.is_none(), "WAV").clicked() {
-                            options.mp3 = None;
-                        }
-                        if ui.selectable_label(options.mp3.is_some(), "MP3").clicked() {
-                            options.mp3.get_or_insert_with(Mp3Options::default);
-                        }
-                    });
-                    ui.end_row();
-                    match &mut options.mp3 {
-                        None => {
-                            ui.label("Samples");
-                            egui::ComboBox::from_id_salt("export_format")
-                                .selected_text(options.format.label())
-                                .show_ui(ui, |ui| {
-                                    for f in ExportFormat::ALL {
-                                        ui.selectable_value(&mut options.format, f, f.label());
-                                    }
-                                });
-                            ui.end_row();
-                        }
-                        Some(m) => {
-                            ui.label("Bitrate");
-                            ui.horizontal(|ui| {
-                                for k in [128u16, 192, 256, 320] {
-                                    ui.selectable_value(&mut m.kbps, k, format!("{k}"));
-                                }
-                                ui.label("kbit/s CBR, stereo");
-                            });
-                            ui.end_row();
-                            ui.label("Sample rate");
-                            ui.horizontal(|ui| {
-                                ui.selectable_value(&mut m.sample_rate, 44_100, "44.1 kHz");
-                                ui.selectable_value(&mut m.sample_rate, 48_000, "48 kHz");
-                            });
-                            ui.end_row();
-                            ui.label("Title");
-                            ui.text_edit_singleline(&mut self.export_title);
-                            ui.end_row();
-                            ui.label("Artist");
-                            ui.text_edit_singleline(&mut self.export_artist);
-                            ui.end_row();
-                        }
-                    }
                 });
-            if let Some(w) = options.tail_warning(estimate) {
-                ui.colored_label(ui.visuals().warn_fg_color, w);
-            }
+            });
             let blocked = song_empty && options.range == ExportRange::Song;
             if blocked {
-                ui.colored_label(ui.visuals().warn_fg_color, "The playlist is empty.");
+                ui.colored_label(theme::WARN, "The playlist is empty.");
             }
-            ui.add_space(6.0);
+            if file.exists() {
+                ui.label(
+                    egui::RichText::new("The file exists and will be replaced.")
+                        .size(11.0)
+                        .color(theme::WARN),
+                );
+            }
+            ui.add_space(10.0);
             // UI-RD §7: the main action amber, bottom right; Cancel outlined.
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if widgets::primary_button(ui, "Export…", !blocked).clicked() {
-                    choice = Some(true);
-                }
-                if widgets::outline_button(ui, "Cancel").clicked() {
-                    choice = Some(false);
-                }
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Renders offline, without an audio device")
+                        .size(11.0)
+                        .color(theme::DIM),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if widgets::primary_button(ui, "Export", !blocked).clicked() {
+                        choice = Some(true);
+                    }
+                    if widgets::outline_button(ui, "Cancel").clicked() {
+                        choice = Some(false);
+                    }
+                });
             });
         });
         if let ExportRange::Pattern { loops, .. } = options.range {
             self.export_loops = loops;
+        }
+        // The file is kept for the session only when chosen by hand or
+        // after an export; the default follows the range.
+        let chosen = self.export_file.is_some() || file != self.default_export_file(&options);
+        if chosen {
+            self.export_file = Some(file.clone());
         }
         self.export_range_kind = Some(RangeKind::of(options.range));
         self.export_tail = options.tail_seconds;
@@ -753,47 +1011,42 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             None => Some((options, estimate)),
             Some(go) => {
                 if go {
-                    self.export(options);
+                    self.export(options, file);
                 }
                 None
             }
         };
     }
 
-    fn export(&mut self, options: ExportOptions) {
+    /// `<project folder>/<project> (bars 5-9).wav` for a selection,
+    /// `<project folder>/<project>.wav` otherwise (EXP-008).
+    fn default_export_file(&self, options: &ExportOptions) -> PathBuf {
         let ext = options.extension();
-        let filter = if options.mp3.is_some() {
-            "MP3 audio"
-        } else {
-            "WAV audio"
-        };
-        // "<project> (bars 5-9).wav" for a selection (EXP-008).
+        let stem = self
+            .path
+            .as_ref()
+            .and_then(|p| p.file_stem())
+            .map_or_else(|| "render".into(), |s| s.to_string_lossy().into_owned());
         let name = match options.range {
             ExportRange::Selection { start, end } => {
                 let sig = self.project.time_signature;
-                let stem = self
-                    .path
-                    .as_ref()
-                    .and_then(|p| p.file_stem())
-                    .map_or_else(|| "render".into(), |s| s.to_string_lossy().into_owned());
                 format!(
                     "{stem} (bars {}-{}).{ext}",
                     sig.split(start).0 + 1,
                     sig.split(end).0 + 1
                 )
             }
-            _ => format!("render.{ext}"),
+            _ => format!("{stem}.{ext}"),
         };
-        let Some(mut out) = rfd::FileDialog::new()
-            .add_filter(filter, &[ext])
-            .set_file_name(&name)
-            .save_file()
-        else {
-            return;
-        };
-        if out.extension().is_none() {
-            out.set_extension(ext);
-        }
+        let dir = self
+            .project_dir()
+            .map(Path::to_path_buf)
+            .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+            .unwrap_or_default();
+        dir.join(name)
+    }
+
+    fn export(&mut self, options: ExportOptions, out: PathBuf) {
         let dir = self.project_dir().map(Path::to_path_buf);
         self.host.export_audio(
             &self.project,
@@ -810,22 +1063,44 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
         let Some(f) = self.host.export_progress() else {
             return;
         };
-        egui::Window::new("Exporting")
+        egui::Window::new(egui::RichText::new("Exporting").font(theme::strong(13.0)))
             .id(egui::Id::unique("export_progress"))
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -40.0])
             .show(ctx, |ui| {
-                ui.set_width(320.0);
+                ui.set_width(380.0);
                 let stage = if f < 0.9 {
                     "Rendering"
                 } else {
                     "Writing the file"
                 };
-                ui.add(egui::ProgressBar::new(f).text(format!("{stage} · {:.0}%", f * 100.0)));
-                if crate::widgets::outline_button(ui, "Cancel").clicked() {
-                    self.host.cancel_export();
-                }
+                let (bar, _) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), 10.0),
+                    egui::Sense::hover(),
+                );
+                ui.painter().rect_filled(bar, 5.0, theme::FIELD);
+                let mut done = bar;
+                done.set_width(bar.width() * f.clamp(0.0, 1.0));
+                ui.painter().rect_filled(done, 5.0, theme::AMBER);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(stage)
+                            .font(theme::mono(10.5))
+                            .color(theme::MUTED),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new(format!("{:.0}%", f * 100.0))
+                                .font(theme::mono(10.5)),
+                        );
+                    });
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if crate::widgets::outline_button(ui, "Cancel").clicked() {
+                        self.host.cancel_export();
+                    }
+                });
             });
         ctx.request_repaint_after_secs(0.1);
     }
@@ -4524,21 +4799,94 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
         if self.notices.is_empty() {
             return;
         }
+        let mut reveal = None;
         egui::Area::new(egui::Id::unique("notices"))
             .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-12.0, -36.0))
             .show(ctx, |ui| {
                 for (n, _) in &self.notices {
-                    egui::Frame::popup(ui.style()).show(ui, |ui| {
-                        ui.set_max_width(420.0);
-                        let color = match n.level {
-                            NoticeLevel::Info => ui.visuals().text_color(),
-                            NoticeLevel::Warning => ui.visuals().warn_fg_color,
-                            NoticeLevel::Error => ui.visuals().error_fg_color,
-                        };
-                        ui.colored_label(color, &n.text);
-                    });
+                    let (color, glyph) = match n.level {
+                        NoticeLevel::Info => (theme::LED_ON, icons::Glyph::Check),
+                        NoticeLevel::Warning => (theme::WARN, icons::Glyph::Warning),
+                        NoticeLevel::Error => (theme::ERROR, icons::Glyph::Warning),
+                    };
+                    let edge = if n.file.is_some() {
+                        color.gamma_multiply(0.5)
+                    } else {
+                        theme::CARD_LINE
+                    };
+                    egui::Frame::new()
+                        .fill(theme::CARD)
+                        .stroke(egui::Stroke::new(1.0, edge))
+                        .corner_radius(9)
+                        .inner_margin(egui::Margin::symmetric(12, 9))
+                        .show(ui, |ui| {
+                            ui.set_max_width(440.0);
+                            ui.horizontal(|ui| {
+                                // UI-RD §10.11: a finished export names
+                                // its file and offers its folder.
+                                let Some(file) = &n.file else {
+                                    let text = match n.level {
+                                        NoticeLevel::Info => theme::TEXT,
+                                        _ => color,
+                                    };
+                                    ui.add(
+                                        egui::Label::new(egui::RichText::new(&n.text).color(text))
+                                            .wrap(),
+                                    );
+                                    return;
+                                };
+                                let (r, _) = ui.allocate_exact_size(
+                                    egui::vec2(26.0, 26.0),
+                                    egui::Sense::hover(),
+                                );
+                                ui.painter().circle_filled(
+                                    r.center(),
+                                    13.0,
+                                    color.gamma_multiply(0.18),
+                                );
+                                icons::paint(ui, glyph, r.shrink(6.0), color);
+                                ui.vertical(|ui| {
+                                    ui.spacing_mut().item_spacing.y = 1.0;
+                                    let name = file.file_name().map_or_else(String::new, |f| {
+                                        f.to_string_lossy().into_owned()
+                                    });
+                                    ui.label(
+                                        egui::RichText::new(format!("Exported {name}"))
+                                            .font(theme::strong(12.0)),
+                                    );
+                                    let prefix = format!("Exported {} ", file.display());
+                                    let detail = n.text.strip_prefix(&prefix).unwrap_or(&n.text);
+                                    let detail = detail.strip_prefix('(').unwrap_or(detail);
+                                    let detail = detail.replacen(')', "", 1);
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(detail)
+                                                .font(theme::mono(10.0))
+                                                .color(theme::MUTED),
+                                        )
+                                        .wrap(),
+                                    );
+                                });
+                                if widgets::button(
+                                    ui,
+                                    None,
+                                    "Show in folder",
+                                    false,
+                                    widgets::Look::Raised,
+                                    "Open the folder of the file",
+                                )
+                                .clicked()
+                                {
+                                    reveal = Some(file.clone());
+                                }
+                            });
+                        });
+                    ui.add_space(4.0);
                 }
             });
+        if let Some(f) = reveal {
+            self.host.reveal_in_file_manager(&f);
+        }
         ctx.request_repaint_after(std::time::Duration::from_millis(500));
     }
 }
@@ -5751,6 +6099,37 @@ mod pattern_caret_tests {
 mod export_tests {
     use super::*;
     use crate::test_ui::{NoStore, StubHost};
+
+    #[test]
+    fn the_export_file_sits_by_the_project_and_follows_the_range() {
+        let p = Project::new();
+        let bar = u64::from(p.time_signature.bar_ticks());
+        let mut a = JdanceApp::new(
+            StubHost::default(),
+            NoStore,
+            p,
+            Some(PathBuf::from("/music/song.jdance")),
+        );
+        let mut o = ExportOptions {
+            range: ExportRange::Song,
+            tail_seconds: 1.0,
+            format: ExportFormat::default(),
+            mp3: None,
+        };
+        assert_eq!(a.default_export_file(&o), Path::new("/music/song.wav"));
+        o.range = ExportRange::Selection {
+            start: 4 * bar,
+            end: 8 * bar,
+        };
+        assert_eq!(
+            a.default_export_file(&o),
+            Path::new("/music/song (bars 5-9).wav")
+        );
+        o.mp3 = Some(Mp3Options::default());
+        assert!(a.default_export_file(&o).ends_with("song (bars 5-9).mp3"));
+        a.path = None;
+        assert!(a.default_export_file(&o).ends_with("render (bars 5-9).mp3"));
+    }
 
     #[test]
     fn the_selection_is_described_and_chosen_from_the_ruler_menu() {

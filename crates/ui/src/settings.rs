@@ -401,7 +401,7 @@ impl SettingsWindow {
 
 /// «48k», «44.1k».
 fn rate_label(r: u32) -> String {
-    if r % 1000 == 0 {
+    if r.is_multiple_of(1000) {
         format!("{}k", r / 1000)
     } else {
         format!("{:.1}k", f64::from(r) / 1000.0)
