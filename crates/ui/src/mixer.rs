@@ -492,7 +492,7 @@ pub(crate) fn show(
                                 }
                             }
                         });
-                        cables(ui, mixer, &rects);
+                        cables(ui, mixer, &rects, &mut out);
                     });
                 });
         });
@@ -869,18 +869,41 @@ fn strip(
 /// a cable from the source's output port (a dot under its strip, right)
 /// to the receiver's input (an oval, left), coloured from source to
 /// receiver, with the arrowhead at the receiver; sidechains are dashed.
-/// The level sits on the cable. Shown only; sends are made as before.
-fn cables(ui: &mut egui::Ui, mixer: &Mixer, rects: &[(TrackId, Rect, Color32)]) {
+/// The level sits on the cable. Dragging from an output port onto
+/// another track makes a send; a right click on a send cable edits or
+/// removes it.
+fn cables(
+    ui: &mut egui::Ui,
+    mixer: &Mixer,
+    rects: &[(TrackId, Rect, Color32)],
+    out: &mut MixerOutput,
+) {
     use crate::theme;
+    use crate::widgets::Hint;
     let w = rects.last().map_or(0.0, |(_, r, _)| r.right())
         - rects.first().map_or(0.0, |(_, r, _)| r.left());
     let (band, _) = ui.allocate_exact_size(vec2(w.max(10.0), 50.0), Sense::hover());
-    let p = ui.painter();
     let find = |id: TrackId| rects.iter().find(|(t, _, _)| *t == id);
-    // Ports.
-    for (_, r, c) in rects {
-        let out_port = pos2(r.right() - 12.0, band.top() + 6.0);
-        p.circle(out_port, 3.5, theme::FIELD, Stroke::new(1.5, *c));
+    let out_port = |r: &Rect| pos2(r.right() - 12.0, band.top() + 6.0);
+    // Ports; the output ports start a new send when dragged.
+    let mut dragging: Option<(TrackId, egui::Pos2, Color32)> = None;
+    for (id, r, c) in rects {
+        let port = out_port(r);
+        let resp = ui
+            .interact(
+                Rect::from_center_size(port, vec2(14.0, 14.0)),
+                egui::Id::unique(("mixer_send_port", id.0)),
+                Sense::drag(),
+            )
+            .hint("Output port: drag onto another track to add a send");
+        let hot = resp.hovered() || resp.dragged();
+        let p = ui.painter();
+        p.circle(
+            port,
+            if hot { 4.5 } else { 3.5 },
+            if hot { *c } else { theme::FIELD },
+            Stroke::new(1.5, *c),
+        );
         let in_port =
             Rect::from_center_size(pos2(r.left() + 12.0, band.top() + 6.0), vec2(10.0, 6.0));
         p.rect(
@@ -890,30 +913,55 @@ fn cables(ui: &mut egui::Ui, mixer: &Mixer, rects: &[(TrackId, Rect, Color32)]) 
             Stroke::new(1.0, theme::LINE_STRONG),
             egui::StrokeKind::Inside,
         );
+        if resp.dragged()
+            && let Some(pos) = resp.interact_pointer_pos()
+        {
+            dragging = Some((*id, pos, *c));
+        }
+        if resp.drag_stopped()
+            && let Some(pos) = resp.interact_pointer_pos()
+            && let Some(to) = send_target(mixer, rects, *id, pos)
+        {
+            out.actions.push(MixerAction::AddSend { from: *id, to });
+        }
+    }
+    // The cable being dragged; the receiver it would reach is outlined.
+    if let Some((from, pos, c)) = dragging {
+        let start = out_port(&find(from).map_or(band, |(_, r, _)| *r));
+        let target = send_target(mixer, rects, from, pos);
+        if let Some((_, r, _)) = target.and_then(find) {
+            ui.painter().rect_stroke(
+                r.expand(2.0),
+                7.0,
+                Stroke::new(1.5, theme::BLUE),
+                egui::StrokeKind::Outside,
+            );
+        }
+        let col = if target.is_some() { c } else { theme::MUTED };
+        let pts = bezier(start, start + vec2(0.0, 30.0), pos + vec2(0.0, 30.0), pos);
+        for k in 0..pts.len() - 1 {
+            ui.painter()
+                .line_segment([pts[k], pts[k + 1]], Stroke::new(2.0, col));
+        }
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
     }
     let mut lane = 0usize;
-    let mut cable = |from: TrackId, to: TrackId, dashed: bool, label: String| {
+    let mut cable = |from: TrackId, to: TrackId, dashed: bool, label: String| -> Option<Rect> {
         let (Some((_, a, ca)), Some((_, b, cb))) = (find(from), find(to)) else {
-            return;
+            return None;
         };
+        let p = ui.painter();
         let start = pos2(a.right() - 12.0, band.top() + 9.0);
         let end = pos2(b.left() + 12.0, band.top() + 10.0);
         let depth = 16.0 + (lane % 3) as f32 * 9.0;
         lane += 1;
-        let c1 = start + vec2(0.0, depth);
-        let c2 = end + vec2(0.0, depth + 4.0);
-        let n = 28;
-        let pts: Vec<_> = (0..=n)
-            .map(|k| {
-                let t = k as f32 / n as f32;
-                let u = 1.0 - t;
-                (start.to_vec2() * (u * u * u)
-                    + c1.to_vec2() * (3.0 * u * u * t)
-                    + c2.to_vec2() * (3.0 * u * t * t)
-                    + end.to_vec2() * (t * t * t))
-                    .to_pos2()
-            })
-            .collect();
+        let pts = bezier(
+            start,
+            start + vec2(0.0, depth),
+            end + vec2(0.0, depth + 4.0),
+            end,
+        );
+        let n = pts.len() - 1;
         for k in 0..n {
             if dashed && k % 2 == 1 {
                 continue;
@@ -947,16 +995,25 @@ fn cables(ui: &mut egui::Ui, mixer: &Mixer, rects: &[(TrackId, Rect, Color32)]) 
             egui::StrokeKind::Inside,
         );
         p.galley(pill.center() - galley.size() / 2.0, galley, theme::TEXT);
+        Some(pill)
     };
     for t in mixer.all_tracks() {
         for s in &t.sends {
-            let db = if s.level <= 0.0 {
-                "-inf".to_owned()
-            } else {
-                format!("{:+.0}", 20.0 * s.level.log10())
+            let Some(pill) = cable(t.id, s.dest, false, send_label(s)) else {
+                continue;
             };
-            let tap = if s.pre_fader { "pre" } else { "post" };
-            cable(t.id, s.dest, false, format!("{db} {tap}"));
+            let resp = ui
+                .interact(
+                    pill.expand(3.0),
+                    egui::Id::unique(("mixer_send_cable", s.id.0)),
+                    Sense::click(),
+                )
+                .hint(&format!(
+                    "Send {} → {}: right-click to change or remove",
+                    t.name,
+                    track_name(mixer, s.dest)
+                ));
+            resp.context_menu(|ui| send_menu(ui, mixer, t, s, out));
         }
         for ins in &t.inserts {
             if let Some(sc) = &ins.sidechain {
@@ -964,6 +1021,106 @@ fn cables(ui: &mut egui::Ui, mixer: &Mixer, rects: &[(TrackId, Rect, Color32)]) 
             }
         }
     }
+}
+
+/// The track a send dragged from `from` would reach with the pointer at
+/// `pos`: a valid receiver without a send from `from` yet.
+fn send_target(
+    mixer: &Mixer,
+    rects: &[(TrackId, Rect, Color32)],
+    from: TrackId,
+    pos: egui::Pos2,
+) -> Option<TrackId> {
+    let src = mixer.track(from)?;
+    if src.sends.len() >= MAX_SENDS_PER_TRACK {
+        return None;
+    }
+    let (to, _, _) = rects
+        .iter()
+        .find(|(_, r, _)| r.x_range().contains(pos.x) && pos.y >= r.top())?;
+    (*to != from
+        && !src.sends.iter().any(|s| s.dest == *to)
+        && mixer.valid_destinations(from).contains(to))
+    .then_some(*to)
+}
+
+/// "−6 post": the level in dB and the tap of a send cable.
+fn send_label(s: &jdance_domain::Send) -> String {
+    let db = if s.level <= 0.0 {
+        "-inf".to_owned()
+    } else {
+        format!("{:+.0}", 20.0 * s.level.log10())
+    };
+    let tap = if s.pre_fader { "pre" } else { "post" };
+    format!("{db} {tap}")
+}
+
+/// The right-click menu of a send cable (UI-RD §10.2): level, pre/post,
+/// remove.
+fn send_menu(
+    ui: &mut egui::Ui,
+    mixer: &Mixer,
+    t: &MixerTrack,
+    s: &jdance_domain::Send,
+    out: &mut MixerOutput,
+) {
+    ui.label(
+        RichText::new(format!("{} → {}", t.name, track_name(mixer, s.dest)))
+            .strong()
+            .size(11.5),
+    );
+    ui.horizontal(|ui| {
+        ui.label("Level");
+        let mut level = s.level;
+        let r = ui.add(
+            egui::Slider::new(&mut level, 0.0..=MAX_SEND_LEVEL)
+                .show_value(false)
+                .text(db_label(s.level)),
+        );
+        if r.changed() {
+            out.edits.push((Edit::SetSendLevel(s.id, level), true));
+        }
+        out.end_gesture |= r.drag_stopped();
+    });
+    for (db, name) in [(0.0f32, "0 dB"), (-6.0, "−6 dB"), (-12.0, "−12 dB")] {
+        if crate::widgets::menu_item(ui, None, &format!("Level {name}"), "").clicked() {
+            out.edits
+                .push((Edit::SetSendLevel(s.id, 10f32.powf(db / 20.0)), false));
+            ui.close();
+        }
+    }
+    let tap = if s.pre_fader {
+        "Make post-fader"
+    } else {
+        "Make pre-fader"
+    };
+    if crate::widgets::menu_item(ui, Some(crate::icons::Glyph::Mixer), tap, "").clicked() {
+        out.edits
+            .push((Edit::SetSendPreFader(s.id, !s.pre_fader), false));
+        ui.close();
+    }
+    ui.separator();
+    if crate::widgets::menu_item(ui, Some(crate::icons::Glyph::Delete), "Remove send", "").clicked()
+    {
+        out.edits.push((Edit::RemoveSend(s.id), false));
+        ui.close();
+    }
+}
+
+/// 29 points of the cubic Bézier `a → d` with handles `b`, `c`.
+fn bezier(a: egui::Pos2, b: egui::Pos2, c: egui::Pos2, d: egui::Pos2) -> Vec<egui::Pos2> {
+    let n = 28;
+    (0..=n)
+        .map(|k| {
+            let t = k as f32 / n as f32;
+            let u = 1.0 - t;
+            (a.to_vec2() * (u * u * u)
+                + b.to_vec2() * (3.0 * u * u * t)
+                + c.to_vec2() * (3.0 * u * t * t)
+                + d.to_vec2() * (t * t * t))
+                .to_pos2()
+        })
+        .collect()
 }
 
 fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
@@ -1934,6 +2091,47 @@ mod input_tests {
         // Right click on the input (INP-015): the list of inputs (INP-013).
         let edits = run(&m, &[">In 1", "(none)"]);
         assert_eq!(edits, [(Edit::SetTrackInput(TrackId(1), None), false)]);
+    }
+
+    #[test]
+    fn a_cable_dragged_onto_a_strip_reaches_only_a_new_valid_receiver() {
+        let mut m = Mixer::default();
+        m.tracks.push(MixerTrack::new(TrackId(1), "A"));
+        m.tracks.push(MixerTrack::new(TrackId(2), "B"));
+        let strip = |x: f32| Rect::from_min_size(pos2(x, 0.0), vec2(74.0, 300.0));
+        let rects = [
+            (TrackId::MASTER, strip(0.0), Color32::WHITE),
+            (TrackId(1), strip(80.0), Color32::WHITE),
+            (TrackId(2), strip(160.0), Color32::WHITE),
+        ];
+        let at = |x: f32| pos2(x, 320.0);
+        assert_eq!(
+            send_target(&m, &rects, TrackId(1), at(190.0)),
+            Some(TrackId(2))
+        );
+        assert_eq!(
+            send_target(&m, &rects, TrackId(1), at(100.0)),
+            None,
+            "itself"
+        );
+        assert_eq!(
+            send_target(&m, &rects, TrackId(1), at(400.0)),
+            None,
+            "nowhere"
+        );
+        // B → A would close a loop once A sends to B.
+        m.tracks[0].sends.push(jdance_domain::Send {
+            id: jdance_domain::SendId(9),
+            dest: TrackId(2),
+            level: 0.5,
+            pre_fader: false,
+        });
+        assert_eq!(
+            send_target(&m, &rects, TrackId(1), at(190.0)),
+            None,
+            "already sent"
+        );
+        assert_eq!(send_target(&m, &rects, TrackId(2), at(100.0)), None, "loop");
     }
 
     #[test]

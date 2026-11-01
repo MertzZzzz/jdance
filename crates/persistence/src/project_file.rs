@@ -14,7 +14,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 pub const FORMAT_TAG: &str = "jdance-project";
-pub const CURRENT_FORMAT_VERSION: u32 = 20;
+pub const CURRENT_FORMAT_VERSION: u32 = 21;
 pub const PROJECT_EXTENSION: &str = "jdance";
 
 /// Saves `project` to `path` atomically. Sample paths inside the project
@@ -234,6 +234,10 @@ fn migrate(version: u32, mut project: Value) -> Result<Value, PersistError> {
     if v == 19 {
         // v20 (0.3.6) added the pitch bend range of channels (absent = 2).
         v = 20;
+    }
+    if v == 20 {
+        // v21 (0.4.1) added the step sequencer swing (absent = 0).
+        v = 21;
     }
     match v {
         CURRENT_FORMAT_VERSION => Ok(project),
@@ -570,6 +574,9 @@ fn validate(p: &Project) -> Result<(), PersistError> {
     if !(jdance_domain::MIN_TEMPO_BPM..=jdance_domain::MAX_TEMPO_BPM).contains(&p.tempo_bpm) {
         return bad(format!("tempo {} out of range", p.tempo_bpm));
     }
+    if p.swing > jdance_domain::MAX_SWING {
+        return bad(format!("swing {} out of range", p.swing));
+    }
     let mut ids: Vec<u64> = p.channels.iter().map(|c| c.id.0).collect();
     ids.extend(p.patterns.iter().map(|x| x.id.0));
     for t in &p.mixer.tracks {
@@ -826,7 +833,7 @@ mod tests {
         p.mixer.tracks.push(t);
         save_project(&path, &p).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("\"format_version\": 20"), "{text}");
+        assert!(text.contains("\"format_version\": 21"), "{text}");
         assert_eq!(load_project(&path).unwrap(), p, "signature and track input");
 
         let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 20, "project": p});
@@ -855,6 +862,25 @@ mod tests {
         assert_eq!(loaded.channels[0].pitch_bend_range, 2);
         let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 20, "project": p});
         v["project"]["channels"][0]["pitch_bend_range"] = serde_json::json!(0);
+        assert!(parse_project(v.to_string().as_bytes()).is_err());
+    }
+
+    #[test]
+    fn swing_round_trips_and_v20_projects_have_none() {
+        let mut p = sample_project("a.wav");
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("swing.jdance");
+        save_project(&file, &p).unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(!text.contains("swing"), "the default is not written");
+        p.swing = 40;
+        save_project(&file, &p).unwrap();
+        assert_eq!(load_project(&file).unwrap(), p);
+        p.swing = 0;
+        let v = serde_json::json!({"format": FORMAT_TAG, "format_version": 20, "project": p});
+        assert_eq!(parse_project(v.to_string().as_bytes()).unwrap().swing, 0);
+        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 21, "project": p});
+        v["project"]["swing"] = serde_json::json!(101);
         assert!(parse_project(v.to_string().as_bytes()).is_err());
     }
 
