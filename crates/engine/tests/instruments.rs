@@ -532,6 +532,9 @@ fn slides_on_plugins_send_tuning_points_and_no_note() {
     // Odd blocks; no allocation while gliding.
     let (mut l, mut r) = (vec![0.0; 333], vec![0.0; 333]);
     e.render(&mut l, &mut r);
+    // The fake synth's log locks: macOS mutexes allocate on first use.
+    drop(tunings.lock());
+    drop(log.lock());
     reset_violations();
     rt_section(|| {
         for _ in 0..(8 * STEP as usize).div_ceil(333) {
