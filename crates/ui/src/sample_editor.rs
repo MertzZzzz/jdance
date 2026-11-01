@@ -13,8 +13,20 @@ use jdance_domain::{
 };
 use std::path::{Path, PathBuf};
 
-const WAVE_H: f32 = 180.0;
+const WAVE_H: f32 = 220.0;
 const MARKER_GRAB: f32 = 6.0;
+const MAX_ZOOM: f32 = 256.0;
+const OVERVIEW_H: f32 = 20.0;
+
+/// What a drag on the overview moves (UI-RD §10.9).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum OverviewDrag {
+    /// The window, grabbed at this fraction from its start.
+    Window(f64),
+    /// Its left or right edge: zooms.
+    Left,
+    Right,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Target {
@@ -35,8 +47,13 @@ enum Marker {
 #[derive(Debug, Clone)]
 pub(crate) struct SampleEditor {
     pub target: Target,
-    /// Pixels per source frame at zoom 1 = the whole file fits.
+    /// Magnification: 1 = the whole file fits, up to [`MAX_ZOOM`].
     zoom: f32,
+    /// First visible point, a fraction of the file (UI-VIS-039).
+    scroll: f64,
+    /// Dragging the overview's window: the pointer's offset in it, or
+    /// an edge being moved.
+    overview: Option<OverviewDrag>,
     /// Selection in source frames.
     selection: Option<(u64, u64)>,
     selecting: Option<u64>,
@@ -89,6 +106,8 @@ impl SampleEditor {
         Self {
             target,
             zoom: 1.0,
+            scroll: 0.0,
+            overview: None,
             selection: None,
             selecting: None,
             marker: None,
@@ -180,164 +199,217 @@ impl SampleEditor {
             0,
             &title,
             &mut |ui| {
-                // Details.
+                use crate::icons::Glyph as G;
+                let range = self.play_range(&v);
+                // UI-RD §6 (board R4 · Sample Editor): transport, the
+                // file in one line, the selection chip, the actions.
                 ui.horizontal(|ui| {
+                    crate::widgets::segmented(ui, |ui| {
+                        if crate::widgets::button(
+                            ui,
+                            Some(G::Play),
+                            "",
+                            false,
+                            crate::widgets::Look::Amber,
+                            "Play the selection, the clip range or the whole file",
+                        )
+                        .clicked()
+                            && v.frames > 0
+                        {
+                            let f = |x: u64| x as f64 / v.frames as f64;
+                            host.preview_range(&abs, (f(range.0), f(range.1)));
+                        }
+                        if crate::widgets::button(
+                            ui,
+                            Some(G::Stop),
+                            "",
+                            false,
+                            crate::widgets::Look::Raised,
+                            "Stop",
+                        )
+                        .clicked()
+                        {
+                            host.preview_file(None);
+                        }
+                    });
                     if v.frames > 0 && v.rate > 0 {
                         let secs = v.frames as f64 / f64::from(v.rate);
-                        let ch = v.channels.map_or_else(String::new, |c| {
-                            if c == 1 {
-                                " · mono".into()
-                            } else {
-                                format!(" · {c} ch")
-                            }
+                        let ch = v.channels.map_or_else(String::new, |c| match c {
+                            1 => " · mono".into(),
+                            2 => " · stereo".into(),
+                            c => format!(" · {c} ch"),
                         });
-                        ui.label(
-                            RichText::new(format!(
-                                "{secs:.3} s · {} Hz{ch} · {} frames",
-                                v.rate, v.frames
-                            ))
-                            .font(theme::mono(11.5))
-                            .color(theme::MUTED),
+                        info_chip(
+                            ui,
+                            &format!("{secs:.3} s · {:.1} kHz{ch}", f64::from(v.rate) / 1000.0),
+                            theme::MUTED,
                         );
                     } else {
                         ui.label(RichText::new("Loading…").color(theme::MUTED));
                         host.inspect_file(&abs);
                     }
-                    if let Some(c) = &v.clip {
-                        ui.separator();
-                        ui.label(
-                            RichText::new(format!(
-                                "clip range {} – {} ({} frames)",
-                                c.source_in,
-                                c.source_out,
-                                c.source_out - c.source_in
-                            ))
-                            .font(theme::mono(11.5)),
-                        );
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.add(
-                        egui::Slider::new(&mut self.zoom, 1.0..=64.0)
-                            .logarithmic(true)
-                            .text("Zoom"),
-                    );
-                    let range = self.play_range(&v);
-                    if ui
-                        .button("Play")
-                        .on_hover_text("Play the selection, the clip range or the whole file")
-                        .clicked()
-                        && v.frames > 0
-                    {
-                        let f = |x: u64| x as f64 / v.frames as f64;
-                        host.preview_range(&abs, (f(range.0), f(range.1)));
-                    }
-                    if ui.button("Stop").clicked() {
-                        host.preview_file(None);
-                    }
                     if let Some((a, b)) = self.selection {
-                        ui.label(
-                            RichText::new(format!("selection {a} – {b}"))
-                                .font(theme::mono(11.5))
-                                .color(theme::BLUE),
-                        );
-                        if ui.small_button("Clear").clicked() {
+                        let secs = |f: u64| f as f64 / f64::from(v.rate.max(1));
+                        let chip = crate::widgets::chip(
+                            ui,
+                            Some(G::Select),
+                            &format!("{:.3} – {:.3} s", secs(a), secs(b)),
+                            true,
+                        )
+                        .on_hover_text("Click to clear the selection");
+                        if chip.clicked() {
                             self.selection = None;
                         }
                     }
-                });
-
-                // Waveform.
-                let peaks = host.sample_peaks(&v.path, dir);
-                let avail = ui.available_width();
-                let total_w = avail * self.zoom;
-                egui::ScrollArea::horizontal()
-                    .id_salt("sample_editor_scroll")
-                    .show(ui, |ui| {
-                        let (rect, resp) =
-                            ui.allocate_exact_size(vec2(total_w, WAVE_H), Sense::click_and_drag());
-                        self.waveform(
-                            ui,
-                            &v,
-                            peaks.as_deref().map(Vec::as_slice),
-                            rect,
-                            &resp,
-                            out,
-                        );
-                    });
-
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    let range = self.play_range(&v);
-                    if let (Some(c), Some((a, b))) = (&v.clip, self.selection)
-                        && ui
-                            .button("Use selection as clip range")
-                            .on_hover_text("Trims this clip only; other clips and the file stay")
-                            .clicked()
-                    {
-                        let asset = v.asset.as_ref().expect("clip has an asset");
-                        out.edits
-                            .push(Edit::SetAudioClip(trimmed(c, asset, project, a, b)));
-                        out.end_gesture = true;
-                    }
-                    if ui
-                        .button("Place in Playlist")
-                        .on_hover_text("New audio clip of this range at the playhead")
-                        .clicked()
-                    {
-                        match &v.asset {
-                            Some(a) => out.place = Some((a.id, range.0, range.1)),
-                            None => out.import = Some(abs.clone()),
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let samplers: Vec<_> = project
+                            .channels
+                            .iter()
+                            .filter(|c| matches!(c.source, ChannelSource::Sampler { .. }))
+                            .collect();
+                        if self
+                            .sampler
+                            .is_some_and(|id| !samplers.iter().any(|c| c.id == id))
+                        {
+                            self.sampler = None;
                         }
-                    }
-                    ui.separator();
-                    let samplers: Vec<_> = project
-                        .channels
-                        .iter()
-                        .filter(|c| matches!(c.source, ChannelSource::Sampler { .. }))
-                        .collect();
-                    if self
-                        .sampler
-                        .is_some_and(|id| !samplers.iter().any(|c| c.id == id))
-                    {
-                        self.sampler = None;
-                    }
-                    let current = self
-                        .sampler
-                        .and_then(|id| project.channel(id))
-                        .map_or_else(|| "New sampler channel".to_owned(), |c| c.name.clone());
-                    egui::ComboBox::from_id_salt("load_target")
-                        .selected_text(current)
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.sampler, None, "New sampler channel");
-                            for c in &samplers {
-                                ui.selectable_value(&mut self.sampler, Some(c.id), &c.name);
-                            }
-                        });
-                    if ui
-                        .button("Load into Sampler")
-                        .on_hover_text(
+                        let current = self
+                            .sampler
+                            .and_then(|id| project.channel(id))
+                            .map_or_else(|| "New".to_owned(), |c| c.name.clone());
+                        egui::ComboBox::from_id_salt("load_target")
+                            .width(90.0)
+                            .selected_text(current)
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut self.sampler, None, "New sampler channel");
+                                for c in &samplers {
+                                    ui.selectable_value(&mut self.sampler, Some(c.id), &c.name);
+                                }
+                            })
+                            .response
+                            .on_hover_text("The sampler channel to load into");
+                        if crate::widgets::button(
+                            ui,
+                            Some(G::Sample),
+                            "Load into Sampler",
+                            true,
+                            crate::widgets::Look::Amber,
                             "The sampler plays this file; its start/end markers follow the range",
                         )
                         .clicked()
-                        && v.frames > 0
-                    {
-                        let f = |x: u64| (x as f64 / v.frames as f64) as f32;
-                        match &v.asset {
-                            Some(a) => {
-                                out.load = Some((a.id, self.sampler, (f(range.0), f(range.1))));
+                            && v.frames > 0
+                        {
+                            let f = |x: u64| (x as f64 / v.frames as f64) as f32;
+                            match &v.asset {
+                                Some(a) => {
+                                    out.load = Some((a.id, self.sampler, (f(range.0), f(range.1))));
+                                }
+                                None => out.import = Some(abs.clone()),
                             }
-                            None => out.import = Some(abs.clone()),
                         }
-                    }
+                        if crate::widgets::button(
+                            ui,
+                            Some(G::Playlist),
+                            "Place in Playlist",
+                            false,
+                            crate::widgets::Look::Raised,
+                            "New audio clip of this range at the playhead",
+                        )
+                        .clicked()
+                        {
+                            match &v.asset {
+                                Some(a) => out.place = Some((a.id, range.0, range.1)),
+                                None => out.import = Some(abs.clone()),
+                            }
+                        }
+                        if let (Some(c), Some((a, b))) = (&v.clip, self.selection)
+                            && crate::widgets::button(
+                                ui,
+                                Some(G::Slice),
+                                "Use as clip range",
+                                false,
+                                crate::widgets::Look::Raised,
+                                "Trims this clip only; other clips and the file stay",
+                            )
+                            .clicked()
+                        {
+                            let asset = v.asset.as_ref().expect("clip has an asset");
+                            out.edits
+                                .push(Edit::SetAudioClip(trimmed(c, asset, project, a, b)));
+                            out.end_gesture = true;
+                        }
+                    });
                 });
-                if matches!(self.target, Target::File(_)) {
+                ui.add_space(4.0);
+
+                // The overview: the whole file, the visible part framed
+                // (UI-RD §10.9).
+                let peaks = host.sample_peaks(&v.path, dir);
+                let peaks = peaks.as_deref().map(Vec::as_slice);
+                ui.horizontal(|ui| {
+                    let (r, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
+                    crate::icons::paint(ui, G::Zoom, r, theme::DIM);
+                    let w = ui.available_width() - 44.0;
+                    let (rect, resp) = ui.allocate_exact_size(
+                        vec2(w.max(40.0), OVERVIEW_H),
+                        Sense::click_and_drag(),
+                    );
+                    self.overview(ui, rect, &resp, peaks);
                     ui.label(
-                        RichText::new("Library file: nothing is added to the project until you place or load it")
-                            .size(11.0)
+                        RichText::new(format!("×{:.1}", self.zoom))
+                            .font(theme::mono(10.0))
+                            .color(theme::DIM),
+                    );
+                });
+                ui.add_space(2.0);
+
+                // Ruler in seconds and the waveform.
+                let w = ui.available_width();
+                let (ruler, _) = ui.allocate_exact_size(vec2(w, 16.0), Sense::hover());
+                self.ruler(ui, ruler, &v);
+                let (rect, resp) = ui.allocate_exact_size(vec2(w, WAVE_H), Sense::click_and_drag());
+                self.wheel(ui, rect, &resp);
+                self.waveform(ui, &v, peaks, rect, &resp, out);
+
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    let text = match &v.clip {
+                        Some(c) => {
+                            let secs = |f: u64| f as f64 / f64::from(v.rate.max(1));
+                            format!(
+                                "clip {:.3} – {:.3} s · {} frames",
+                                secs(c.source_in),
+                                secs(c.source_out),
+                                c.source_out - c.source_in
+                            )
+                        }
+                        None => format!("{} frames", v.frames),
+                    };
+                    ui.label(
+                        RichText::new(text)
+                            .font(theme::mono(10.5))
                             .color(theme::MUTED),
                     );
-                }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 12.0;
+                        let hint = |ui: &mut egui::Ui, t: &str| {
+                            ui.label(RichText::new(t).size(10.5).color(theme::DIM));
+                        };
+                        if matches!(self.target, Target::File(_)) {
+                            hint(
+                                ui,
+                                "Library file: nothing is added until you place or load it",
+                            );
+                        } else {
+                            hint(ui, "Nothing here changes the file on disk");
+                        }
+                        hint(ui, "Ctrl+wheel — zoom");
+                        if v.clip.is_some() {
+                            hint(ui, "Drag IN / OUT — clip range");
+                        }
+                        hint(ui, "Drag — select");
+                    });
+                });
             },
         );
         if !open {
@@ -353,6 +425,189 @@ impl SampleEditor {
             .unwrap_or((0, v.frames))
     }
 
+    /// The visible part as fractions of the file.
+    fn window(&self) -> (f64, f64) {
+        let w = 1.0 / f64::from(self.zoom.clamp(1.0, MAX_ZOOM));
+        let start = self.scroll.clamp(0.0, 1.0 - w);
+        (start, start + w)
+    }
+
+    /// Zooms to `zoom` keeping the point at fraction `at` of the file
+    /// under the same place.
+    fn zoom_to(&mut self, zoom: f32, at: f64) {
+        let (t0, t1) = self.window();
+        let rel = ((at - t0) / (t1 - t0)).clamp(0.0, 1.0);
+        self.zoom = zoom.clamp(1.0, MAX_ZOOM);
+        let w = 1.0 / f64::from(self.zoom);
+        self.scroll = (at - rel * w).clamp(0.0, 1.0 - w);
+    }
+
+    /// Ctrl+wheel zooms around the pointer; the wheel scrolls.
+    fn wheel(&mut self, ui: &egui::Ui, rect: Rect, resp: &egui::Response) {
+        if !resp.hovered() {
+            return;
+        }
+        let (scroll, zoom, ctrl, pos) = ui.input(|i| {
+            (
+                i.smooth_scroll_delta,
+                i.zoom_delta(),
+                i.modifiers.command,
+                i.pointer.hover_pos(),
+            )
+        });
+        let (t0, t1) = self.window();
+        let at = pos.map_or((t0 + t1) / 2.0, |p| {
+            t0 + f64::from(((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0)) * (t1 - t0)
+        });
+        if zoom != 1.0 {
+            self.zoom_to(self.zoom * zoom, at);
+        } else if ctrl && scroll.y != 0.0 {
+            self.zoom_to(self.zoom * (scroll.y / 200.0).exp(), at);
+        } else {
+            let d = if scroll.x != 0.0 { scroll.x } else { scroll.y };
+            if d != 0.0 {
+                let w = t1 - t0;
+                self.scroll = (t0 - f64::from(d / rect.width()) * w).clamp(0.0, 1.0 - w);
+            }
+        }
+    }
+
+    /// The overview strip: the whole file, the visible part framed; drag
+    /// the frame to scroll, its edges to zoom, click elsewhere to jump.
+    fn overview(
+        &mut self,
+        ui: &egui::Ui,
+        rect: Rect,
+        resp: &egui::Response,
+        peaks: Option<&[f32]>,
+    ) {
+        let p = ui.painter_at(rect);
+        p.rect_filled(rect, 5.0, Color32::from_rgb(0x10, 0x12, 0x15));
+        if let Some(peaks) = peaks.filter(|p| !p.is_empty()) {
+            let mid = rect.center().y;
+            let half = rect.height() / 2.0 - 3.0;
+            let cols = rect.width().max(1.0) as usize;
+            for c in 0..cols {
+                let a = c * peaks.len() / cols;
+                let b = ((c + 1) * peaks.len() / cols).max(a + 1).min(peaks.len());
+                let v = peaks[a..b].iter().fold(0.0f32, |m, p| m.max(*p)).min(1.0);
+                let x = rect.left() + c as f32 + 0.5;
+                p.line_segment(
+                    [pos2(x, mid - v * half), pos2(x, mid + v * half)],
+                    Stroke::new(1.0, theme::MUTED.gamma_multiply(0.6)),
+                );
+            }
+        }
+        let (t0, t1) = self.window();
+        let x = |t: f64| rect.left() + t as f32 * rect.width();
+        let frame = Rect::from_min_max(
+            pos2(x(t0), rect.top() + 1.0),
+            pos2(x(t1), rect.bottom() - 1.0),
+        );
+        p.rect_stroke(
+            frame,
+            4.0,
+            Stroke::new(1.5, theme::TEXT),
+            StrokeKind::Inside,
+        );
+        let at = |px: f32| f64::from(((px - rect.left()) / rect.width()).clamp(0.0, 1.0));
+        let grab = 5.0;
+        if resp.drag_started()
+            && let Some(o) = ui.input(|i| i.pointer.press_origin())
+        {
+            self.overview = Some(if (o.x - frame.left()).abs() < grab {
+                OverviewDrag::Left
+            } else if (o.x - frame.right()).abs() < grab {
+                OverviewDrag::Right
+            } else if frame.x_range().contains(o.x) {
+                OverviewDrag::Window(at(o.x) - t0)
+            } else {
+                // Elsewhere: centre the window there, then drag it.
+                let w = t1 - t0;
+                OverviewDrag::Window(w / 2.0)
+            });
+        }
+        if let (Some(d), Some(pos)) = (self.overview, resp.interact_pointer_pos()) {
+            let t = at(pos.x);
+            let min_w = 1.0 / f64::from(MAX_ZOOM);
+            match d {
+                OverviewDrag::Window(off) => {
+                    let w = t1 - t0;
+                    self.scroll = (t - off).clamp(0.0, 1.0 - w);
+                }
+                OverviewDrag::Left => {
+                    let start = t.min(t1 - min_w);
+                    self.zoom = (1.0 / (t1 - start)) as f32;
+                    self.scroll = start;
+                }
+                OverviewDrag::Right => {
+                    let end = t.max(t0 + min_w);
+                    self.zoom = (1.0 / (end - t0)) as f32;
+                    self.scroll = t0;
+                }
+            }
+            self.zoom = self.zoom.clamp(1.0, MAX_ZOOM);
+        }
+        if resp.drag_stopped() {
+            self.overview = None;
+        }
+        if resp.clicked()
+            && let Some(pos) = resp.interact_pointer_pos()
+        {
+            let w = t1 - t0;
+            self.scroll = (at(pos.x) - w / 2.0).clamp(0.0, 1.0 - w);
+        }
+        if resp.double_clicked() {
+            self.zoom = 1.0;
+            self.scroll = 0.0;
+        }
+        if let Some(h) = resp.hover_pos()
+            && ((h.x - frame.left()).abs() < grab || (h.x - frame.right()).abs() < grab)
+        {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        }
+        crate::widgets::hint_on_hover(
+            resp,
+            "Overview: drag the frame to scroll, its edges to zoom; double-click shows all",
+        );
+    }
+
+    /// Seconds over the visible part.
+    fn ruler(&self, ui: &egui::Ui, rect: Rect, v: &View) {
+        if v.frames == 0 || v.rate == 0 {
+            return;
+        }
+        let p = ui.painter_at(rect);
+        let (t0, t1) = self.window();
+        let secs = v.frames as f64 / f64::from(v.rate);
+        let (s0, s1) = (t0 * secs, t1 * secs);
+        // A step of 1, 2 or 5 × 10^n seconds, about 70 px apart.
+        let raw = (s1 - s0) * 70.0 / f64::from(rect.width().max(1.0));
+        let mag = 10f64.powf(raw.log10().floor());
+        let step = [1.0, 2.0, 5.0, 10.0]
+            .into_iter()
+            .map(|m| m * mag)
+            .find(|s| *s >= raw)
+            .unwrap_or(10.0 * mag);
+        let decimals = (-step.log10().floor()).max(0.0) as usize;
+        let mut s = (s0 / step).ceil() * step;
+        while s <= s1 {
+            let x = rect.left() + ((s - s0) / (s1 - s0)) as f32 * rect.width();
+            p.line_segment(
+                [pos2(x, rect.bottom() - 5.0), pos2(x, rect.bottom())],
+                Stroke::new(1.0, theme::LINE_STRONG),
+            );
+            p.text(
+                pos2(x + 3.0, rect.top()),
+                Align2::LEFT_TOP,
+                format!("{s:.decimals$}s"),
+                theme::mono(9.0),
+                theme::DIM,
+            );
+            s += step;
+        }
+    }
+
     fn waveform(
         &mut self,
         ui: &egui::Ui,
@@ -363,14 +618,19 @@ impl SampleEditor {
         out: &mut SampleEditorOutput,
     ) {
         let p = ui.painter_at(rect);
-        p.rect_filled(rect, 6.0, theme::FIELD);
+        p.rect_filled(rect, 6.0, Color32::from_rgb(0x10, 0x12, 0x15));
         if v.frames == 0 {
             return;
         }
         let frames = v.frames as f64;
-        let x_of = |f: u64| rect.left() + (f as f64 / frames) as f32 * rect.width();
-        let frame_at =
-            |x: f32| (((x - rect.left()) / rect.width()).clamp(0.0, 1.0) as f64 * frames) as u64;
+        // The visible part of the file (UI-RD §10.9).
+        let (t0, t1) = self.window();
+        let (f0, span) = (t0 * frames, (t1 - t0) * frames);
+        let x_of = |f: u64| rect.left() + ((f as f64 - f0) / span) as f32 * rect.width();
+        let frame_at = |x: f32| {
+            let t = f64::from(((x - rect.left()) / rect.width()).clamp(0.0, 1.0));
+            (f0 + t * span).clamp(0.0, frames) as u64
+        };
         // Clip range shaded, the rest dimmed.
         if let Some(c) = &v.clip {
             let (a, b) = (x_of(c.source_in), x_of(c.source_out));
@@ -395,13 +655,12 @@ impl SampleEditor {
         if let Some(peaks) = peaks.filter(|p| !p.is_empty()) {
             let mid = rect.center().y;
             let half = rect.height() / 2.0 - 4.0;
-            let visible = ui.clip_rect().intersect(rect);
-            let mut x = visible.left().floor();
-            while x < visible.right() {
-                let t0 = ((x - rect.left()) / rect.width()).max(0.0);
-                let t1 = ((x + 1.0 - rect.left()) / rect.width()).max(t0);
-                let b0 = (t0 * peaks.len() as f32) as usize;
-                let b1 = ((t1 * peaks.len() as f32).ceil() as usize).max(b0 + 1);
+            let mut x = rect.left();
+            let n = peaks.len() as f64;
+            while x < rect.right() {
+                let t = |x: f32| (t0 + f64::from((x - rect.left()) / rect.width()) * (t1 - t0)) * n;
+                let b0 = t(x) as usize;
+                let b1 = (t(x + 1.0).ceil() as usize).max(b0 + 1);
                 let peak = peaks[b0.min(peaks.len() - 1)..b1.min(peaks.len())]
                     .iter()
                     .fold(0.0f32, |m, v| m.max(*v));
@@ -412,6 +671,10 @@ impl SampleEditor {
                 );
                 x += 1.0;
             }
+            p.line_segment(
+                [pos2(rect.left(), mid), pos2(rect.right(), mid)],
+                Stroke::new(1.0, theme::BLUE.gamma_multiply(0.5)),
+            );
         } else {
             p.text(
                 rect.center(),
@@ -428,17 +691,25 @@ impl SampleEditor {
         if let Some(c) = &v.clip {
             for (f, label) in [(c.source_in, "IN"), (c.source_out, "OUT")] {
                 let x = x_of(f);
+                if !(rect.left() - 1.0..=rect.right() + 1.0).contains(&x) {
+                    continue;
+                }
                 p.line_segment(
                     [pos2(x, rect.top()), pos2(x, rect.bottom())],
-                    Stroke::new(2.0, theme::AMBER),
+                    Stroke::new(2.0, theme::LED_ON),
                 );
-                p.text(
-                    pos2(x + 3.0, rect.top() + 2.0),
-                    Align2::LEFT_TOP,
-                    label,
-                    theme::mono(10.0),
-                    theme::AMBER,
-                );
+                // A tag beside the line: IN to the right, OUT to the left.
+                let galley =
+                    p.layout_no_wrap(label.to_owned(), theme::strong(9.5), theme::ON_AMBER);
+                let size = galley.size() + vec2(8.0, 4.0);
+                let left = if label == "OUT" {
+                    x - 3.0 - size.x
+                } else {
+                    x + 3.0
+                };
+                let tag = Rect::from_min_size(pos2(left, rect.top() + 6.0), size);
+                p.rect_filled(tag, 3.0, theme::LED_ON);
+                p.galley(tag.center() - galley.size() / 2.0, galley, theme::ON_AMBER);
             }
             if resp.drag_started()
                 && let Some(o) = press
@@ -504,6 +775,18 @@ impl SampleEditor {
     }
 }
 
+/// A rounded field with mono text (the file details).
+fn info_chip(ui: &mut egui::Ui, text: &str, color: Color32) {
+    egui::Frame::new()
+        .fill(theme::FIELD)
+        .stroke(Stroke::new(1.0, theme::LINE))
+        .corner_radius(7)
+        .inner_margin(egui::Margin::symmetric(9, 4))
+        .show(ui, |ui| {
+            ui.label(RichText::new(text).font(theme::mono(10.5)).color(color));
+        });
+}
+
 /// `c` trimmed to source frames `[a, b)`, keeping its timeline position of
 /// the material: the start moves with `a`.
 fn trimmed(c: &AudioClip, asset: &AudioAsset, project: &Project, a: u64, b: u64) -> AudioClip {
@@ -517,7 +800,7 @@ fn trimmed(c: &AudioClip, asset: &AudioAsset, project: &Project, a: u64, b: u64)
     }
 }
 
-fn resolve(dir: Option<&Path>, s: &SampleRef) -> PathBuf {
+pub(crate) fn resolve(dir: Option<&Path>, s: &SampleRef) -> PathBuf {
     let p = Path::new(&s.path);
     match dir {
         Some(d) if p.is_relative() => d.join(p),

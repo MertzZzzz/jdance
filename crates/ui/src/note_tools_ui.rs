@@ -48,6 +48,16 @@ pub(crate) struct ToolDialog {
 pub(crate) struct ToolOutput {
     pub apply: Option<Outcome>,
     pub close: bool,
+    /// Listen was pressed: play the result (UI-RD §10.7).
+    pub listen: bool,
+    /// A / B is held: play the original instead.
+    pub original: bool,
+}
+
+/// `tool` with the settings it had when last applied in this session.
+pub(crate) fn last_settings(ctx: &egui::Context, tool: Tool) -> Tool {
+    ctx.data(|d| d.get_temp::<Tool>(memory_id(&tool)))
+        .unwrap_or(tool)
 }
 
 fn memory_id(tool: &Tool) -> egui::Id {
@@ -95,7 +105,17 @@ impl ToolDialog {
         }
     }
 
-    pub fn show(&mut self, ctx: &egui::Context, input: &Input) -> ToolOutput {
+    /// "9 of 12 changed" for the preview pill.
+    pub fn summary(&self) -> Option<String> {
+        match &self.cache {
+            Some((_, _, Ok(Some(o)))) => {
+                Some(format!("{} of {} changed", o.select.len(), o.notes.len()))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn show(&mut self, ctx: &egui::Context, input: &Input, listening: bool) -> ToolOutput {
         let mut out = ToolOutput::default();
         let mut open = true;
         let title = self.tool.name();
@@ -106,6 +126,7 @@ impl ToolDialog {
             .default_width(380.0)
             .open(&mut open)
             .show(ctx, |ui| {
+                ui.set_min_width(420.0);
                 let scope = input.scope().len();
                 let what = if self.tool.is_generator() {
                     let r = self.range(input);
@@ -167,24 +188,19 @@ impl ToolDialog {
                     );
                 }
                 ui.horizontal(|ui| {
-                    let label = if self.confirm {
-                        "Apply anyway"
-                    } else {
-                        "Apply"
-                    };
-                    if ui.add_enabled(ready, egui::Button::new(label)).clicked()
-                        && let Some((_, _, Ok(Some(o)))) = &self.cache
-                    {
-                        if o.dropped > 0 && !self.confirm {
-                            self.confirm = true;
-                        } else {
-                            out.apply = Some(o.clone());
-                            out.close = true;
-                        }
+                    // UI-RD §10.7: Listen plays the result (Space), A / B
+                    // held plays the original.
+                    if listen_button(ui, listening, ready).clicked() {
+                        out.listen = true;
                     }
-                    if crate::widgets::outline_button(ui, "Cancel").clicked() {
-                        out.close = true;
-                    }
+                    let ab = ui
+                        .add_enabled(
+                            ready,
+                            egui::Button::new(RichText::new("A / B").font(theme::mono(11.0)))
+                                .min_size(egui::vec2(48.0, 26.0)),
+                        )
+                        .on_hover_text("Hold to hear the original");
+                    out.original = ab.is_pointer_button_down_on();
                     if ui
                         .button("Reset")
                         .on_hover_text("Default settings")
@@ -193,6 +209,26 @@ impl ToolDialog {
                         self.tool = self.defaults.clone();
                         self.range = None;
                     }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let label = if self.confirm {
+                            "Apply anyway"
+                        } else {
+                            "Apply"
+                        };
+                        if crate::widgets::primary_button(ui, label, ready).clicked()
+                            && let Some((_, _, Ok(Some(o)))) = &self.cache
+                        {
+                            if o.dropped > 0 && !self.confirm {
+                                self.confirm = true;
+                            } else {
+                                out.apply = Some(o.clone());
+                                out.close = true;
+                            }
+                        }
+                        if crate::widgets::outline_button(ui, "Cancel").clicked() {
+                            out.close = true;
+                        }
+                    });
                 });
             });
         if !open {
@@ -203,6 +239,25 @@ impl ToolDialog {
         }
         out
     }
+}
+
+/// Listen: teal outline, filled while listening (UI-RD §1.1 `PREVIEW`).
+pub(crate) fn listen_button(ui: &mut egui::Ui, on: bool, enabled: bool) -> egui::Response {
+    let text = if on { "Listening" } else { "Listen" };
+    let (fill, fg) = if on {
+        (theme::PREVIEW, theme::ON_AMBER)
+    } else {
+        (theme::PREVIEW.gamma_multiply(0.12), theme::PREVIEW)
+    };
+    ui.add_enabled(
+        enabled,
+        egui::Button::new(RichText::new(text).color(fg))
+            .fill(fill)
+            .stroke(egui::Stroke::new(1.0, theme::PREVIEW))
+            .corner_radius(6)
+            .min_size(egui::vec2(76.0, 26.0)),
+    )
+    .on_hover_text("Play the result in a loop (Space)")
 }
 
 fn grid_combo(ui: &mut egui::Ui, salt: &str, grid: &mut u32) {

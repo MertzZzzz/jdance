@@ -310,6 +310,9 @@ pub enum NoticeLevel {
 pub struct Notice {
     pub level: NoticeLevel,
     pub text: String,
+    /// A file the notice is about: the notice offers "Show in folder"
+    /// (UI-RD §10.11).
+    pub file: Option<PathBuf>,
 }
 
 impl Notice {
@@ -317,6 +320,7 @@ impl Notice {
         Self {
             level: NoticeLevel::Info,
             text: text.into(),
+            file: None,
         }
     }
 
@@ -324,6 +328,7 @@ impl Notice {
         Self {
             level: NoticeLevel::Warning,
             text: text.into(),
+            file: None,
         }
     }
 
@@ -331,7 +336,14 @@ impl Notice {
         Self {
             level: NoticeLevel::Error,
             text: text.into(),
+            file: None,
         }
+    }
+
+    /// The notice with "Show in folder" for `file`.
+    pub fn with_file(mut self, file: PathBuf) -> Self {
+        self.file = Some(file);
+        self
     }
 }
 

@@ -1052,13 +1052,16 @@ fn push_pattern_events(
             .enumerate()
             .take(pattern.length_steps as usize)
         {
-            let tick = base + i as i64 * i64::from(TICKS_PER_STEP);
+            let grid = base + i as i64 * i64::from(TICKS_PER_STEP);
+            // Swing delays every second step (UI-RD §10.3).
+            let tick = grid + i64::from(jdance_domain::swing_offset(i as u32, project.swing));
             if !step.on || !inside(tick) {
                 continue;
             }
             let pos = to_sample(tick as u64);
-            // Instruments hold a step for one step; samplers ignore it.
-            let gate_end = to_sample((tick + i64::from(TICKS_PER_STEP)).min(hi) as u64);
+            // Instruments hold a step until the next grid step; samplers
+            // ignore it.
+            let gate_end = to_sample((grid + i64::from(TICKS_PER_STEP)).min(hi) as u64);
             out.push(StepEvent {
                 pos,
                 channel: ch_index,
@@ -1123,6 +1126,28 @@ mod tests {
         let pos: Vec<u64> = s.events.iter().map(|e| e.pos).collect();
         assert_eq!(pos, [0, 24_000]);
         assert_eq!(s.channels[1].gain.l.target(), 0.0);
+    }
+
+    #[test]
+    fn swing_delays_every_second_step_only() {
+        let mut p = Project::new();
+        p.tempo_bpm = 120.0;
+        let a = ChannelId(p.ids.next());
+        p.channels.push(Channel::new_sampler(a, "A"));
+        let pat = &mut p.patterns[0];
+        for i in 0..4 {
+            pat.row_mut(a).steps[i].on = true;
+        }
+        // One step = 6000 samples at 120 BPM, 48 kHz; 50 % = a quarter step.
+        p.swing = 50;
+        let s = compile(&p, 48_000, |_| None);
+        let pos: Vec<u64> = s.events.iter().map(|e| e.pos).collect();
+        assert_eq!(pos, [0, 7_500, 12_000, 19_500]);
+        // The swung step still ends at the next grid step.
+        assert_eq!(s.events[1].length, 4_500);
+        p.swing = 100;
+        let s = compile(&p, 48_000, |_| None);
+        assert_eq!(s.events[3].pos, 18_000 + 3_000);
     }
 
     #[test]

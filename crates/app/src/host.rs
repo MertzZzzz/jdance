@@ -166,7 +166,7 @@ pub struct AudioHost {
     settings: UserSettings,
     settings_path: Option<PathBuf>,
     notices: Vec<Notice>,
-    exports: Vec<Receiver<Result<String, String>>>,
+    exports: Vec<Receiver<Result<(String, PathBuf), String>>>,
     /// Progress (‰) and cancel flag of the running export.
     export_state: Option<(
         Arc<std::sync::atomic::AtomicU32>,
@@ -802,7 +802,7 @@ impl Host for AudioHost {
                 finished.push(i);
                 self.export_state = None;
                 self.notices.push(match result {
-                    Ok(msg) => Notice::info(msg),
+                    Ok((msg, file)) => Notice::info(msg).with_file(file),
                     Err(e) if e == crate::render::CANCELLED => {
                         Notice::info("Export cancelled; no file was written.")
                     }
@@ -1473,7 +1473,7 @@ impl Host for AudioHost {
                 if let Some(w) = o.tail_warning {
                     msg.push_str(&format!(". {w}"));
                 }
-                msg
+                (msg, out.clone())
             });
             let _ = tx.send(result);
         });

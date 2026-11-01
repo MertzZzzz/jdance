@@ -18,7 +18,9 @@ use jdance_domain::{
 };
 
 const RULER_H: f32 = 18.0;
-const CANVAS_H: f32 = 200.0;
+const CANVAS_H: f32 = 240.0;
+/// The value scale left of the canvas (UI-RD §10.10).
+const SCALE_W: f32 = 52.0;
 /// Vertical padding of the envelope inside its row.
 pub(crate) const PAD: f32 = 6.0;
 const POINT_R: f32 = 4.0;
@@ -29,6 +31,8 @@ pub(crate) struct EditorOutput {
     /// Edits of a continuous gesture (merged into one undo step).
     pub gesture: Vec<Edit>,
     pub end_gesture: bool,
+    /// LFO… asks for the LFO window on this source (UI-RD §10.10).
+    pub lfo: Option<AutomationId>,
 }
 
 #[derive(Debug)]
@@ -136,18 +140,32 @@ impl AutomationEditor {
             source,
             &title,
             &mut |ui| {
-                self.header(ui, project, lane, host, out);
-                ui.separator();
-                egui::ScrollArea::horizontal()
-                    .id_salt(("automation_editor_h", self.source.0))
-                    .show(ui, |ui| self.canvas(ui, project, lane, grid, out));
-                ui.label(
-                    RichText::new(
-                        "Double-click: add or delete a point · drag: move · right-click a point: delete (hold to sweep) · right-click between points: Step / Linear / Curve · Alt: no snap",
-                    )
-                    .size(11.0)
-                    .color(theme::MUTED),
-                );
+                self.header(ui, project, lane, grid, host, out);
+                ui.add_space(4.0);
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    // The value scale in the parameter's units.
+                    let (scale, _) =
+                        ui.allocate_exact_size(vec2(SCALE_W, RULER_H + CANVAS_H), Sense::hover());
+                    value_scale(ui, scale, project, lane);
+                    egui::ScrollArea::horizontal()
+                        .id_salt(("automation_editor_h", self.source.0))
+                        .show(ui, |ui| self.canvas(ui, project, lane, grid, out));
+                });
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    for (keys, text) in [
+                        ("2×click", "add / delete point"),
+                        ("drag", "move"),
+                        ("RMB", "delete · hold to sweep"),
+                        ("RMB between", "shape"),
+                        ("Alt", "no snap"),
+                    ] {
+                        crate::widgets::kbd(ui, keys);
+                        ui.label(RichText::new(text).size(11.0).color(theme::MUTED));
+                        ui.add_space(8.0);
+                    }
+                });
             },
         )
     }
@@ -157,10 +175,16 @@ impl AutomationEditor {
         ui: &mut egui::Ui,
         project: &Project,
         lane: &AutomationLane,
+        grid: u64,
         host: &mut dyn Host,
         out: &mut EditorOutput,
     ) {
+        use crate::icons::Glyph as G;
+        // UI-RD §6 (board R4 · Automation): name, the target chip, the
+        // length, Snap, LFO… and the zoom.
         ui.horizontal(|ui| {
+            let (r, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
+            crate::icons::paint(ui, G::Rename, r, theme::MUTED);
             let name_id = egui::Id::unique(("automation_name", self.source.0));
             let editing = ui.memory(|m| m.has_focus(name_id));
             if !editing {
@@ -169,7 +193,7 @@ impl AutomationEditor {
             let r = ui.add(
                 egui::TextEdit::singleline(&mut self.name)
                     .id(name_id)
-                    .desired_width(150.0),
+                    .desired_width(140.0),
             );
             if r.lost_focus() && self.name.trim() != lane.name && !self.name.trim().is_empty() {
                 out.edits.push(Edit::SetAutomation {
@@ -182,13 +206,24 @@ impl AutomationEditor {
             }
             if lane.target.exists(project) {
                 let (name, context) = label(project, &lane.target, host);
-                ui.label(RichText::new(name).color(AUTOMATION_COLOR));
-                ui.label(RichText::new(context).color(theme::MUTED));
+                egui::Frame::new()
+                    .fill(AUTOMATION_COLOR.gamma_multiply(0.12))
+                    .stroke(Stroke::new(1.0, AUTOMATION_COLOR.gamma_multiply(0.6)))
+                    .corner_radius(7)
+                    .inner_margin(egui::Margin::symmetric(9, 4))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let (r, _) = ui.allocate_exact_size(vec2(13.0, 13.0), Sense::hover());
+                            crate::icons::paint(ui, G::Automation, r, AUTOMATION_COLOR);
+                            ui.label(RichText::new(name).color(AUTOMATION_COLOR).strong());
+                            ui.label(RichText::new(context).size(11.0).color(theme::MUTED));
+                        });
+                    });
             } else {
                 ui.label(RichText::new("Target not found").color(theme::WARN))
                     .on_hover_text("The automated object was removed; the source has no effect");
             }
-            ui.separator();
+            crate::widgets::divider(ui, 20.0);
             let bar_ticks = u64::from(project.time_signature.bar_ticks());
             let mut bars = lane.length.div_ceil(bar_ticks).max(1);
             let r = ui
@@ -208,13 +243,42 @@ impl AutomationEditor {
                 });
             }
             out.end_gesture |= r.drag_stopped() || r.lost_focus();
-            ui.separator();
-            ui.add(
-                egui::Slider::new(&mut self.zoom, 40.0..=640.0)
-                    .logarithmic(true)
-                    .show_value(false)
-                    .text("Zoom"),
+            let snap = if grid <= 1 {
+                "Off"
+            } else {
+                crate::toolbar::snap_name(grid as u32, project.time_signature)
+            };
+            crate::widgets::button(
+                ui,
+                Some(G::Snap),
+                snap,
+                false,
+                crate::widgets::Look::Raised,
+                "Points snap to the main Snap (Alt: no snap)",
             );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().slider_width = 110.0;
+                ui.add(
+                    egui::Slider::new(&mut self.zoom, 40.0..=640.0)
+                        .logarithmic(true)
+                        .show_value(false),
+                )
+                .on_hover_text("Zoom");
+                let (r, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
+                crate::icons::paint(ui, G::Zoom, r, theme::DIM);
+                if crate::widgets::button(
+                    ui,
+                    Some(G::Lfo),
+                    "LFO…",
+                    false,
+                    crate::widgets::Look::Raised,
+                    "Write an LFO curve into this source",
+                )
+                .clicked()
+                {
+                    out.lfo = Some(lane.id);
+                }
+            });
         });
     }
 
@@ -419,10 +483,27 @@ impl AutomationEditor {
                 theme::MUTED,
             );
         }
-        painter.add(egui::Shape::line(
-            envelope_line(points, row, &x_of, span),
-            Stroke::new(1.5, color),
-        ));
+        let line = envelope_line(points, row, &x_of, span);
+        // The area under the envelope, fading down (UI-RD §6).
+        if line.len() > 1 {
+            let mut fill = egui::Mesh::default();
+            let base = row.bottom();
+            for w in line.windows(2) {
+                let (a, b) = (w[0], w[1]);
+                if b.x <= a.x {
+                    continue;
+                }
+                let i = fill.vertices.len() as u32;
+                fill.colored_vertex(a, color.gamma_multiply(0.28));
+                fill.colored_vertex(b, color.gamma_multiply(0.28));
+                fill.colored_vertex(pos2(b.x, base), color.gamma_multiply(0.03));
+                fill.colored_vertex(pos2(a.x, base), color.gamma_multiply(0.03));
+                fill.add_triangle(i, i + 1, i + 2);
+                fill.add_triangle(i, i + 2, i + 3);
+            }
+            painter.add(fill);
+        }
+        painter.add(egui::Shape::line(line, Stroke::new(2.0, color)));
         let hovered = pointer.and_then(hit);
         for (k, pt) in points.iter().enumerate() {
             let c = point_pos(pt);
@@ -433,18 +514,33 @@ impl AutomationEditor {
                 preview.is_some_and(|(j, _)| j == k) || (self.drag.is_none() && hovered == Some(k));
             painter.circle(
                 c,
-                POINT_R,
-                if active { theme::TEXT } else { color },
-                Stroke::new(1.0, Color32::from_black_alpha(160)),
+                if active { POINT_R + 1.5 } else { POINT_R },
+                if active { color } else { theme::BG },
+                Stroke::new(1.5, color),
             );
             if active {
-                painter.text(
-                    c + vec2(8.0, -8.0),
-                    Align2::LEFT_BOTTOM,
-                    value_text(project, &lane.target, pt.value),
-                    FontId::proportional(11.0),
-                    theme::TEXT,
+                // The point's value pops up beside it (UI-RD §10.10).
+                let text = format!(
+                    "{} · {}",
+                    crate::toolbar::bars_text(pt.tick, sig),
+                    value_text(project, &lane.target, pt.value)
                 );
+                let galley = painter.layout_no_wrap(text, theme::mono(10.5), theme::TEXT);
+                let size = galley.size() + vec2(14.0, 8.0);
+                let mut at = c + vec2(12.0, -size.y - 4.0);
+                if at.x + size.x > span.1 {
+                    at.x = c.x - 12.0 - size.x;
+                }
+                at.y = at.y.max(row.top() + 2.0);
+                let bubble = Rect::from_min_size(at, size);
+                painter.rect(
+                    bubble,
+                    6.0,
+                    theme::LCD,
+                    Stroke::new(1.0, color),
+                    egui::StrokeKind::Inside,
+                );
+                painter.galley(bubble.center() - galley.size() / 2.0, galley, theme::TEXT);
             }
         }
         if hovered.is_some() && self.drag.is_none() {
@@ -472,34 +568,117 @@ fn point_menu(
     let Some(pt) = lane.points.get(k).copied() else {
         return;
     };
-    ui.label(value_text(project, &lane.target, pt.value));
-    ui.label("Shape of this segment");
-    for (curve, name) in [
-        (Curve::Hold, "Step"),
-        (Curve::Linear, "Linear"),
-        (Curve::Curve, "Curve"),
-    ] {
-        if ui.radio(pt.curve == curve, name).clicked() && pt.curve != curve {
-            // A visible bend to start from.
-            let tension = if curve == Curve::Curve && pt.tension == 0.0 {
-                0.5
-            } else {
-                pt.tension
-            };
-            out.edits.push(with_points(lane, |pts| {
-                pts[k].curve = curve;
-                pts[k].tension = tension;
-            }));
+    let _ = value_text(project, &lane.target, pt.value);
+    crate::widgets::caption(ui, "Segment shape");
+    ui.horizontal(|ui| {
+        for (curve, name) in [
+            (Curve::Hold, "Step"),
+            (Curve::Linear, "Linear"),
+            (Curve::Curve, "Curve"),
+        ] {
+            if shape_card(ui, curve, name, pt.curve == curve).clicked() && pt.curve != curve {
+                // A visible bend to start from.
+                let tension = if curve == Curve::Curve && pt.tension == 0.0 {
+                    0.5
+                } else {
+                    pt.tension
+                };
+                out.edits.push(with_points(lane, |pts| {
+                    pts[k].curve = curve;
+                    pts[k].tension = tension;
+                }));
+            }
         }
-    }
+    });
     if pt.curve == Curve::Curve {
         let mut tension = pt.tension;
-        let r = ui.add(egui::Slider::new(&mut tension, -1.0..=1.0).text("Tension"));
+        let r = ui
+            .horizontal(|ui| {
+                ui.label("Tension");
+                ui.add(egui::Slider::new(&mut tension, -1.0..=1.0).fixed_decimals(2))
+            })
+            .inner;
         if r.changed() {
             out.gesture
                 .push(with_points(lane, |pts| pts[k].tension = tension));
         }
         out.end_gesture |= r.drag_stopped() || r.lost_focus();
+    }
+}
+
+/// A shape button of the segment menu: the shape drawn over its name.
+fn shape_card(ui: &mut egui::Ui, curve: Curve, name: &str, on: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(66.0, 46.0), Sense::click());
+    let (fill, stroke, fg) = if on {
+        (
+            AUTOMATION_COLOR.gamma_multiply(0.15),
+            AUTOMATION_COLOR,
+            AUTOMATION_COLOR,
+        )
+    } else if resp.hovered() {
+        (theme::RAISED, theme::LINE_STRONG, theme::TEXT)
+    } else {
+        (theme::FIELD, theme::LINE, theme::MUTED)
+    };
+    let p = ui.painter();
+    p.rect(
+        rect,
+        7.0,
+        fill,
+        Stroke::new(1.0, stroke),
+        egui::StrokeKind::Inside,
+    );
+    let g = Rect::from_center_size(rect.center() - vec2(0.0, 7.0), vec2(22.0, 12.0));
+    let pts: Vec<Pos2> = match curve {
+        Curve::Hold => vec![
+            g.left_bottom(),
+            pos2(g.center().x, g.bottom()),
+            pos2(g.center().x, g.top()),
+            g.right_top(),
+        ],
+        Curve::Linear => vec![g.left_bottom(), g.right_top()],
+        Curve::Curve => (0..=12)
+            .map(|k| {
+                let t = k as f32 / 12.0;
+                let w = (1.0 - (t * std::f32::consts::PI).cos()) / 2.0;
+                pos2(g.left() + t * g.width(), g.bottom() - w * g.height())
+            })
+            .collect(),
+    };
+    p.add(egui::Shape::line(pts, Stroke::new(1.5, fg)));
+    p.text(
+        pos2(rect.center().x, rect.bottom() - 10.0),
+        Align2::CENTER_CENTER,
+        name,
+        FontId::proportional(11.0),
+        fg,
+    );
+    let name = name.to_owned();
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, on, &name));
+    resp
+}
+
+/// Values of the source at 0, ¼, ½, ¾ and 1 of its range, in the
+/// parameter's units, beside the canvas rows (UI-RD §10.10).
+fn value_scale(ui: &egui::Ui, rect: Rect, project: &Project, lane: &AutomationLane) {
+    let p = ui.painter_at(rect);
+    let row = Rect::from_min_max(pos2(rect.left(), rect.top() + RULER_H), rect.max);
+    for v in [0.0, 0.25, 0.5, 0.75, 1.0] {
+        let y = row.bottom() - PAD - v * (row.height() - 2.0 * PAD);
+        let align = if v == 1.0 {
+            Align2::RIGHT_TOP
+        } else if v == 0.0 {
+            Align2::RIGHT_BOTTOM
+        } else {
+            Align2::RIGHT_CENTER
+        };
+        p.text(
+            pos2(rect.right() - 6.0, y),
+            align,
+            value_text(project, &lane.target, v),
+            theme::mono(9.0),
+            theme::DIM,
+        );
     }
 }
 

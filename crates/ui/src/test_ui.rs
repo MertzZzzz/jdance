@@ -128,6 +128,10 @@ pub(crate) struct StubHost {
     pub live_inputs: Option<(u16, Vec<String>)>,
     pub plugins: Vec<jdance_plugin_api::PluginDescriptor>,
     pub plugin_prefs: jdance_plugin_api::search::PluginPrefs,
+    /// The last project sent to the engine.
+    pub engine_project: Option<jdance_domain::Project>,
+    /// The last transport mode sent.
+    pub mode: Option<crate::host::TransportMode>,
 }
 
 impl crate::Host for StubHost {
@@ -152,7 +156,9 @@ impl crate::Host for StubHost {
     fn set_plugin_prefs(&mut self, prefs: jdance_plugin_api::search::PluginPrefs) {
         self.plugin_prefs = prefs;
     }
-    fn set_project(&mut self, _: &jdance_domain::Project, _: Option<&std::path::Path>) {}
+    fn set_project(&mut self, p: &jdance_domain::Project, _: Option<&std::path::Path>) {
+        self.engine_project = Some(p.clone());
+    }
     fn play(&mut self) {
         self.transport.playing = true;
     }
@@ -176,7 +182,9 @@ impl crate::Host for StubHost {
     fn preview_file(&mut self, path: Option<&std::path::Path>) {
         self.previews.extend(path.map(std::path::Path::to_path_buf));
     }
-    fn set_mode(&mut self, _: crate::host::TransportMode) {}
+    fn set_mode(&mut self, m: crate::host::TransportMode) {
+        self.mode = Some(m);
+    }
     fn seek_ticks(&mut self, ticks: u64) {
         self.seeks.push(ticks);
     }

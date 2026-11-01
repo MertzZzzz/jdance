@@ -41,7 +41,7 @@ impl RecordingPanel {
     ) -> bool {
         let mut open = true;
         let meter = self.update_meter(host);
-        egui::Window::new("Recording")
+        egui::Window::new(egui::RichText::new("Recording").font(theme::strong(13.0)))
             .id(egui::Id::unique("recording_settings"))
             .default_width(420.0)
             .open(&mut open)
@@ -155,25 +155,70 @@ impl RecordingPanel {
                         ui.end_row();
                         ui.label("Count-in");
                         let mut m = host.metronome();
-                        if ui
-                            .checkbox(
-                                &mut m.count_in,
-                                format!(
-                                    "{} bars of clicks before recording (Ctrl+P)",
-                                    crate::COUNT_IN_BARS
-                                ),
-                            )
-                            .changed()
+                        if crate::widgets::switch_row(
+                            ui,
+                            &mut m.count_in,
+                            theme::AMBER,
+                            &format!(
+                                "{} bars of clicks before recording (Ctrl+P)",
+                                crate::COUNT_IN_BARS
+                            ),
+                        )
+                        .changed()
                         {
                             host.set_metronome(m);
                         }
                         ui.end_row();
                         ui.label("Monitoring");
                         let mut monitor = s.monitor;
-                        if ui
-                            .checkbox(&mut monitor, "Hear the input through the output")
-                            .changed()
-                        {
+                        // UI-RD §7 (board R5 · Recording): monitoring
+                        // warns about feedback in amber.
+                        let changed = egui::Frame::new()
+                            .fill(theme::AMBER.gamma_multiply(0.07))
+                            .stroke(egui::Stroke::new(1.0, theme::AMBER.gamma_multiply(0.4)))
+                            .corner_radius(8)
+                            .inner_margin(egui::Margin::symmetric(10, 6))
+                            .show(ui, |ui| {
+                                ui.set_width(250.0);
+                                ui.horizontal(|ui| {
+                                    let (r, _) = ui.allocate_exact_size(
+                                        egui::vec2(14.0, 14.0),
+                                        egui::Sense::hover(),
+                                    );
+                                    crate::icons::paint(
+                                        ui,
+                                        crate::icons::Glyph::Listen,
+                                        r,
+                                        theme::AMBER,
+                                    );
+                                    ui.vertical(|ui| {
+                                        ui.spacing_mut().item_spacing.y = 0.0;
+                                        ui.label("Hear the input");
+                                        ui.label(
+                                            egui::RichText::new(
+                                                "Use headphones — speakers can feed back",
+                                            )
+                                            .size(10.5)
+                                            .color(theme::AMBER),
+                                        );
+                                    });
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            crate::widgets::switch(
+                                                ui,
+                                                &mut monitor,
+                                                theme::AMBER,
+                                                "Monitoring",
+                                            )
+                                        },
+                                    )
+                                    .inner
+                                })
+                                .inner
+                            })
+                            .inner;
+                        if changed.changed() {
                             if monitor {
                                 self.confirm_monitor = true;
                             } else {

@@ -535,6 +535,31 @@ impl RackView {
                         }
                     }
                 });
+                // Swing of the step sequencer (UI-RD §10.3).
+                ui.label(RichText::new("SWING").size(9.0).color(theme::MUTED));
+                let mut swing = f32::from(project.swing);
+                let r = crate::widgets::knob(
+                    ui,
+                    &mut swing,
+                    0.0..=f32::from(jdance_domain::MAX_SWING),
+                    0.0,
+                    theme::AMBER,
+                    20.0,
+                )
+                .hint(&format!(
+                    "Swing {}%: every second step plays later (drag; double-click resets)",
+                    project.swing
+                ));
+                let swing = swing.round() as u8;
+                if r.changed() && swing != project.swing {
+                    out.edits.push((Edit::SetSwing(swing), true));
+                }
+                out.end_gesture |= r.drag_stopped();
+                ui.label(
+                    RichText::new(format!("{}%", project.swing))
+                        .font(theme::mono(10.0))
+                        .color(theme::DIM),
+                );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     if ui

@@ -97,7 +97,28 @@ pub struct Project {
     /// REC-003).
     #[serde(default, skip_serializing_if = "RecordTo::is_master")]
     pub record_to: RecordTo,
+    /// Step sequencer swing, 0–100 % (UI-RD §10.3): every second step
+    /// plays up to half a step later; Piano Roll notes are not moved.
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub swing: u8,
     pub ids: IdAllocator,
+}
+
+/// Largest swing in percent (UI-RD §10.3).
+pub const MAX_SWING: u8 = 100;
+
+fn is_zero_u8(v: &u8) -> bool {
+    *v == 0
+}
+
+/// Ticks by which a step at `index` is delayed with `swing` percent:
+/// odd steps move by up to half a step (UI-RD §10.3).
+pub fn swing_offset(index: u32, swing: u8) -> u32 {
+    if index % 2 == 1 {
+        TICKS_PER_STEP / 2 * u32::from(swing.min(MAX_SWING)) / u32::from(MAX_SWING)
+    } else {
+        0
+    }
 }
 
 /// Where the channel of a recorded take plays (REC-003).
@@ -141,6 +162,7 @@ impl Project {
             timebase_rate: DEFAULT_TIMEBASE,
             assets: Vec::new(),
             record_to: RecordTo::Master,
+            swing: 0,
             ids,
         }
     }

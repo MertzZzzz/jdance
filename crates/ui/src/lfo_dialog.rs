@@ -42,6 +42,15 @@ impl LfoDialog {
         }
     }
 
+    /// From the Automation Editor (UI-RD §10.10): writes into source
+    /// `id` over `range`.
+    pub fn for_source(id: AutomationId, range: Range) -> Self {
+        Self {
+            target: Some(LfoTarget::Existing(id)),
+            ..Self::new(range, TrackId::MASTER)
+        }
+    }
+
     pub fn show(
         &mut self,
         ctx: &egui::Context,

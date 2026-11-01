@@ -69,6 +69,8 @@ pub enum Edit {
         starts: Vec<(ClipId, u64)>,
     },
     /// Project time signature (spec 0.2.3 SIG-011).
+    /// Step sequencer swing in percent (UI-RD §10.3).
+    SetSwing(u8),
     SetTimeSignature(jdance_domain::TimeSignature),
     /// Mixer track for the channels of recorded takes (REC-003).
     SetRecordTo(jdance_domain::RecordTo),
@@ -275,6 +277,7 @@ pub enum Edit {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MergeKey {
     Tempo,
+    Swing,
     ChannelVolume(ChannelId),
     ChannelPan(ChannelId),
     MasterVolume,
@@ -300,6 +303,7 @@ impl Edit {
             Edit::SetChannelClipAsset(..) => "Place sampler",
             Edit::SetChannelSource { .. } => "Change channel type",
             Edit::SetTimeSignature(_) => "Change time signature",
+            Edit::SetSwing(_) => "Change swing",
             Edit::SetRecordTo(_) => "Change recording track",
             Edit::SetStep { .. } => "Edit step",
             Edit::SetNotes { .. } | Edit::RestoreNotes { .. } => "Edit notes",
@@ -378,6 +382,7 @@ impl Edit {
     pub fn merge_key(&self) -> Option<MergeKey> {
         match self {
             Edit::SetTempo(_) => Some(MergeKey::Tempo),
+            Edit::SetSwing(_) => Some(MergeKey::Swing),
             Edit::SetAudioClip(c) => Some(MergeKey::Clip(c.id)),
             Edit::SetAutomationClip(c) => Some(MergeKey::Clip(c.id)),
             Edit::SetChannelVolume(id, _) => Some(MergeKey::ChannelVolume(*id)),
@@ -509,6 +514,12 @@ impl Edit {
                 sig.validate().map_err(EditError::Arrangement)?;
                 let old = std::mem::replace(&mut p.time_signature, *sig);
                 Ok(Edit::SetTimeSignature(old))
+            }
+            Edit::SetSwing(swing) => {
+                if *swing > jdance_domain::MAX_SWING {
+                    return Err(EditError::OutOfRange(f64::from(*swing)));
+                }
+                Ok(Edit::SetSwing(std::mem::replace(&mut p.swing, *swing)))
             }
             Edit::SetStep {
                 pattern,
