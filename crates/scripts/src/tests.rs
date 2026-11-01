@@ -11,6 +11,7 @@ fn n(id: u32, start: u32, length: u32, key: u8, vel: u8) -> Note {
         key,
         velocity: nt::stored_velocity(i32::from(vel)),
         muted: false,
+        slide: false,
     }
 }
 

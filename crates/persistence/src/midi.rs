@@ -52,6 +52,7 @@ impl MidiFile {
                 key: n.key,
                 velocity: n.velocity,
                 muted: false,
+                slide: false,
             });
         }
         (out, dropped)

@@ -47,6 +47,8 @@ struct Voice {
     /// another one: the voice plays it to its end (spec 0.2.5 §3, no
     /// click); it goes to the garbage ring when the voice is done.
     held: Option<Arc<jdance_dsp::SampleBuffer>>,
+    /// The key it sounds (or glides to), for slides (spec 0.3.5 §8.3).
+    key: f32,
 }
 
 impl Default for Voice {
@@ -56,6 +58,7 @@ impl Default for Voice {
             channel: ChannelId(0),
             live: None,
             held: None,
+            key: 0.0,
         }
     }
 }
@@ -528,6 +531,7 @@ impl EngineProcessor {
                     velocity,
                     key,
                     length: u64::MAX,
+                    slide: false,
                 };
                 if let Some(i) = trigger(
                     snap,
@@ -736,6 +740,19 @@ impl EngineProcessor {
                 while let Some(e) = snap.events.get(k).copied().filter(|e| e.pos < seg_end) {
                     let offset = done + (e.pos - p) as usize;
                     k += 1;
+                    if e.slide {
+                        // Plugins get no slides (spec 0.3.5 §9).
+                        if snap
+                            .channels
+                            .get(e.channel)
+                            .is_some_and(|c| c.instrument.is_none())
+                        {
+                            render_voices(snap, voices, channels, cursor, offset);
+                            cursor = offset;
+                            slide(snap, voices, &e);
+                        }
+                        continue;
+                    }
                     if let Some(c) = snap.channels.get_mut(e.channel)
                         && let Some(inst) = c.instrument.as_mut()
                     {
@@ -1200,6 +1217,48 @@ fn transpose(key: u8, semitones: i32) -> u8 {
     (i32::from(key) + semitones).clamp(0, 127) as u8
 }
 
+/// The key a sampler plays for a note `key`: add to key off plays every
+/// note at the root; main pitch off ignores the channel's pitch (§4).
+fn sampler_key(ch: &crate::snapshot::ChannelRt, key: u8) -> u8 {
+    let s = &ch.sampler;
+    let key = if s.add_to_key { key } else { s.root_key };
+    if s.main_pitch {
+        transpose(key, ch.pitch)
+    } else {
+        key
+    }
+}
+
+/// A slide note (spec 0.3.5 §8): the channel's sounding sequencer voices
+/// glide so that the highest reaches the slide's key at its end; the
+/// others keep their distance to it.
+fn slide(snap: &PlaybackSnapshot, voices: &mut [Voice], e: &crate::StepEvent) {
+    let Some(ch) = snap.channels.get(e.channel) else {
+        return;
+    };
+    let target = |v: &Voice| {
+        v.inner.is_active()
+            && !v.inner.is_releasing()
+            && v.inner.slot == e.channel
+            && v.live.is_none()
+    };
+    let top = voices
+        .iter()
+        .filter(|v| target(v))
+        .map(|v| v.key)
+        .fold(f32::NEG_INFINITY, f32::max);
+    if !top.is_finite() {
+        return;
+    }
+    let interval = f32::from(sampler_key(ch, e.key)) - top;
+    let factor = 2f64.powf(f64::from(interval) / 12.0);
+    let samples = e.length.min(u64::from(u32::MAX)) as u32;
+    for v in voices.iter_mut().filter(|v| target(v)) {
+        v.key += interval;
+        v.inner.glide(factor, samples);
+    }
+}
+
 fn trigger(
     snap: &PlaybackSnapshot,
     voices: &mut [Voice],
@@ -1272,14 +1331,8 @@ fn trigger(
         playback.gate = Some(e.length.max(1));
     }
     let gain = e.velocity * s.gain;
-    // Add to key off: every note plays at the root; main pitch off: the
-    // channel's pitch does not apply (§4).
-    let key = if s.add_to_key { e.key } else { s.root_key };
-    let key = if s.main_pitch {
-        transpose(key, ch.pitch)
-    } else {
-        key
-    };
+    let key = sampler_key(ch, e.key);
+    v.key = f32::from(key);
     v.inner.start_with(
         e.channel,
         *serial,

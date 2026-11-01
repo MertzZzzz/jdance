@@ -14,7 +14,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 pub const FORMAT_TAG: &str = "jdance-project";
-pub const CURRENT_FORMAT_VERSION: u32 = 18;
+pub const CURRENT_FORMAT_VERSION: u32 = 19;
 pub const PROJECT_EXTENSION: &str = "jdance";
 
 /// Saves `project` to `path` atomically. Sample paths inside the project
@@ -226,6 +226,10 @@ fn migrate(version: u32, mut project: Value) -> Result<Value, PersistError> {
         // v18 (0.2.9) added the clip file of samplers (absent = none) and
         // the speed of audio clips (absent = 1).
         v = 18;
+    }
+    if v == 18 {
+        // v19 (0.3.5) added slide notes (absent = an ordinary note).
+        v = 19;
     }
     match v {
         CURRENT_FORMAT_VERSION => Ok(project),
@@ -817,12 +821,49 @@ mod tests {
         p.mixer.tracks.push(t);
         save_project(&path, &p).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("\"format_version\": 18"), "{text}");
+        assert!(text.contains("\"format_version\": 19"), "{text}");
         assert_eq!(load_project(&path).unwrap(), p, "signature and track input");
 
-        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 18, "project": p});
+        let mut v = serde_json::json!({"format": FORMAT_TAG, "format_version": 19, "project": p});
         v["project"]["time_signature"]["denominator"] = serde_json::json!(3);
         assert!(parse_project(v.to_string().as_bytes()).is_err(), "SIG-001");
+    }
+
+    #[test]
+    fn slide_notes_round_trip_and_v18_notes_are_not_slides() {
+        let mut p = sample_project("a.wav");
+        let id = p.channels[0].id;
+        let note = jdance_domain::Note {
+            id: 1,
+            start: 0,
+            length: 240,
+            key: 60,
+            velocity: 0.8,
+            muted: false,
+            slide: false,
+        };
+        p.patterns[0].row_mut(id).notes = vec![
+            note,
+            jdance_domain::Note {
+                id: 2,
+                key: 72,
+                slide: true,
+                ..note
+            },
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("slide.jdance");
+        save_project(&file, &p).unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(text.matches("\"slide\": true").count(), 1, "{text}");
+        assert!(!text.contains("\"slide\": false"), "only slides say so");
+        assert_eq!(load_project(&file).unwrap(), p);
+        // A 0.3.4 file (v18) has no slide field: ordinary notes.
+        let mut old = sample_project("a.wav");
+        old.patterns[0].row_mut(id).notes = vec![note];
+        let v = serde_json::json!({"format": FORMAT_TAG, "format_version": 18, "project": old});
+        let loaded = parse_project(v.to_string().as_bytes()).unwrap();
+        assert!(!loaded.patterns[0].row(id).unwrap().notes[0].slide);
     }
 
     #[test]

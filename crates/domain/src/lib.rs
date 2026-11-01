@@ -1019,6 +1019,10 @@ pub struct Note {
     /// spec 0.2.7 §1).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub muted: bool,
+    /// A slide note does not sound: it glides the notes of its row that
+    /// sound at its start to its key over its length (spec 0.3.5 §6, §8).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub slide: bool,
 }
 
 impl Note {

@@ -170,6 +170,11 @@ pub struct SamplerVoice {
     stage: Stage,
     level: f32,
     release_step: f32,
+    /// Pitch glide (slide notes, spec 0.3.5 §8): per-sample rate factor,
+    /// samples left and the rate reached at the end.
+    glide_mul: f64,
+    glide_left: u32,
+    glide_target: f64,
 }
 
 impl Default for SamplerVoice {
@@ -189,6 +194,9 @@ impl Default for SamplerVoice {
             stage: Stage::Off,
             level: 1.0,
             release_step: 0.0,
+            glide_mul: 1.0,
+            glide_left: 0,
+            glide_target: 1.0,
         }
     }
 }
@@ -245,7 +253,38 @@ impl SamplerVoice {
             stage,
             level,
             release_step: 0.0,
+            glide_mul: 1.0,
+            glide_left: 0,
+            glide_target: 1.0,
         };
+    }
+
+    /// Glides the pitch by `factor` (rate ratio, `2` = an octave up) over
+    /// `samples`, exponentially in frequency; a glide still running
+    /// continues from where it is towards its target times `factor`.
+    /// The voice stays at the new pitch. Realtime-safe.
+    pub fn glide(&mut self, factor: f64, samples: u32) {
+        if !(factor.is_finite() && factor > 0.0) {
+            return;
+        }
+        let target = self.target_rate() * factor;
+        if samples == 0 {
+            self.rate = target;
+            self.glide_left = 0;
+            return;
+        }
+        self.glide_mul = (target / self.rate).powf(1.0 / f64::from(samples));
+        self.glide_left = samples;
+        self.glide_target = target;
+    }
+
+    /// The playback speed the voice is gliding to (its speed without one).
+    pub fn target_rate(&self) -> f64 {
+        if self.glide_left > 0 {
+            self.glide_target
+        } else {
+            self.rate
+        }
     }
 
     /// Fades the voice out linearly over `samples` and then stops it (a
@@ -280,7 +319,7 @@ impl SamplerVoice {
         if !self.active {
             return;
         }
-        if self.rate != 1.0 || !self.playback.is_plain() {
+        if self.rate != 1.0 || self.glide_left > 0 || !self.playback.is_plain() {
             self.render_general(sample, out_l, out_r);
             return;
         }
@@ -423,6 +462,14 @@ impl SamplerVoice {
             out_l[i] += l * self.gain_l * g;
             out_r[i] += r * self.gain_r * g;
             self.frac += self.rate;
+            if self.glide_left > 0 {
+                self.glide_left -= 1;
+                self.rate = if self.glide_left == 0 {
+                    self.glide_target
+                } else {
+                    self.rate * self.glide_mul
+                };
+            }
             let whole = self.frac.floor();
             self.pos += whole as usize;
             self.frac -= whole;
@@ -468,6 +515,31 @@ mod tests {
         assert_eq!(l, [0.0, 0.5, 1.0, 1.5]);
         assert_eq!(key_rate(60, 60), 1.0);
         assert!((key_rate(67, 60) - 1.498_307).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_glide_reaches_its_rate_and_stays() {
+        let s = SampleBuffer {
+            sample_rate: 48_000,
+            left: vec![0.0; 100_000],
+            right: vec![0.0; 100_000],
+        };
+        let mut v = SamplerVoice::default();
+        v.start_pitched(0, 0, 1.0, 1.0, 1.0);
+        v.glide(2.0, 1000);
+        assert_eq!(v.target_rate(), 2.0);
+        let (mut l, mut r) = (vec![0.0; 500], vec![0.0; 500]);
+        v.render_add(&s, &mut l, &mut r);
+        // Halfway in semitones: half an octave.
+        assert!((v.rate - 2f64.sqrt()).abs() < 1e-3, "{}", v.rate);
+        // A second glide continues from the target.
+        v.glide(2.0, 500);
+        assert_eq!(v.target_rate(), 4.0);
+        let (mut l, mut r) = (vec![0.0; 2000], vec![0.0; 2000]);
+        v.render_add(&s, &mut l, &mut r);
+        assert_eq!(v.rate, 4.0);
+        // Read position: 500 samples at about 1–1.41, 500 more to 4, then 4.
+        assert!(v.pos > 500 + 1000 + 1500 * 4 - 10, "{}", v.pos);
     }
 
     #[test]

@@ -66,3 +66,12 @@
 | `assets/demo/samples/*.wav` | синтезированы кодом `cargo xtask gen-demo` | GPL-3.0-or-later (как репозиторий) |
 | `assets/demo/demo.jdance` | создан `cargo xtask gen-demo` | GPL-3.0-or-later |
 | `crates/test-support/golden/*.wav` | результат рендера тестов | GPL-3.0-or-later |
+
+- Для `docs/spec/spec-0.3.5.md` (2026-11-01; прямое чтение
+  image-line.com закрыто сетевой политикой, только выдержки поисковой
+  выдачи): `html/pianoroll.htm` (Stamp, Only one, Slide, Portamento, цвета
+  нот); статьи soundjuce.com, ask.audio, audeobox.com о слайд-нотах и
+  штампах. Скриншот меню Stamp от заказчика — только перечень пунктов, в
+  репозиторий не добавлен. Интервалы аккордов и ладов — общая теория
+  музыки, таблицы составлены заново; значения ударных штампов — решения
+  jdance.
