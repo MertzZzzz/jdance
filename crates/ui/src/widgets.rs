@@ -479,6 +479,11 @@ pub(crate) fn button(
     tip: &str,
 ) -> Response {
     let font = FontId::proportional(11.5);
+    // A trailing " ▾" becomes a drawn chevron (the fonts lack the glyph).
+    let (text, chevron) = match text.strip_suffix(" ▾") {
+        Some(t) => (t, true),
+        None => (text, false),
+    };
     let galley = (!text.is_empty()).then(|| {
         ui.painter()
             .layout_no_wrap(text.to_owned(), font.clone(), theme::TEXT)
@@ -490,8 +495,12 @@ pub(crate) fn button(
     } else {
         0.0
     };
-    let w =
-        pad * 2.0 + glyph.map_or(0.0, |_| icon) + gap + galley.as_ref().map_or(0.0, |g| g.size().x);
+    let chev = if chevron { 14.0 } else { 0.0 };
+    let w = pad * 2.0
+        + glyph.map_or(0.0, |_| icon)
+        + gap
+        + galley.as_ref().map_or(0.0, |g| g.size().x)
+        + chev;
     let h = ui.spacing().interact_size.y.max(26.0);
     let (rect, resp) = ui.allocate_exact_size(vec2(w.max(h), h), Sense::click());
     let enabled = ui.is_enabled();
@@ -513,7 +522,7 @@ pub(crate) fn button(
     };
     let p = ui.painter();
     p.rect(rect, 6.0, fill, stroke, StrokeKind::Inside);
-    let content_w = w - pad * 2.0;
+    let content_w = w - pad * 2.0 - chev;
     let mut x = rect.center().x - content_w / 2.0;
     if let Some(g) = glyph {
         icons::paint_with(
@@ -526,7 +535,16 @@ pub(crate) fn button(
     }
     if let Some(galley) = galley {
         let pos = pos2(x, rect.center().y - galley.size().y / 2.0);
+        x += galley.size().x;
         p.galley_with_override_text_color(pos, galley, fg);
+    }
+    if chevron {
+        icons::paint_with(
+            p,
+            Glyph::ChevronDown,
+            Rect::from_center_size(pos2(x + 9.0, rect.center().y), vec2(10.0, 10.0)),
+            fg,
+        );
     }
     let name = if text.is_empty() { tip } else { text };
     let name = name.to_owned();

@@ -349,7 +349,6 @@ fn monitor_warning(
 }
 
 const INSPECTOR_W: f32 = 270.0;
-const SCALE_W: f32 = 28.0;
 
 /// The mixer (UI-VIS §8): a band of vertical strips (master first) and
 /// the inspector of the selected track on the right.
