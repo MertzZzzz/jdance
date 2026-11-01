@@ -1531,33 +1531,95 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
     }
 
     /// Options › MIDI settings: the input ports, Enable and Rescan (spec
-    /// 0.3.0 §12.1).
+    /// 0.3.0 §12.1); UI-RD §10.12 (board R5): a row per input with its
+    /// lamp and a switch.
     fn midi_window(&mut self, ctx: &egui::Context) {
         let mut open = true;
-        egui::Window::new("MIDI settings")
+        egui::Window::new(egui::RichText::new("MIDI settings").font(theme::strong(13.0)))
+            .id(egui::Id::unique("midi_settings"))
             .open(&mut open)
             .resizable(false)
             .show(ctx, |ui| {
-                ui.label(
-                    egui::RichText::new(
-                        "Enabled inputs play the open Piano Roll's channel, else the selected one \
-                         (all MIDI channels).",
-                    )
-                    .color(theme::MUTED),
-                );
+                ui.set_width(300.0);
                 let ports = self.host.midi_inputs();
+                let active = self.host.midi_active();
+                ui.horizontal(|ui| {
+                    widgets::caption(ui, "Inputs");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if widgets::button(
+                            ui,
+                            Some(icons::Glyph::Undo),
+                            "Rescan",
+                            false,
+                            widgets::Look::Raised,
+                            "Look for MIDI inputs again",
+                        )
+                        .clicked()
+                        {
+                            self.host.rescan_midi();
+                        }
+                    });
+                });
                 if ports.is_empty() {
-                    ui.label("No MIDI inputs found. Connect a device, then Rescan.");
+                    ui.label(
+                        egui::RichText::new("No MIDI inputs found. Connect a device, then Rescan.")
+                            .color(theme::MUTED),
+                    );
                 }
-                for (name, on) in ports {
-                    let mut enabled = on;
-                    if ui.checkbox(&mut enabled, &name).changed() {
-                        self.host.set_midi_input(&name, enabled);
-                    }
+                for (i, (name, on)) in ports.into_iter().enumerate() {
+                    widgets::card(ui, None, "", |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            // The lamp blinks with input on enabled ports.
+                            let (r, _) = ui
+                                .allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                            widgets::led(ui.painter(), r.center(), 3.5, on && active);
+                            ui.vertical(|ui| {
+                                ui.spacing_mut().item_spacing.y = 1.0;
+                                ui.label(egui::RichText::new(&name).color(if on {
+                                    theme::TEXT
+                                } else {
+                                    theme::MUTED
+                                }));
+                                let state = if on && active {
+                                    format!("MIDI {} · active", i + 1)
+                                } else if on {
+                                    format!("MIDI {}", i + 1)
+                                } else {
+                                    format!("MIDI {} · off", i + 1)
+                                };
+                                ui.label(egui::RichText::new(state).size(10.5).color(theme::DIM));
+                            });
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    let mut enabled = on;
+                                    if widgets::switch(ui, &mut enabled, theme::LED_ON, &name)
+                                        .changed()
+                                    {
+                                        self.host.set_midi_input(&name, enabled);
+                                    }
+                                },
+                            );
+                        });
+                    });
+                    ui.add_space(4.0);
                 }
-                if ui.button("Rescan").clicked() {
-                    self.host.rescan_midi();
-                }
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    let (r, _) =
+                        ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+                    icons::paint(ui, icons::Glyph::Help, r, theme::DIM);
+                    ui.label(
+                        egui::RichText::new(
+                            "Enabled inputs play the open Piano Roll's channel, else the one \
+                             selected in the Channel Rack (all MIDI channels). The toolbar dot \
+                             blinks on input.",
+                        )
+                        .size(11.0)
+                        .color(theme::MUTED),
+                    );
+                });
             });
         self.show_midi = open;
     }
@@ -5546,7 +5608,10 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
             if (o.open_sample_editor || o.reveal_sample)
                 && let Some(smp) = self.project.channel(w.channel).and_then(|c| c.sample())
             {
+                // Absolute: the editor resolves a relative file against
+                // the project folder once more.
                 let path = sample_editor::resolve(dir.as_deref(), smp);
+                let path = std::path::absolute(&path).unwrap_or(path);
                 if o.reveal_sample {
                     self.host.reveal_in_file_manager(&path);
                 } else {
