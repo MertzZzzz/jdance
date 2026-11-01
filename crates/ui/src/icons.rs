@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(dead_code)] // the whole R2 icon board; not every glyph has a button yet
 pub(crate) enum Glyph {
     // Transport and project.
     Play,

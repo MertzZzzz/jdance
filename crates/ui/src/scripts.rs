@@ -325,7 +325,7 @@ impl ScriptDialog {
                     );
                 }
                 ui.horizontal(|ui| {
-                    if ui.add_enabled(ready, egui::Button::new("Apply")).clicked()
+                    if crate::widgets::primary_button(ui, "Apply", ready).clicked()
                         && let Some((_, _, _, Ok(r))) = &self.result
                     {
                         let dropped = matches!(r, ScriptOutput::Notes(o) if o.dropped > 0);
@@ -336,7 +336,7 @@ impl ScriptDialog {
                             out.close = true;
                         }
                     }
-                    if ui.button("Cancel").clicked() {
+                    if crate::widgets::outline_button(ui, "Cancel").clicked() {
                         out.close = true;
                     }
                     if ui.button("Reset").clicked() {

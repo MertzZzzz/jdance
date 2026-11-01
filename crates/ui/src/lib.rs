@@ -731,14 +731,13 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             if blocked {
                 ui.colored_label(ui.visuals().warn_fg_color, "The playlist is empty.");
             }
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(!blocked, egui::Button::new("Export…"))
-                    .clicked()
-                {
+            ui.add_space(6.0);
+            // UI-RD §7: the main action amber, bottom right; Cancel outlined.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if widgets::primary_button(ui, "Export…", !blocked).clicked() {
                     choice = Some(true);
                 }
-                if ui.button("Cancel").clicked() {
+                if widgets::outline_button(ui, "Cancel").clicked() {
                     choice = Some(false);
                 }
             });
@@ -824,7 +823,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                     "Writing the file"
                 };
                 ui.add(egui::ProgressBar::new(f).text(format!("{stage} · {:.0}%", f * 100.0)));
-                if ui.button("Cancel").clicked() {
+                if crate::widgets::outline_button(ui, "Cancel").clicked() {
                     self.host.cancel_export();
                 }
             });
@@ -3019,7 +3018,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 if ui.button("Delete").clicked() {
                     choice = Some(true);
                 }
-                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                if crate::widgets::outline_button(ui, "Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                     choice = Some(false);
                 }
             });
@@ -3363,7 +3362,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 if ui.button("Truncate").clicked() {
                     choice = Some(true);
                 }
-                if ui.button("Cancel").clicked() {
+                if crate::widgets::outline_button(ui, "Cancel").clicked() {
                     choice = Some(false);
                 }
             });
@@ -3662,7 +3661,9 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 if ui.button("Turn loop off and record").clicked() {
                     choice = Some(true);
                 }
-                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
+                if crate::widgets::outline_button(ui, "Cancel").clicked()
+                    || ui.input(|i| i.key_pressed(Key::Escape))
+                {
                     choice = Some(false);
                 }
             });
@@ -4203,8 +4204,8 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             }
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                cancel |= ui.button("Cancel").clicked();
-                commit |= ui.button("Apply").clicked();
+                cancel |= crate::widgets::outline_button(ui, "Cancel").clicked();
+                commit |= widgets::primary_button(ui, "Apply", true).clicked();
             });
             if dialog.color != color_before && !commit {
                 dialog.color_manual = true;
@@ -4444,7 +4445,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             ui.label(egui::RichText::new("Undo restores all of it.").color(theme::MUTED));
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                cancel |= ui.button("Cancel").clicked();
+                cancel |= crate::widgets::outline_button(ui, "Cancel").clicked();
                 confirm |= ui
                     .button(egui::RichText::new("Delete").color(theme::ERROR))
                     .clicked();
@@ -4493,7 +4494,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 if ui.button("Discard").clicked() {
                     choice = Some(false);
                 }
-                if ui.button("Cancel").clicked() {
+                if crate::widgets::outline_button(ui, "Cancel").clicked() {
                     self.pending = None;
                 }
             });

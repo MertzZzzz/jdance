@@ -182,7 +182,7 @@ impl ToolDialog {
                             out.close = true;
                         }
                     }
-                    if ui.button("Cancel").clicked() {
+                    if crate::widgets::outline_button(ui, "Cancel").clicked() {
                         out.close = true;
                     }
                     if ui

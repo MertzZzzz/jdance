@@ -459,6 +459,7 @@ pub(crate) fn segmented<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
 
 /// Style of a button inside a group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // UI-RD §1.5 kit
 pub(crate) enum Look {
     /// Selected segment: `RAISED`.
     Raised,
@@ -721,6 +722,7 @@ pub(crate) fn chip(ui: &mut Ui, glyph: Option<Glyph>, text: &str, on: bool) -> R
 }
 
 /// A 28×16 switch; `color` when on.
+#[allow(dead_code)] // UI-RD §1.5 kit, for the dialogs still to be ported
 pub(crate) fn switch(ui: &mut Ui, on: &mut bool, color: Color32, label: &str) -> Response {
     let (rect, mut resp) = ui.allocate_exact_size(vec2(28.0, 16.0), Sense::click());
     if resp.clicked() {
@@ -749,6 +751,7 @@ pub(crate) fn switch(ui: &mut Ui, on: &mut bool, color: Color32, label: &str) ->
 }
 
 /// A switch with its label to the right.
+#[allow(dead_code)] // UI-RD §1.5 kit, for the dialogs still to be ported
 pub(crate) fn switch_row(ui: &mut Ui, on: &mut bool, color: Color32, label: &str) -> Response {
     ui.horizontal(|ui| {
         let r = switch(ui, on, color, label);
@@ -769,6 +772,7 @@ pub(crate) fn switch_row(ui: &mut Ui, on: &mut bool, color: Color32, label: &str
 }
 
 /// A key badge: Mono 9.5 on #171A1E, border #2F353D, radius 4.
+#[allow(dead_code)] // UI-RD §1.5 kit, for the dialogs still to be ported
 pub(crate) fn kbd(ui: &mut Ui, keys: &str) -> Response {
     let galley = ui
         .painter()
@@ -855,6 +859,7 @@ pub(crate) fn menu_item_on(
 
 /// A section card (UI-RD §1.3): `CARD` ground, `CARD_LINE` border, radius
 /// 9, padding 10; the title is a 12 px glyph and a caption.
+#[allow(dead_code)] // UI-RD §1.5 kit, for the dialogs still to be ported
 pub(crate) fn card<R>(
     ui: &mut Ui,
     glyph: Option<Glyph>,
@@ -1022,6 +1027,7 @@ pub(crate) fn divider(ui: &mut Ui, height: f32) {
 
 /// The frame of a dialog body; dialogs keep egui's title bar and use
 /// cards inside (UI-RD §7).
+#[allow(dead_code)] // UI-RD §1.5 kit, for the dialogs still to be ported
 pub(crate) fn dialog_buttons(
     ui: &mut Ui,
     primary: &str,
@@ -1067,6 +1073,7 @@ pub(crate) fn outline_button(ui: &mut Ui, text: &str) -> Response {
 }
 
 /// A destructive action: `ERROR`.
+#[allow(dead_code)] // UI-RD §1.5 kit, for the dialogs still to be ported
 pub(crate) fn danger_button(ui: &mut Ui, text: &str) -> Response {
     ui.add(
         egui::Button::new(egui::RichText::new(text).color(theme::ERROR))
@@ -1079,6 +1086,7 @@ pub(crate) fn danger_button(ui: &mut Ui, text: &str) -> Response {
 
 /// A dialog title row: glyph and title (inside `egui::Window` bodies whose
 /// own title bar is hidden).
+#[allow(dead_code)] // UI-RD §1.5 kit, for the dialogs still to be ported
 pub(crate) fn dialog_title(ui: &mut Ui, glyph: Glyph, title: &str) {
     ui.horizontal(|ui| {
         let (r, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());

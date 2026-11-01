@@ -193,7 +193,7 @@ impl RecordingPanel {
                             s.monitor = true;
                             self.confirm_monitor = false;
                         }
-                        if ui.button("Cancel").clicked() {
+                        if crate::widgets::outline_button(ui, "Cancel").clicked() {
                             self.confirm_monitor = false;
                         }
                     });

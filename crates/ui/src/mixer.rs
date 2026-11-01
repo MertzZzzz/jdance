@@ -341,7 +341,7 @@ fn monitor_warning(
                 view.monitor_warned = true;
                 view.confirm_monitor = None;
             }
-            if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            if crate::widgets::outline_button(ui, "Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                 view.confirm_monitor = None;
             }
         });

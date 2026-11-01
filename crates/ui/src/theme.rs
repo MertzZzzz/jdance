@@ -199,6 +199,8 @@ fn visuals() -> Visuals {
     w.active.fg_stroke = Stroke::new(1.0, TEXT);
     w.active.corner_radius = r;
     w.open = w.active;
+    w.open.bg_fill = RAISED;
+    w.open.weak_bg_fill = RAISED;
     v
 }
 

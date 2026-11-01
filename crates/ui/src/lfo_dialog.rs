@@ -191,13 +191,13 @@ impl LfoDialog {
                 }
                 ui.horizontal(|ui| {
                     let ok = points.is_ok() && self.target.is_some();
-                    if ui.add_enabled(ok, egui::Button::new("Apply")).clicked()
+                    if crate::widgets::primary_button(ui, "Apply", ok).clicked()
                         && let (Ok(p), Some(t)) = (points, self.target.clone())
                     {
                         out.apply = Some((t, p, self.range));
                         out.close = true;
                     }
-                    if ui.button("Cancel").clicked() {
+                    if crate::widgets::outline_button(ui, "Cancel").clicked() {
                         out.close = true;
                     }
                     if ui.button("Reset").clicked() {
