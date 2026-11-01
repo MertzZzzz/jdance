@@ -5193,6 +5193,20 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
             if o.free_track {
                 self.route_free(&[w.channel], now);
             }
+            // UI-RD §10.4: the channel's sample in the Sample Editor, or
+            // in its folder.
+            if (o.open_sample_editor || o.reveal_sample)
+                && let Some(smp) = self.project.channel(w.channel).and_then(|c| c.sample())
+            {
+                let path = sample_editor::resolve(dir.as_deref(), smp);
+                if o.reveal_sample {
+                    self.host.reveal_in_file_manager(&path);
+                } else {
+                    self.sample_editor = Some(sample_editor::SampleEditor::new(
+                        sample_editor::Target::File(path),
+                    ));
+                }
+            }
             let first = self.project.channel_clips(w.channel).next().map(|c| c.id);
             if o.open_clip_editor
                 && let Some(id) = first

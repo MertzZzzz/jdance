@@ -517,7 +517,7 @@ fn trimmed(c: &AudioClip, asset: &AudioAsset, project: &Project, a: u64, b: u64)
     }
 }
 
-fn resolve(dir: Option<&Path>, s: &SampleRef) -> PathBuf {
+pub(crate) fn resolve(dir: Option<&Path>, s: &SampleRef) -> PathBuf {
     let p = Path::new(&s.path);
     match dir {
         Some(d) if p.is_relative() => d.join(p),
