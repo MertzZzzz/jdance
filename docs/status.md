@@ -645,3 +645,23 @@ Linux, тест окна редактора под Xvfb), clippy `-D warnings` �
 | §10.8 Обводка нот вне гаммы | PASS | без автотеста; счётчик в «Fit notes to scale» — не сделан |
 | §10.2, 10.3, 10.5, 10.7, 10.9–10.13 | — | не сделаны |
 | Windows MSI 0.4.0 | — | workflow `Release` |
+
+## Релиз 0.4.1 (редизайн завершён, [UI-RD](spec/ui-redesign-2026.md) §10)
+
+| Пункт | Статус | Артефакт / комментарий |
+|---|---|---|
+| §10.3 Swing: `Project.swing` 0–100 %, формат 21, миграция 20 → 21, сдвиг каждого второго шага в движке (рендер и экспорт тоже), ручка в шапке Channel Rack | PASS | `engine` тест `swing_delays_every_second_step_only`; `persistence` тест `swing_round_trips_and_v20_projects_have_none`; скриншот `after/main-window.png` |
+| §10.2 Посылы перетаскиванием канатика из выходного порта; правый клик по канатику — уровень, pre / post, удаление | PASS | `ui` тест `a_cable_dragged_onto_a_strip_reaches_only_a_new_valid_receiver`; вручную (Xvfb): посыл Kick → Reverb создан перетаскиванием |
+| §10.4 «Open in Sample Editor» и «Show in folder» для сэмпла канала | PASS | вручную (Xvfb), скриншот `after/sample-editor.png` |
+| §10.5 Перетаскиваемые точки ADSR | PASS | вручную (Xvfb), скриншот `after/sampler-envelope.png`; автотеста нет |
+| §4 Раскладка вкладок сэмплера по R3 (Sample, Channel, Instrument, Envelope) | PASS | скриншоты `after/sampler-*.png` |
+| §10.7 Предпросмотр Tools при наведении, Listen (пробел), A / B | PASS | `ui` тест `listening_plays_the_result_then_brings_the_project_back`; вручную (Xvfb) — `after/piano-tools-*.png`; на звук не проверялось (нет аудиоустройства) |
+| §10.8 Счётчик в «Fit notes to scale», окно Scale по R5 | PASS | скриншот `after/piano-scale.png` |
+| §10.9 Мини-обзор Sample Editor вместо ползунка Zoom, линейка в секундах | PASS | вручную (Xvfb): рамка и её края тянутся; Ctrl+колесо под Xvfb не проверено (xdotool не передаёт модификатор) |
+| §10.10 Automation Editor: шкала значений, всплывающее значение, LFO… | PASS | вручную (Xvfb), скриншот `after/automation-editor.png` |
+| §10.11 Строка файла в Export, уведомление «Exported … · Show in folder» | PASS | `ui` тест `the_export_file_sits_by_the_project_and_follows_the_range`; вручную (Xvfb): экспорт demo.wav и уведомление, `after/export.png` |
+| §10.12 MIDI settings: переключатель и лампа у каждого входа | PASS | по коду; без MIDI-устройства в Xvfb показывается пустой список |
+| §10.13 Audio settings: частота и буфер сегментами | PASS | скриншот `after/audio-settings.png` |
+| Диалоги R5: Plugins, Recording, Transpose | PASS | вручную (Xvfb) |
+| Каретка в Automation Editor | — | не сделана (см. известные ограничения v0.4.1) |
+| Windows MSI 0.4.1 | — | workflow `Release` |

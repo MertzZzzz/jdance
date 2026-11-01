@@ -1518,15 +1518,15 @@ fn envelope_tab(ui: &mut egui::Ui, ch: &Channel, out: &mut SettingsOutput) {
         );
     }
     painter.add(egui::Shape::line(pts.to_vec(), Stroke::new(2.0, color)));
-    for (text, at) in [
-        ("A", pts[0].x),
-        ("D", pts[1].x),
-        ("S · note held", (pts[2].x + pts[3].x) / 2.0),
-        ("R", pts[3].x),
-    ] {
+    // Each phase named under its segment, when there is room.
+    for (text, k) in [("A", 0usize), ("D", 1), ("S · note held", 2), ("R", 3)] {
+        let (a, b) = (pts[k].x, pts[k + 1].x);
+        if b - a < 8.0 * text.len() as f32 {
+            continue;
+        }
         painter.text(
-            pos2(at + 6.0, rect.bottom() - 8.0),
-            egui::Align2::LEFT_CENTER,
+            pos2((a + b) / 2.0, rect.bottom() - 8.0),
+            egui::Align2::CENTER_CENTER,
             text,
             theme::mono(9.0),
             theme::DIM,
