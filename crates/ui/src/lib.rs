@@ -3147,6 +3147,15 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
         if out.end_gesture {
             self.history.end_gesture();
         }
+        if let Some(id) = out.lfo
+            && let Some(lane) = self.project.automation_lane(id)
+        {
+            let end = u32::try_from(lane.length.max(1)).unwrap_or(u32::MAX);
+            self.lfo_dialog = Some(lfo_dialog::LfoDialog::for_source(
+                id,
+                jdance_commands::note_tools::Range { start: 0, end },
+            ));
+        }
     }
 
     fn project_action(&mut self, action: project_browser::ProjectAction, now: f64) {
