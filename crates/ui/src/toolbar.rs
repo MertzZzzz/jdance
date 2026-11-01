@@ -78,11 +78,12 @@ pub(crate) fn snap_name(ticks: u32, sig: TimeSignature) -> &'static str {
 /// a new signature when one is chosen.
 pub(crate) fn signature_field(ui: &mut egui::Ui, sig: TimeSignature) -> Option<TimeSignature> {
     let mut chosen = None;
+    // Inside the position display (UI-RD-011): no frame, mono 18.
     let button = ui
         .add(
-            egui::Button::new(egui::RichText::new(sig.to_string()).font(theme::mono(14.0)))
-                .fill(theme::FIELD)
-                .min_size(egui::vec2(44.0, 24.0)),
+            egui::Button::new(egui::RichText::new(sig.to_string()).font(theme::mono(18.0)))
+                .frame(false)
+                .min_size(egui::vec2(40.0, 22.0)),
         )
         .on_hover_text("Time signature of the project");
     egui::Popup::from_toggle_button_response(&button)

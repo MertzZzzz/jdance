@@ -39,6 +39,7 @@ pub(crate) enum MixerAction {
 
 #[derive(Debug, Default)]
 pub(crate) struct MixerOutput {
+    pub header: crate::widgets::HeaderOut,
     pub edits: Vec<(Edit, bool)>,
     pub end_gesture: bool,
     pub actions: Vec<MixerAction>,
@@ -97,6 +98,8 @@ pub(crate) struct MixerView {
     confirm_monitor: Option<TrackId>,
     /// What a drag in progress would name and colour (spec 0.2.5 §7).
     pub drop: Option<crate::drop_name::Dropped>,
+    /// Undock / Close in the header; the app sets them each frame.
+    pub window_buttons: crate::widgets::WindowButtons,
 }
 
 impl Default for MixerView {
@@ -107,6 +110,7 @@ impl Default for MixerView {
             monitor_warned: false,
             drop: None,
             confirm_monitor: None,
+            window_buttons: crate::widgets::WindowButtons::None,
         }
     }
 }
@@ -362,29 +366,66 @@ pub(crate) fn show(
     if mixer.track(view.selected).is_none() {
         view.selected = TrackId::MASTER;
     }
-    ui.horizontal(|ui| {
-        ui.strong("Mixer");
-        for (v, name) in [
-            (StripView::Compact, "Compact"),
-            (StripView::Wide, "Wide"),
-            (StripView::WideFx, "Wide + FX"),
-        ] {
-            ui.selectable_value(&mut view.view, v, name);
-        }
-        if mixer.tracks.len() < MAX_TRACKS && ui.button("+ Track").clicked() {
-            out.actions.push(MixerAction::AddTrack);
-        }
-        ui.label(
-            RichText::new(format!("output latency {}", latency.format(latency.total)))
-                .color(crate::theme::MUTED),
-        );
-        if latency.clamped {
-            ui.colored_label(
-                ui.visuals().warn_fg_color,
-                "delay compensation limit reached; some paths are not fully aligned",
-            );
-        }
-    });
+    // UI-RD §2.3: the panel header with the strip views, latency and
+    // + Track; Undock and Close on the right.
+    let buttons = view.window_buttons;
+    out.header = crate::widgets::panel_header(
+        ui,
+        crate::icons::Glyph::Mixer,
+        "Mixer",
+        &[],
+        buttons,
+        |ui| {
+            use crate::icons::Glyph as G;
+            crate::widgets::segmented(ui, |ui| {
+                for (v, g, name) in [
+                    (StripView::Compact, G::Mixer, "Compact"),
+                    (StripView::Wide, G::StepsView, "Wide"),
+                    (StripView::WideFx, G::FxSlots, "Wide + FX"),
+                ] {
+                    if crate::widgets::button(
+                        ui,
+                        Some(g),
+                        name,
+                        view.view == v,
+                        crate::widgets::Look::Raised,
+                        "",
+                    )
+                    .clicked()
+                    {
+                        view.view = v;
+                    }
+                }
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if mixer.tracks.len() < MAX_TRACKS
+                    && crate::widgets::button(
+                        ui,
+                        Some(G::New),
+                        "Track",
+                        false,
+                        crate::widgets::Look::Raised,
+                        "Add a mixer track",
+                    )
+                    .clicked()
+                {
+                    out.actions.push(MixerAction::AddTrack);
+                }
+                ui.label(
+                    RichText::new(latency.format(latency.total))
+                        .font(crate::theme::mono(10.5))
+                        .color(crate::theme::DIM),
+                )
+                .on_hover_text("Output latency (plugin delay compensation)");
+                let (r, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+                crate::icons::paint(ui, G::Pdc, r, crate::theme::DIM);
+                if latency.clamped {
+                    ui.colored_label(crate::theme::WARN, "delay compensation limit reached")
+                        .on_hover_text("Some paths are not fully aligned");
+                }
+            });
+        },
+    );
     let height = ui.available_height();
     ui.horizontal_top(|ui| {
         let band_w = (ui.available_width() - INSPECTOR_W - 12.0).max(200.0);

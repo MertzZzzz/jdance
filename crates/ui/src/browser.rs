@@ -47,12 +47,20 @@ enum Section {
     Assets,
     Automation,
     Effects,
-    History,
+}
+
+/// The Browser's tabs (UI-RD §2.1).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Tab {
+    #[default]
+    Files,
     Plugins,
+    History,
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct BrowserView {
+    pub tab: Tab,
     query: String,
     expanded: BTreeSet<PathBuf>,
     open: BTreeSet<Section>,
@@ -95,11 +103,58 @@ impl BrowserView {
         self.pressed = crate::widgets::pressed_in(ui, ui.max_rect());
         self.arrows(ui, host);
         self.shown = std::mem::take(&mut self.visible);
-        ui.add(
-            egui::TextEdit::singleline(&mut self.query)
-                .hint_text("Search samples")
-                .desired_width(f32::INFINITY),
-        );
+        // Tabs with glyphs: Files / Plugins / History (UI-RD §2.1).
+        ui.horizontal(|ui| {
+            use crate::icons::Glyph as G;
+            use crate::widgets::{Look, button};
+            ui.spacing_mut().item_spacing.x = 2.0;
+            for (tab, glyph, name) in [
+                (Tab::Files, G::Files, "Files"),
+                (Tab::Plugins, G::Plugins, "Plugins"),
+                (Tab::History, G::History, "History"),
+            ] {
+                if button(ui, Some(glyph), name, self.tab == tab, Look::Raised, "").clicked() {
+                    self.tab = tab;
+                }
+            }
+        });
+        ui.add_space(4.0);
+        match self.tab {
+            Tab::Files => {}
+            Tab::Plugins => {
+                let picked = crate::plugin_list::PluginList::show_kept(
+                    ui,
+                    "browser_plugins",
+                    host,
+                    crate::plugin_list::Scope::All,
+                    (ui.available_height() - 40.0).max(120.0),
+                );
+                if let Some(d) = picked.load {
+                    out.push(BrowserAction::LoadPlugin(d));
+                }
+                return out;
+            }
+            Tab::History => {
+                egui::ScrollArea::vertical()
+                    .id_salt("browser_history")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        if history.is_empty() {
+                            ui.label(RichText::new("No edits yet").size(11.5).color(theme::DIM));
+                        }
+                        for (k, label) in history.iter().enumerate() {
+                            if item(ui, label, 0)
+                                .on_hover_text("Click to undo back to before this edit")
+                                .clicked()
+                            {
+                                out.push(BrowserAction::UndoSteps(k + 1));
+                            }
+                        }
+                    });
+                return out;
+            }
+        }
+        search_field(ui, &mut self.query, "Search samples…");
         let library = host.library_folders();
         let favorites = host.favorite_folders();
         let details_h = if self.selected.is_some() { 250.0 } else { 0.0 };
@@ -178,7 +233,6 @@ impl BrowserView {
                     l.push(dir);
                     host.set_library_folders(l);
                 }
-                self.plugins(ui, host, &mut out);
                 heading(ui, "Locations");
                 match project_dir {
                     Some(d) => self.folder(ui, host, d, "Project folder", 0, &mut out),
@@ -276,8 +330,8 @@ impl BrowserView {
             (Section::Assets, "Audio assets", assets.len()),
             (Section::Automation, "Automation", p.automation.len()),
             (Section::Effects, "Effects", effects.len()),
-            (Section::History, "History", history.len()),
         ];
+        let _ = history;
         for (section, label, count) in rows {
             let open = self.open.contains(&section);
             if disclosure_row(ui, open, label, Some(count), 0).clicked() {
@@ -330,42 +384,7 @@ impl BrowserView {
                         item(ui, e, 1);
                     }
                 }
-                Section::History => {
-                    for (k, label) in history.iter().enumerate() {
-                        if item(ui, label, 1)
-                            .on_hover_text("Click to undo back to before this edit")
-                            .clicked()
-                        {
-                            out.push(BrowserAction::UndoSteps(k + 1));
-                        }
-                    }
-                }
-                Section::Plugins => {}
             }
-        }
-    }
-
-    fn plugins(&mut self, ui: &mut egui::Ui, host: &mut dyn Host, out: &mut Vec<BrowserAction>) {
-        let count = host.plugin_instruments().len() + host.plugin_effects().len();
-        let open = self.open.contains(&Section::Plugins);
-        if disclosure_row(ui, open, "Plugins", Some(count), 0).clicked() {
-            toggle(&mut self.open, Section::Plugins);
-        }
-        if !open {
-            return;
-        }
-        // Search and favorites (spec 0.2.5 §10): double click or Enter
-        // loads an instrument into a new channel, an effect into the
-        // selected mixer track.
-        let picked = crate::plugin_list::PluginList::show_kept(
-            ui,
-            "browser_plugins",
-            host,
-            crate::plugin_list::Scope::All,
-            320.0,
-        );
-        if let Some(d) = picked.load {
-            out.push(BrowserAction::LoadPlugin(d));
         }
     }
 
@@ -658,12 +677,34 @@ fn toggle<T: Ord>(set: &mut BTreeSet<T>, v: T) {
 
 fn heading(ui: &mut egui::Ui, text: &str) {
     ui.add_space(6.0);
-    ui.label(
-        RichText::new(text.to_uppercase())
-            .size(11.0)
-            .color(theme::MUTED)
-            .extra_letter_spacing(0.6),
-    );
+    ui.horizontal(|ui| {
+        ui.add_space(4.0);
+        crate::widgets::caption(ui, text);
+    });
+}
+
+/// A search field: `FIELD` ground, a search glyph, no inner frame.
+pub(crate) fn search_field(ui: &mut egui::Ui, query: &mut String, hint: &str) -> egui::Response {
+    egui::Frame::new()
+        .fill(theme::FIELD)
+        .stroke(Stroke::new(1.0, theme::LINE))
+        .corner_radius(6)
+        .inner_margin(egui::Margin::symmetric(8, 2))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                let (r, _) = ui.allocate_exact_size(vec2(12.0, 12.0), Sense::hover());
+                crate::icons::paint(ui, crate::icons::Glyph::Search, r, theme::DIM);
+                ui.add(
+                    egui::TextEdit::singleline(query)
+                        .hint_text(hint)
+                        .frame(egui::Frame::NONE)
+                        .desired_width(f32::INFINITY),
+                )
+            })
+            .inner
+        })
+        .inner
 }
 
 fn indent_label(ui: &mut egui::Ui, depth: usize, text: RichText) {

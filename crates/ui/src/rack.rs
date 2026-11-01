@@ -18,6 +18,7 @@
 //! Drawing collects edits into [`RackOutput`]; the caller applies them after
 //! the frame so the document is never borrowed mutably while drawn.
 
+use crate::widgets::Hint;
 use crate::widgets::{knob, lamp};
 use crate::{Host, SampleStatus, theme};
 use egui::{CornerRadius, Rect, RichText, Sense, Stroke, StrokeKind, pos2, vec2};
@@ -38,6 +39,8 @@ const WHEEL_VELOCITY: f32 = 0.05;
 
 #[derive(Debug, Default)]
 pub(crate) struct RackOutput {
+    /// The header's Undock / Close (UI-RD §10.1).
+    pub header: crate::widgets::HeaderOut,
     pub edits: Vec<(Edit, bool)>,
     pub end_gesture: bool,
     /// New channels to create: name and optional sample.
@@ -113,6 +116,8 @@ struct Paint {
 /// Rack state kept between frames.
 #[derive(Debug, Default)]
 pub(crate) struct RackView {
+    /// Undock / Close in the header; the app sets them each frame.
+    pub window_buttons: crate::widgets::WindowButtons,
     pub selection: BTreeSet<ChannelId>,
     /// Last clicked channel, the anchor of Shift ranges.
     anchor: Option<ChannelId>,
@@ -420,70 +425,117 @@ impl RackView {
         pattern: &Pattern,
         out: &mut RackOutput,
     ) {
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Channel Rack").font(theme::strong(14.0)));
-            ui.label(RichText::new(&pattern.name).color(theme::MUTED));
-            let per_bar = project.time_signature.steps_per_bar();
-            let bars = if pattern.length_steps.is_multiple_of(per_bar) {
-                format!("{}", pattern.length_steps / per_bar)
-            } else {
-                format!(
-                    "{:.2}",
-                    f64::from(pattern.length_steps) / f64::from(per_bar)
-                )
-            };
-            ui.label(
-                RichText::new(format!("{} steps · {bars} bar(s)", pattern.length_steps))
-                    .color(theme::MUTED),
-            );
-            if !self.selection.is_empty() {
+        use crate::icons::Glyph as G;
+        let per_bar = project.time_signature.steps_per_bar();
+        let bars = if pattern.length_steps.is_multiple_of(per_bar) {
+            format!("{}", pattern.length_steps / per_bar)
+        } else {
+            format!(
+                "{:.2}",
+                f64::from(pattern.length_steps) / f64::from(per_bar)
+            )
+        };
+        let bar_word = if bars == "1" { "bar" } else { "bars" };
+        let selected = self.selection.len();
+        let unused = project
+            .channels
+            .iter()
+            .filter(|c| c.is_audio() && project.channel_clips(c.id).next().is_none())
+            .count();
+        // UI-RD §3: Channel Rack › pattern, length, selection, filter,
+        // + Channel, clean up, Undock / Close.
+        out.header = crate::widgets::panel_header(
+            ui,
+            G::Rack,
+            "Channel Rack",
+            &[&pattern.name],
+            self.window_buttons,
+            |ui| {
                 ui.label(
-                    RichText::new(format!("{} selected", self.selection.len())).color(theme::BLUE),
+                    RichText::new(format!("{} st · {bars} {bar_word}", pattern.length_steps))
+                        .font(theme::mono(10.0))
+                        .color(theme::DIM),
                 );
-            }
-            egui::ComboBox::from_id_salt("rack_filter")
-                .width(96.0)
-                .selected_text(self.filter.name())
-                .show_ui(ui, |ui| {
-                    for f in [RackFilter::All, RackFilter::Instruments, RackFilter::Audio] {
-                        ui.selectable_value(&mut self.filter, f, f.name());
-                    }
-                })
-                .response
-                .on_hover_text("Show all channels, instruments only or audio channels only");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let unused = project
-                    .channels
-                    .iter()
-                    .filter(|c| c.is_audio() && project.channel_clips(c.id).next().is_none())
-                    .count();
-                if ui
-                    .add_enabled(unused > 0, egui::Button::new("Remove unused audio"))
-                    .on_hover_text(format!(
-                        "Remove the {unused} audio channel(s) without clips in the Playlist; \
-                         the files stay in the project"
-                    ))
-                    .clicked()
-                {
-                    out.remove_unused = true;
+                if selected > 0 {
+                    ui.label(
+                        RichText::new(format!("{selected} selected"))
+                            .size(11.0)
+                            .color(theme::BLUE),
+                    );
                 }
-                ui.menu_button("+ Channel", |ui| {
-                    if ui.button("Sampler channel").clicked() {
-                        out.new_channels
-                            .push((format!("Channel {}", project.channels.len() + 1), None));
-                        ui.close();
-                    }
-                    if ui.button("Sampler from a sample…").clicked() {
-                        out.pick = Some(crate::library::PickFor::NewChannel);
-                        ui.close();
-                    }
-                    if ui.button("Instrument (VST3)…").clicked() {
-                        out.pick_instrument = true;
-                        ui.close();
+                let filter = crate::widgets::chip(
+                    ui,
+                    Some(G::Filter),
+                    self.filter.name(),
+                    self.filter != RackFilter::All,
+                )
+                .hint("Show all channels, instruments only or audio channels only");
+                egui::Popup::menu(&filter).show(|ui| {
+                    for (f, g) in [
+                        (RackFilter::All, G::Rack),
+                        (RackFilter::Instruments, G::PianoRoll),
+                        (RackFilter::Audio, G::Sample),
+                    ] {
+                        if crate::widgets::menu_item(ui, Some(g), f.name(), "").clicked() {
+                            self.filter = f;
+                        }
                     }
                 });
-            });
-        });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    if ui
+                        .add_enabled_ui(unused > 0, |ui| {
+                            crate::icons::icon_button_sized(
+                                ui,
+                                G::CleanUp,
+                                false,
+                                &format!(
+                                    "Remove unused audio: the {unused} audio channel(s) without \
+                                     clips in the Playlist; the files stay in the project"
+                                ),
+                                egui::vec2(26.0, 24.0),
+                                14.0,
+                            )
+                        })
+                        .inner
+                        .clicked()
+                    {
+                        out.remove_unused = true;
+                    }
+                    let add = crate::widgets::button(
+                        ui,
+                        Some(G::New),
+                        "Channel",
+                        false,
+                        crate::widgets::Look::Raised,
+                        "Add a channel",
+                    );
+                    egui::Popup::menu(&add).show(|ui| {
+                        if crate::widgets::menu_item(ui, Some(G::Sample), "Sampler channel", "")
+                            .clicked()
+                        {
+                            out.new_channels
+                                .push((format!("Channel {}", project.channels.len() + 1), None));
+                        }
+                        if crate::widgets::menu_item(
+                            ui,
+                            Some(G::Files),
+                            "Sampler from a sample…",
+                            "",
+                        )
+                        .clicked()
+                        {
+                            out.pick = Some(crate::library::PickFor::NewChannel);
+                        }
+                        if crate::widgets::menu_item(ui, Some(G::Plugins), "Instrument (VST3)…", "")
+                            .clicked()
+                        {
+                            out.pick_instrument = true;
+                        }
+                    });
+                });
+            },
+        );
     }
 
     fn track_box(
