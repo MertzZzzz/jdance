@@ -39,6 +39,8 @@ pub(crate) struct PluginList {
     /// A single click loads (the picker window); otherwise it highlights
     /// and a double click loads (the Browser).
     pub click_loads: bool,
+    /// The key badge in the search field ("F8" in the picker).
+    pub badge: &'static str,
 }
 
 #[derive(Debug, Default)]
@@ -81,13 +83,36 @@ impl PluginList {
             prefs.kind = KindFilter::All;
         }
 
-        // Search field; Ctrl+F puts the focus into it (§10 item 4).
-        let field = ui.add(
-            egui::TextEdit::singleline(&mut self.text)
-                .id_salt((id, "search"))
-                .hint_text("Search plugins (Ctrl+F)")
-                .desired_width(f32::INFINITY),
-        );
+        // UI-RD §7 (board R5 · Plugins, picker): a framed search field
+        // with its key badge; Ctrl+F puts the focus into it (§10 item 4).
+        let field = egui::Frame::new()
+            .fill(theme::FIELD)
+            .stroke(egui::Stroke::new(1.0, theme::BLUE.gamma_multiply(0.7)))
+            .corner_radius(8)
+            .inner_margin(egui::Margin::symmetric(10, 6))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let (r, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
+                    crate::icons::paint(ui, crate::icons::Glyph::Search, r, theme::MUTED);
+                    let badge = if self.badge.is_empty() {
+                        "Ctrl+F"
+                    } else {
+                        self.badge
+                    };
+                    let room = ui.available_width() - 14.0 - 9.0 * badge.len() as f32;
+                    let field = ui.add(
+                        egui::TextEdit::singleline(&mut self.text)
+                            .id_salt((id, "search"))
+                            .hint_text("Search plugins")
+                            .frame(egui::Frame::NONE)
+                            .desired_width(room.max(60.0)),
+                    );
+                    crate::widgets::kbd(ui, badge);
+                    field
+                })
+                .inner
+            })
+            .inner;
         let ctrl_f = ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::F));
         // Asked until the field has it (a new window's first frame only
         // sizes it).
@@ -100,49 +125,61 @@ impl PluginList {
             self.selected = None;
         }
 
+        // Filters as chips.
         ui.horizontal_wrapped(|ui| {
+            use crate::icons::Glyph as G;
+            ui.spacing_mut().item_spacing.x = 5.0;
             if scope == Scope::All {
-                for (k, label) in [
-                    (KindFilter::All, "All"),
-                    (KindFilter::Instruments, "Instruments"),
-                    (KindFilter::Effects, "Effects"),
+                for (k, g, label) in [
+                    (KindFilter::All, G::Menu, "All"),
+                    (KindFilter::Instruments, G::Instrument, "Instruments"),
+                    (KindFilter::Effects, G::Eq, "Effects"),
                 ] {
-                    ui.selectable_value(&mut prefs.kind, k, label);
-                }
-                ui.separator();
-            }
-            for f in PluginFormat::ALL {
-                let mut on = !prefs.hidden_formats.contains(&f);
-                if ui.toggle_value(&mut on, f.label()).changed() {
-                    if on {
-                        prefs.hidden_formats.retain(|h| *h != f);
-                    } else {
-                        prefs.hidden_formats.push(f);
+                    if crate::widgets::chip(ui, Some(g), label, prefs.kind == k).clicked() {
+                        prefs.kind = k;
                     }
                 }
             }
-            ui.toggle_value(&mut prefs.only_favorites, "★ Favorites only");
+            if crate::widgets::chip(ui, Some(G::Favorite), "Favorites", prefs.only_favorites)
+                .clicked()
+            {
+                prefs.only_favorites = !prefs.only_favorites;
+            }
+            for f in PluginFormat::ALL {
+                let on = !prefs.hidden_formats.contains(&f);
+                if crate::widgets::chip(ui, None, f.label(), on)
+                    .on_hover_text("Show plugins of this format")
+                    .clicked()
+                {
+                    if on {
+                        prefs.hidden_formats.push(f);
+                    } else {
+                        prefs.hidden_formats.retain(|h| *h != f);
+                    }
+                }
+            }
         });
 
         let hits = search(&plugins, &prefs, &self.text);
-        ui.label(
-            RichText::new(format!("{} of {} found", hits.len(), plugins.len()))
-                .size(11.0)
-                .color(theme::MUTED),
-        );
 
         // Keys: arrows choose, Enter loads, Esc clears then closes.
         // Enter and Esc take the focus from the field this frame.
         let has_focus = field.has_focus() || field.lost_focus() || self.selected.is_some();
         if has_focus {
-            let (up, down, enter, esc) = ui.input_mut(|i| {
+            let (up, down, enter, esc, fav) = ui.input_mut(|i| {
                 (
                     i.consume_key(egui::Modifiers::NONE, Key::ArrowUp),
                     i.consume_key(egui::Modifiers::NONE, Key::ArrowDown),
                     i.key_pressed(Key::Enter),
                     i.consume_key(egui::Modifiers::NONE, Key::Escape),
+                    i.consume_key(egui::Modifiers::COMMAND, Key::D),
                 )
             });
+            // Ctrl+D: the highlighted plugin in or out of the favorites.
+            if fav && let Some(h) = self.selected.and_then(|s| hits.get(s)) {
+                let d = plugins[h.index].clone();
+                prefs.toggle_favorite(&d);
+            }
             if down && !hits.is_empty() {
                 self.selected = Some(self.selected.map_or(0, |s| (s + 1).min(hits.len() - 1)));
             }
@@ -222,7 +259,11 @@ impl PluginList {
                 }));
             }
             if !hits.is_empty() {
-                rows.push(Row::Heading("All plugins"));
+                rows.push(Row::Heading(match scope {
+                    Scope::Instruments => "Instruments",
+                    Scope::Effects => "Effects",
+                    Scope::All => "All plugins",
+                }));
             }
         }
         rows.extend(hits.iter().enumerate().map(|(i, h)| Row::Plugin {
@@ -249,8 +290,8 @@ impl PluginList {
                 for row in &rows {
                     match row {
                         Row::Heading(h) => {
-                            ui.add_space(4.0);
-                            ui.label(RichText::new(*h).strong().size(11.0).color(theme::MUTED));
+                            ui.add_space(6.0);
+                            crate::widgets::caption(ui, h);
                         }
                         Row::Plugin {
                             d,
@@ -325,8 +366,29 @@ impl PluginList {
             self.text.clear();
         }
         if !typed && has_favorites {
-            ui.checkbox(&mut prefs.favorites_alphabetical, "Sort favorites by name");
+            crate::widgets::switch_row(
+                ui,
+                &mut prefs.favorites_alphabetical,
+                theme::AMBER,
+                "Sort favorites by name",
+            );
         }
+        // The keys, as on the board.
+        ui.separator();
+        ui.horizontal(|ui| {
+            for (k, t) in [("↑↓", "choose"), ("Enter", "add"), ("Ctrl+D", "favorite")] {
+                ui.label(RichText::new(k).font(theme::mono(10.0)).color(theme::MUTED));
+                ui.label(RichText::new(t).size(10.5).color(theme::DIM));
+                ui.add_space(6.0);
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    RichText::new(format!("{} of {}", hits.len(), plugins.len()))
+                        .font(theme::mono(10.0))
+                        .color(theme::DIM),
+                );
+            });
+        });
         if let Some(d) = toggle {
             prefs.toggle_favorite(&d);
         }
@@ -400,8 +462,9 @@ struct RowResponse {
     star: bool,
 }
 
-/// A plugin: star (on hover, always for favorites), the name with the
-/// matched part highlighted, vendor and kind.
+/// A plugin row (board R5 · picker): kind glyph, the name with the typed
+/// part in amber, the vendor on the right and the star at the end
+/// (filled for favorites).
 fn plugin_row(
     ui: &mut egui::Ui,
     d: &PluginDescriptor,
@@ -410,40 +473,70 @@ fn plugin_row(
     selected: bool,
 ) -> RowResponse {
     let (rect, row) =
-        ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::click_and_drag());
+        ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click_and_drag());
     // Instruments drag onto the Channel Rack.
     if d.kind == PluginKind::Instrument {
         row.dnd_set_drag_payload(crate::browser::BrowserItem::Instrument(d.clone()));
     }
     if selected {
-        ui.painter().rect_filled(rect, 4.0, theme::BLUE_BG);
+        ui.painter().rect_filled(rect, 6.0, theme::BLUE_BG);
     } else if row.hovered() {
-        ui.painter().rect_filled(rect, 4.0, theme::RAISED);
+        ui.painter().rect_filled(rect, 6.0, theme::RAISED);
     }
-    let star_rect = egui::Rect::from_min_size(rect.min + vec2(2.0, 1.0), vec2(20.0, 20.0));
+    let (glyph, color) = match d.kind {
+        PluginKind::Instrument => (crate::icons::Glyph::Instrument, theme::AMBER),
+        PluginKind::Effect => (crate::icons::Glyph::Lfo, theme::TEAL),
+    };
+    crate::icons::paint_with(
+        ui.painter(),
+        glyph,
+        egui::Rect::from_center_size(rect.left_center() + vec2(16.0, 0.0), vec2(14.0, 14.0)),
+        color,
+    );
+    let star_rect =
+        egui::Rect::from_center_size(rect.right_center() - vec2(16.0, 0.0), vec2(22.0, 22.0));
     let star = ui.interact(star_rect, row.id.with("star"), Sense::click());
-    if favorite || row.hovered() || star.hovered() {
-        ui.painter().text(
-            star_rect.center(),
-            egui::Align2::CENTER_CENTER,
-            if favorite { "★" } else { "☆" },
-            FontId::proportional(13.0),
-            if favorite { theme::AMBER } else { theme::MUTED },
-        );
+    let star_color = if favorite {
+        theme::AMBER
+    } else if star.hovered() {
+        theme::TEXT
+    } else {
+        theme::DIM
+    };
+    crate::icons::paint_with(
+        ui.painter(),
+        crate::icons::Glyph::Favorite,
+        star_rect.shrink(4.0),
+        star_color,
+    );
+    if favorite {
+        ui.painter()
+            .circle_filled(star_rect.center(), 2.5, theme::AMBER);
     }
     let star_clicked = star
         .on_hover_text(if favorite {
-            "Remove from favorites"
+            "Remove from favorites (Ctrl+D)"
         } else {
-            "Add to favorites"
+            "Add to favorites (Ctrl+D)"
         })
         .clicked();
+    // The vendor, right-aligned before the star.
+    let vendor = crate::widgets::fit_galley(
+        ui.painter(),
+        d.plugin.vendor.clone(),
+        FontId::proportional(11.0),
+        theme::MUTED,
+        (rect.width() * 0.35).max(40.0),
+    );
+    let vendor_x = star_rect.left() - 8.0 - vendor.size().x;
+    ui.painter().galley(
+        egui::pos2(vendor_x, rect.center().y - vendor.size().y / 2.0),
+        vendor,
+        theme::MUTED,
+    );
     let font = FontId::proportional(12.5);
     let plain = TextFormat::simple(font.clone(), theme::TEXT);
-    let mark = TextFormat {
-        background: theme::AMBER.gamma_multiply(0.35),
-        ..plain.clone()
-    };
+    let mark = TextFormat::simple(crate::theme::strong(12.5), theme::AMBER);
     let mut job = LayoutJob::default();
     let chars: Vec<char> = d.plugin.name.chars().collect();
     let mut i = 0;
@@ -457,22 +550,14 @@ fn plugin_row(
         i = b;
     }
     job.append(&chars[i..].iter().collect::<String>(), 0.0, plain);
-    job.append(
-        &format!(
-            "  {} · {}",
-            d.plugin.vendor,
-            match d.kind {
-                PluginKind::Instrument => "instrument",
-                PluginKind::Effect => "effect",
-            }
-        ),
-        0.0,
-        TextFormat::simple(FontId::proportional(11.0), theme::MUTED),
-    );
-    job.wrap = egui::text::TextWrapping::truncate_at_width(rect.width() - 30.0);
+    let name_x = rect.left() + 32.0;
+    job.wrap = egui::text::TextWrapping::truncate_at_width((vendor_x - name_x - 10.0).max(30.0));
     let galley = ui.fonts_mut(|f| f.layout_job(job));
-    ui.painter()
-        .galley(rect.min + vec2(24.0, 4.0), galley, Color32::WHITE);
+    ui.painter().galley(
+        egui::pos2(name_x, rect.center().y - galley.size().y / 2.0),
+        galley,
+        Color32::WHITE,
+    );
     row.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &d.plugin.name));
     RowResponse {
         row: row.on_hover_text(&d.path),
