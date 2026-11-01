@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>R5 · Export audio</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#2B3038}
+button{font-family:inherit;cursor:pointer}
+input{font-family:inherit}
+</style>
+</helmet>
+<div style="width:1040px;height:620px;box-sizing:border-box;background:#2B3038;padding:20px;font-family:'IBM Plex Sans',sans-serif;font-size:12px;color:#E9ECEF;display:flex;gap:20px;align-items:flex-start">
+
+<!-- Export dialog -->
+<div style="width:560px;height:580px;flex:none;display:flex;flex-direction:column;border-radius:10px;overflow:hidden;background:#171A1E;border:1px solid #39404A;box-shadow:0 18px 50px rgba(0,0,0,.5)">
+<div style="height:38px;flex:none;display:flex;align-items:center;gap:8px;padding:0 6px 0 14px;background:#13161A;border-bottom:1px solid #2A3037">
+<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="#A7AFB8" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M8 2v8M5 7l3 3 3-3M3 11v3h10v-3"></path></svg>
+<span style="font-weight:600;font-size:13px">Export audio</span>
+<div style="flex:1"></div>
+<button aria-label="Close" style="width:26px;height:26px;border:0;border-radius:6px;background:transparent;display:flex;align-items:center;justify-content:center"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="#A7AFB8" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"></path></svg></button>
+</div>
+<div style="flex:1;padding:14px;display:flex;flex-direction:column;gap:12px">
+<!-- Range -->
+<div style="display:flex;flex-direction:column;gap:6px">
+<span style="font-size:10px;letter-spacing:1px;color:#7E8792">RANGE</span>
+<div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px">
+<sc-for list="{{ranges}}" as="r" hint-placeholder-count="3">
+<button title="{{r.meta}}" style="{{r.style}}"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="{{r.color}}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex:none"><path d="{{r.path}}"></path></svg><span style="font-weight:500;color:{{r.color}}">{{r.name}}</span><span style="margin-left:auto;font-family:'IBM Plex Mono',monospace;font-size:10px;color:#7E8792;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{r.meta}}</span></button>
+</sc-for>
+</div>
+</div>
+<!-- Length summary -->
+<div style="display:flex;align-items:center;gap:14px;padding:10px 12px;border-radius:9px;background:#13161A;border:1px solid #22272D">
+<div style="flex:1;height:24px;border-radius:5px;background:#0F1215;position:relative;overflow:hidden">
+<div style="position:absolute;left:0;width:78%;top:0;bottom:0;background:rgba(245,181,68,.35);border-right:2px solid #F5B544"></div>
+<div style="position:absolute;left:78%;width:12%;top:0;bottom:0;background:repeating-linear-gradient(45deg,rgba(245,181,68,.18) 0 4px,transparent 4px 8px)"></div>
+<span style="position:absolute;left:8px;top:5px;font-size:10.5px;color:#E9ECEF">Song · 32 bars</span>
+<span style="position:absolute;left:79%;top:5px;font-size:10.5px;color:#C8913A">tail</span>
+</div>
+<div style="display:flex;align-items:center;gap:6px" title="Effect tail after the end">
+<span style="font-size:11px;color:#A7AFB8">Tail</span>
+<span style="font-family:'IBM Plex Mono',monospace;height:26px;padding:0 8px;border-radius:6px;background:#0F1215;border:1px solid #2A3037;display:flex;align-items:center">5.0 s</span>
+</div>
+<span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:#A7AFB8">≈ 1:07</span>
+</div>
+<!-- Format -->
+<div style="display:flex;flex-direction:column;gap:6px">
+<span style="font-size:10px;letter-spacing:1px;color:#7E8792">FORMAT</span>
+<div style="display:flex;gap:8px">
+<div style="display:flex;background:#0F1215;border:1px solid #2A3037;border-radius:8px;padding:2px;gap:1px">
+<button style="height:30px;padding:0 16px;border:0;border-radius:6px;background:#1F3550;color:#E9ECEF;font-size:12px;font-weight:500;box-shadow:inset 0 0 0 1px #5AA9FF">WAV</button>
+<button style="height:30px;padding:0 16px;border:0;border-radius:6px;background:transparent;color:#A7AFB8;font-size:12px">MP3</button>
+</div>
+<button style="flex:1;height:34px;padding:0 10px;border:1px solid #39404A;border-radius:7px;background:#252A30;color:#E9ECEF;font-size:12px;display:flex;align-items:center;gap:8px"><span style="font-size:10.5px;color:#7E8792">Samples</span><span style="flex:1;text-align:left">24-bit integer</span><svg width="9" height="9" viewBox="0 0 10 10" aria-hidden="true"><path d="M2 4l3 3 3-3" stroke="#A7AFB8" stroke-width="1.4" fill="none"></path></svg></button>
+</div>
+<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:8px;border:1px dashed #2A3037;color:#5A626C;font-size:11px">
+<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="#5A626C" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M8 2a6 6 0 1 1 0 12A6 6 0 0 1 8 2zM8 7v4M8 4.8v.01"></path></svg>
+MP3 only: bitrate (kbit/s CBR, stereo), sample rate 44.1 / 48 kHz, Title and Artist tags
+</div>
+</div>
+<!-- File -->
+<div style="display:flex;flex-direction:column;gap:6px">
+<span style="font-size:10px;letter-spacing:1px;color:#7E8792">FILE</span>
+<div style="display:flex;align-items:center;gap:8px;height:34px;padding:0 6px 0 10px;border-radius:7px;background:#0F1215;border:1px solid #39404A">
+<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#A7AFB8" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M2 4h4l1.5 1.5H14V13H2z"></path></svg>
+<span style="flex:1;font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:#C9CFD6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">~/Music/jdance/demo.wav</span>
+<button style="height:26px;padding:0 9px;border:0;border-radius:6px;background:#252A30;color:#E9ECEF;font-size:11px">Change…</button>
+</div>
+</div>
+<div style="flex:1"></div>
+<div style="display:flex;align-items:center;gap:8px">
+<span style="font-size:10.5px;color:#7E8792">Renders offline, without an audio device</span>
+<div style="flex:1"></div>
+<button style="height:34px;padding:0 14px;border:1px solid #39404A;border-radius:7px;background:transparent;color:#E9ECEF;font-size:12px">Cancel</button>
+<button style="height:34px;padding:0 16px;border:0;border-radius:7px;background:#F5B544;color:#1B1405;font-size:12px;font-weight:600;display:flex;align-items:center;gap:6px"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#1B1405" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M8 2v8M5 7l3 3 3-3M3 11v3h10v-3"></path></svg>Export</button>
+</div>
+</div>
+</div>
+
+<!-- Progress -->
+<div style="display:flex;flex-direction:column;gap:16px">
+<div style="width:420px;display:flex;flex-direction:column;border-radius:10px;overflow:hidden;background:#171A1E;border:1px solid #39404A;box-shadow:0 18px 50px rgba(0,0,0,.5)">
+<div style="height:38px;display:flex;align-items:center;gap:8px;padding:0 14px;background:#13161A;border-bottom:1px solid #2A3037">
+<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="#F5B544" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M8 2v8M5 7l3 3 3-3M3 11v3h10v-3"></path></svg>
+<span style="font-weight:600;font-size:13px">Exporting</span>
+<span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:#7E8792;margin-left:auto">demo.wav</span>
+</div>
+<div style="padding:16px 14px;display:flex;flex-direction:column;gap:10px">
+<div style="height:10px;border-radius:5px;background:#0F1215;overflow:hidden"><div style="width:64%;height:10px;border-radius:5px;background:linear-gradient(90deg,#C8913A,#F5B544)"></div></div>
+<div style="display:flex;font-family:'IBM Plex Mono',monospace;font-size:11px;color:#A7AFB8"><span>bar 21 / 32 · 0:43 of 1:07</span><span style="margin-left:auto;color:#E9ECEF">64%</span></div>
+<div style="display:flex;justify-content:flex-end"><button style="height:30px;padding:0 12px;border:1px solid #39404A;border-radius:7px;background:transparent;color:#E9ECEF;font-size:12px;display:flex;align-items:center;gap:6px"><svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="#E9ECEF" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"></path></svg>Cancel</button></div>
+</div>
+</div>
+<!-- Done toast -->
+<div style="width:420px;display:flex;align-items:center;gap:10px;padding:12px 14px;border-radius:10px;background:#171A1E;border:1px solid rgba(95,168,107,.5);box-shadow:0 12px 30px rgba(0,0,0,.4)">
+<span style="width:28px;height:28px;border-radius:50%;background:rgba(95,168,107,.18);display:flex;align-items:center;justify-content:center"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#8FD19E" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8.5l3.5 3.5L13 4.5"></path></svg></span>
+<div style="display:flex;flex-direction:column;flex:1"><span style="font-weight:500">Exported demo.wav</span><span style="font-size:10.5px;color:#7E8792">1:07 · 48 kHz · 24-bit · 19.3 MB</span></div>
+<button style="height:28px;padding:0 10px;border:0;border-radius:6px;background:#252A30;color:#E9ECEF;font-size:11px">Show in folder</button>
+</div>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1040,"height":620}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const rb = (on, dis) => 'height:32px;min-width:0;padding:0 10px;border-radius:7px;font-size:12px;display:flex;align-items:center;gap:7px;' + (on ? 'background:#1F3550;border:1px solid #5AA9FF' : 'background:#252A30;border:1px solid #39404A') + (dis ? ';opacity:.45' : '');
+    const ranges = [
+      ['Song','32 bars','M2 4h6M10 4h4M2 8h3M7 8h7M2 12h8M12 12h2',true,false],
+      ['Pattern','Beat × 4','M2 2h5v5H2zM9 2h5v5H9zM2 9h5v5H2zM9 9h5v5H9z',false,false],
+      ['Selection','none','M2 2h3M7 2h2M11 2h3v3M14 7v2M14 11v3h-3M9 14H7M5 14H2v-3M2 9V7M2 5V2',false,true],
+    ].map(([name, meta, path, on, dis]) => ({ name, meta, path, style: rb(on, dis), color: on ? '#E9ECEF' : '#A7AFB8' }));
+    return { ranges };
+  }
+}
+</script>
+</body>
+</html>

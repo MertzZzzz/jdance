@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>R4 · Automation Editor</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#2B3038}
+button{font-family:inherit;cursor:pointer}
+input{font-family:inherit}
+</style>
+</helmet>
+<div style="width:1080px;height:520px;box-sizing:border-box;background:#2B3038;padding:20px;font-family:'IBM Plex Sans',sans-serif;font-size:12px;color:#E9ECEF;position:relative">
+<div style="width:1040px;height:480px;display:flex;flex-direction:column;border-radius:10px;overflow:hidden;background:#171A1E;border:1px solid #39404A;box-shadow:0 18px 50px rgba(0,0,0,.5)">
+
+<!-- Title bar -->
+<div style="height:34px;flex:none;display:flex;align-items:center;gap:8px;padding:0 6px 0 12px;background:#13161A;border-bottom:1px solid #2A3037">
+<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#3CC9B0" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="{{ic.auto}}"></path></svg>
+<span style="font-weight:600;font-size:13px">Automation</span>
+<span style="color:#7E8792">›</span><span>Filter sweep</span>
+<div style="flex:1"></div>
+<button aria-label="Dock" title="Dock back" style="width:26px;height:26px;border:0;border-radius:6px;background:transparent;display:flex;align-items:center;justify-content:center"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#A7AFB8" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ic.dock}}"></path></svg></button>
+<button aria-label="Close" style="width:26px;height:26px;border:0;border-radius:6px;background:transparent;display:flex;align-items:center;justify-content:center"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="#A7AFB8" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"></path></svg></button>
+</div>
+
+<!-- Header -->
+<div style="height:46px;flex:none;display:flex;align-items:center;gap:8px;padding:0 10px;border-bottom:1px solid #2A3037">
+<label style="display:flex;align-items:center;gap:6px;height:30px;padding:0 8px;border-radius:7px;background:#0F1215;border:1px solid #39404A">
+<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="#7E8792" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M2 14l1-3 7-7 2 2-7 7zM9 5l2 2"></path></svg>
+<input aria-label="Source name" value="Filter sweep" style="width:120px;background:transparent;border:0;outline:0;color:#E9ECEF;font-size:12px">
+</label>
+<span title="Automated parameter" style="display:flex;align-items:center;gap:7px;height:30px;padding:0 10px;border-radius:7px;background:rgba(60,201,176,.12);border:1px solid rgba(60,201,176,.45)">
+<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#3CC9B0" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M2 2v12h12M2 10c3 0 4-6 7-6s3 4 5 4"></path></svg>
+<span style="color:#3CC9B0;font-weight:500">Cutoff</span><span style="color:#7E8792">Bass · Insert 4 · Parametric EQ</span>
+</span>
+<div style="width:1px;height:22px;background:#2A3037;margin:0 2px"></div>
+<div title="Source length; clips show at most this range" style="display:flex;align-items:center;gap:6px;height:30px;padding:0 8px;border-radius:7px;background:#0F1215;border:1px solid #2A3037">
+<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="#7E8792" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M2 3v10M14 3v10M2 8h12"></path></svg>
+<span style="font-family:'IBM Plex Mono',monospace;font-size:12px">4</span><span style="font-size:11px;color:#7E8792">bars</span>
+</div>
+<button title="Snap (follows the toolbar grid; Alt — off)" style="height:30px;padding:0 9px;border:1px solid #39404A;border-radius:7px;background:#252A30;color:#E9ECEF;font-size:11.5px;display:flex;align-items:center;gap:6px"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#F5B544" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ic.magnet}}"></path></svg>Step</button>
+<div style="flex:1"></div>
+<button aria-label="LFO" title="Fill with an LFO shape…" style="height:30px;padding:0 9px;border:1px solid #39404A;border-radius:7px;background:#252A30;color:#E9ECEF;font-size:11.5px;display:flex;align-items:center;gap:6px"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#E9ECEF" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M1 8c1.7-5 3.3-5 5 0s3.3 5 5 0 2.3-3 4-3"></path></svg>LFO…</button>
+<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#7E8792" stroke-width="1.5" aria-hidden="true"><path d="{{ic.zoom}}"></path></svg>
+<div style="width:110px;height:4px;border-radius:2px;background:#252A30;position:relative"><span style="position:absolute;left:40px;top:-5px;width:14px;height:14px;border-radius:50%;background:#A7AFB8"></span></div>
+</div>
+
+<!-- Canvas -->
+<div style="flex:1;min-height:0;display:flex">
+<div style="width:52px;flex:none;display:flex;flex-direction:column;justify-content:space-between;padding:30px 6px 10px 0;text-align:right;font-family:'IBM Plex Mono',monospace;font-size:9.5px;color:#7E8792;border-right:1px solid #2A3037">
+<span>20k</span><span>2k</span><span>200</span><span>20 Hz</span>
+</div>
+<div style="flex:1;min-width:0;position:relative;overflow:hidden">
+<div style="height:24px;background:#13161A;border-bottom:1px solid #2A3037;position:relative">
+<sc-for list="{{bars}}" as="b" hint-placeholder-count="4"><span style="{{b.style}}">{{b.n}}</span></sc-for>
+</div>
+<div style="position:absolute;left:0;right:0;top:24px;bottom:0;background-image:repeating-linear-gradient(90deg,#39404A 0 1px,transparent 1px 240px),repeating-linear-gradient(90deg,#1D2126 0 1px,transparent 1px 60px),repeating-linear-gradient(0deg,#1A1E23 0 1px,transparent 1px 75px)"></div>
+<svg width="980" height="306" viewBox="0 0 980 306" role="img" aria-label="Automation envelope" style="position:absolute;left:0;top:24px">
+<defs><linearGradient id="af" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3CC9B0" stop-opacity=".28"></stop><stop offset="1" stop-color="#3CC9B0" stop-opacity="0"></stop></linearGradient></defs>
+<path d="M0 250 L120 250 L120 180 L300 120 C380 120 420 40 480 40 L600 40 L600 210 C700 210 760 90 840 90 L980 90 L980 306 L0 306 Z" fill="url(#af)"></path>
+<path d="M0 250 L120 250 L120 180 L300 120 C380 120 420 40 480 40 L600 40 L600 210 C700 210 760 90 840 90 L980 90" fill="none" stroke="#3CC9B0" stroke-width="2.5" stroke-linejoin="round"></path>
+<g fill="#171A1E" stroke="#3CC9B0" stroke-width="2"><circle cx="0" cy="250" r="5"></circle><circle cx="120" cy="180" r="5"></circle><circle cx="300" cy="120" r="5"></circle><circle cx="600" cy="40" r="5"></circle><circle cx="600" cy="210" r="5"></circle><circle cx="840" cy="90" r="5"></circle></g>
+<circle cx="480" cy="40" r="6.5" fill="#3CC9B0" stroke="#F2F4F6" stroke-width="2"></circle>
+<circle cx="390" cy="85" r="4" fill="#0F1215" stroke="#3CC9B0" stroke-width="1.5" stroke-dasharray="2 2"></circle>
+</svg>
+<!-- value tooltip -->
+<div style="position:absolute;left:494px;top:46px;padding:4px 8px;border-radius:6px;background:#0F1215;border:1px solid #3CC9B0;font-family:'IBM Plex Mono',monospace;font-size:11px;color:#E9ECEF">003:1:000 · 8.4 kHz</div>
+<!-- segment shape popup -->
+<div style="position:absolute;left:400px;top:120px;width:210px;padding:6px;background:#1E2227;border:1px solid #39404A;border-radius:9px;box-shadow:0 12px 32px rgba(0,0,0,.55);display:flex;flex-direction:column;gap:6px">
+<span style="font-size:9.5px;letter-spacing:1px;color:#7E8792;padding:2px 4px">SEGMENT SHAPE</span>
+<div style="display:flex;gap:4px">
+<sc-for list="{{shapes}}" as="s" hint-placeholder-count="3"><button style="{{s.style}}"><svg width="26" height="18" viewBox="0 0 26 18" fill="none" stroke="{{s.color}}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{s.path}}"></path></svg><span style="font-size:10.5px;color:{{s.color}}">{{s.name}}</span></button></sc-for>
+</div>
+<div style="display:flex;align-items:center;gap:8px;padding:2px 4px"><span style="font-size:10.5px;color:#A7AFB8">Tension</span><div style="flex:1;height:4px;border-radius:2px;background:#252A30;position:relative"><div style="position:absolute;left:50%;width:22%;height:4px;background:#3CC9B0;border-radius:2px"></div><span style="position:absolute;left:72%;top:-5px;width:14px;height:14px;margin-left:-7px;border-radius:50%;background:#E9ECEF"></span></div><span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px">+0.44</span></div>
+</div>
+<!-- caret -->
+<div title="Caret — playback starts here (click the ruler to move)" style="position:absolute;top:24px;bottom:0;left:240px;width:0;border-left:1px dashed #F5B544;opacity:.85"></div>
+<svg width="14" height="12" viewBox="0 0 14 12" role="img" aria-label="Caret" style="position:absolute;left:234px;top:12px"><path d="M1 1h12L7 11z" fill="#F5B544" stroke="#0E1013" stroke-width="1" stroke-linejoin="round"></path></svg>
+<!-- playhead -->
+<div style="position:absolute;top:0;bottom:0;left:690px;width:2px;background:#F2F4F6"></div>
+</div>
+</div>
+
+<!-- Footer hints with icons -->
+<div style="height:32px;flex:none;display:flex;align-items:center;gap:18px;padding:0 12px;border-top:1px solid #2A3037;font-size:10.5px;color:#7E8792">
+<sc-for list="{{hints}}" as="h" hint-placeholder-count="5"><span style="display:flex;align-items:center;gap:6px"><span style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;color:#C9CFD6;padding:1px 5px;border-radius:4px;background:#252A30;border:1px solid #39404A">{{h.key}}</span>{{h.text}}</span></sc-for>
+</div>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1080,"height":520}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const ic = {
+      auto: 'M1.5 12c3 0 3.5-8 6.5-8s3.5 6 6.5 6',
+      dock: 'M6 2H2v12h12v-4M14 2L8 8M8 4v4h4',
+      zoom: 'M7 2.5a4.5 4.5 0 1 1 0 9 4.5 4.5 0 1 1 0-9zM10.5 10.5L14 14M5 7h4M7 5v4',
+      magnet: 'M3.5 2.5v5.5a4.5 4.5 0 0 0 9 0V2.5h-3v5.5a1.5 1.5 0 0 1-3 0V2.5zM3.5 5.5h3M9.5 5.5h3',
+    };
+    const bars = [1,2,3,4,5].map((n, i) => ({ n: String(n), style: 'position:absolute;top:6px;left:' + (i * 240 + 4) + 'px;font-family:IBM Plex Mono,monospace;font-size:10.5px;color:#A7AFB8' }));
+    const sb = (on) => 'flex:1;height:48px;border-radius:7px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;' + (on ? 'background:rgba(60,201,176,.14);border:1px solid #3CC9B0' : 'background:#252A30;border:1px solid #39404A');
+    const shapes = [['Step','M2 15h8V3h14',false],['Linear','M2 15L24 3',false],['Curve','M2 15C14 15 14 3 24 3',true]].map(([name,path,on]) => ({ name, path, style: sb(on), color: on ? '#3CC9B0' : '#C9CFD6' }));
+    const hints = [['2×click','add / delete point'],['drag','move'],['RMB','delete · hold to sweep'],['RMB between','shape'],['Alt','no snap']].map(([key, text]) => ({ key, text }));
+    return { ic, bars, shapes, hints };
+  }
+}
+</script>
+</body>
+</html>

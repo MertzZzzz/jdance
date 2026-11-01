@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>R5 · Scale highlight</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#2B3038}
+button{font-family:inherit;cursor:pointer}
+</style>
+</helmet>
+<div style="width:1240px;height:780px;box-sizing:border-box;background:#2B3038;padding:20px;font-family:'IBM Plex Sans',sans-serif;font-size:12px;color:#E9ECEF;display:flex;gap:20px;align-items:flex-start">
+
+<!-- Piano roll with the scale highlighted -->
+<div style="width:820px;height:740px;flex:none;display:flex;flex-direction:column;border-radius:10px;overflow:hidden;background:#0E1013;border:1px solid #39404A">
+<div style="height:38px;flex:none;display:flex;align-items:center;gap:8px;padding:0 10px;background:#171A1E;border-bottom:1px solid #2A3037">
+<span style="font-weight:600;font-size:12.5px">Piano Roll</span><span style="color:#7E8792">›</span><span>Keys</span>
+<div style="flex:1"></div>
+<button title="Scale helper is on — click to change, right-click to turn off" style="height:26px;padding:0 9px;border:1px solid #6FCF97;border-radius:13px;background:rgba(111,207,151,.12);color:#9BE2B8;font-size:11.5px;display:flex;align-items:center;gap:6px"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="#9BE2B8" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 13h3v-3h3V7h3V4h3"></path></svg>C minor<svg width="9" height="9" viewBox="0 0 16 16" fill="none" stroke="#9BE2B8" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"></path></svg></button>
+</div>
+<div style="flex:1;display:flex;min-height:0">
+<div style="width:64px;flex:none;display:flex;flex-direction:column;padding-top:22px;border-right:1px solid #2A3037">
+<sc-for list="{{keys}}" as="k" hint-placeholder-count="37"><div style="{{k.style}}"><span style="{{k.dot}}"></span><span style="{{k.labelStyle}}">{{k.label}}</span></div></sc-for>
+</div>
+<div style="flex:1;position:relative;overflow:hidden">
+<div style="height:22px;background:#171A1E;border-bottom:1px solid #2A3037;position:relative"><sc-for list="{{bars}}" as="b" hint-placeholder-count="4"><span style="{{b.style}}">{{b.n}}</span></sc-for></div>
+<div style="position:absolute;left:0;right:0;top:22px;bottom:0"><sc-for list="{{rows}}" as="r" hint-placeholder-count="37"><div style="{{r.style}}"><span style="{{r.tagStyle}}">{{r.tag}}</span></div></sc-for></div>
+<div style="position:absolute;left:0;right:0;top:22px;bottom:0;background-image:repeating-linear-gradient(90deg,#39404A 0 1px,transparent 1px 188px),repeating-linear-gradient(90deg,rgba(255,255,255,.035) 0 1px,transparent 1px 47px)"></div>
+<sc-for list="{{notes}}" as="n" hint-placeholder-count="10"><div style="{{n.style}}">{{n.label}}</div></sc-for>
+<!-- off-scale hint -->
+<div style="position:absolute;left:{{warnX}}px;top:{{warnY}}px;padding:3px 8px;border-radius:6px;background:#171A1E;border:1px solid #FF9C8F;font-size:10.5px;color:#FF9C8F;display:flex;align-items:center;gap:5px"><svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="#FF9C8F" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M8 2l6.5 11.5h-13zM8 6.5v3.5M8 12h.01"></path></svg>E is outside C minor · Fit notes moves it to D#</div>
+</div>
+</div>
+<!-- legend -->
+<div style="height:30px;flex:none;display:flex;align-items:center;gap:16px;padding:0 12px;border-top:1px solid #2A3037;font-size:10.5px;color:#A7AFB8">
+<span style="display:flex;align-items:center;gap:6px"><span style="width:16px;height:9px;border-radius:2px;background:#242A48;box-shadow:inset 3px 0 0 #9AA5FF"></span>tonic</span>
+<span style="display:flex;align-items:center;gap:6px"><span style="width:16px;height:9px;border-radius:2px;background:#1A1D2C"></span>in scale</span>
+<span style="display:flex;align-items:center;gap:6px"><span style="width:16px;height:9px;border-radius:2px;background:#101215"></span>outside</span>
+<span style="display:flex;align-items:center;gap:6px"><span style="width:16px;height:9px;border-radius:2px;background:#F5B544;box-shadow:0 0 0 1.5px #FF9C8F"></span>note outside the scale</span>
+</div>
+</div>
+
+<!-- Scale dialog -->
+<div style="flex:1;display:flex;flex-direction:column;border-radius:10px;overflow:hidden;background:#171A1E;border:1px solid #39404A;box-shadow:0 18px 50px rgba(0,0,0,.5)">
+<div style="height:38px;display:flex;align-items:center;gap:8px;padding:0 6px 0 14px;background:#13161A;border-bottom:1px solid #2A3037">
+<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="#6FCF97" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 13h3v-3h3V7h3V4h3"></path></svg>
+<span style="font-weight:600;font-size:13px">Scale</span><span style="font-size:10.5px;color:#7E8792;padding:1px 5px;border:1px solid #39404A;border-radius:4px;font-family:'IBM Plex Mono',monospace">Alt+K</span>
+<div style="flex:1"></div>
+<button aria-label="Close" style="width:26px;height:26px;border:0;border-radius:6px;background:transparent;display:flex;align-items:center;justify-content:center"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="#A7AFB8" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"></path></svg></button>
+</div>
+<div style="padding:14px;display:flex;flex-direction:column;gap:14px">
+<div style="display:flex;flex-direction:column;gap:6px"><span style="font-size:9.5px;letter-spacing:1px;color:#7E8792">TONIC</span>
+<div style="display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:4px"><sc-for list="{{tonics}}" as="t" hint-placeholder-count="12"><button style="{{t.style}}">{{t.n}}</button></sc-for></div></div>
+<div style="display:flex;flex-direction:column;gap:6px"><span style="font-size:9.5px;letter-spacing:1px;color:#7E8792">MODE</span>
+<div style="display:flex;flex-direction:column;gap:2px;max-height:250px;overflow:hidden"><sc-for list="{{modes}}" as="m" hint-placeholder-count="11"><div style="{{m.style}}"><span style="flex:1">{{m.name}}</span><span style="display:flex;gap:2px">{{m.pattern}}</span></div></sc-for></div></div>
+<label style="display:flex;align-items:center;gap:10px;font-size:12px"><span style="width:30px;height:17px;border-radius:9px;background:#6FCF97;position:relative;display:inline-block"><span style="position:absolute;right:2px;top:2px;width:13px;height:13px;border-radius:50%;background:#0E1013"></span></span>Highlight keys of the scale</label>
+<div style="display:flex;gap:8px;margin-top:4px">
+<button title="Moves notes outside the scale to the nearest degree" style="flex:1;height:32px;border:1px solid #39404A;border-radius:7px;background:#252A30;color:#E9ECEF;font-size:12px;display:flex;align-items:center;justify-content:center;gap:6px"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#E9ECEF" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2v5M5 4.5L8 7l3-2.5M3 10h10M3 13h10"></path></svg>Fit notes to scale <span style="font-family:'IBM Plex Mono',monospace;color:#FF9C8F">1</span></button>
+<button style="height:32px;padding:0 16px;border:0;border-radius:7px;background:#F5B544;color:#1B1405;font-size:12px;font-weight:600">Close</button>
+</div>
+</div>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1240,"height":780}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const names = ['B','A#','A','G#','G','F#','F','E','D#','D','C#','C'];
+    const minor = ['C','D','D#','F','G','G#','A#']; // C natural minor
+    const H = 18, N = 37;
+    const keys = [], rows = [];
+    for (let i = 0; i < N; i++) {
+      const nm = names[i % 12], oct = 5 - Math.floor(i / 12), blk = nm.includes('#');
+      const inS = minor.includes(nm), tonic = nm === 'C';
+      keys.push({
+        label: nm + oct,
+        labelStyle: "font-family:'IBM Plex Mono',monospace;font-size:8.5px;padding-right:4px;margin-left:auto;" + (tonic ? 'color:#1D6B43;font-weight:600' : inS ? 'color:#3F7A5A' : 'color:#8A9097'),
+        dot: inS ? 'width:5px;height:5px;border-radius:50%;margin-left:' + (blk ? '40px' : '6px') + ';background:' + (tonic ? '#2E9E62' : '#6FCF97') : 'display:none',
+        style: 'height:' + H + 'px;box-sizing:border-box;display:flex;align-items:center;background:' + (blk ? 'linear-gradient(90deg,#15181B 0%,#262A30 52%,#1A1D21 60%,#C9CED4 64%,#DCE0E5 100%)' : 'linear-gradient(90deg,#C4C9CF 0%,#DCE0E5 35%,#E6E9ED 100%)') + ';box-shadow:inset 0 -1px 0 rgba(26,29,33,' + (tonic ? '.55' : '.14') + ')',
+      });
+      rows.push({
+        tag: tonic ? 'C · tonic' : '',
+        tagStyle: 'position:absolute;right:8px;font-family:IBM Plex Mono,monospace;font-size:9px;color:#8C96E8;line-height:' + H + 'px',
+        style: 'position:relative;height:' + H + 'px;box-sizing:border-box;border-bottom:1px solid ' + (tonic ? '#343B63' : 'rgba(26,29,33,.6)') + ';background:' + (tonic ? '#242A48;box-shadow:inset 3px 0 0 #9AA5FF' : inS ? '#1A1D2C' : '#101215'),
+      });
+    }
+    const bars = [1,2,3,4].map((n, i) => ({ n: String(n), style: 'position:absolute;top:5px;left:' + (i * 188 + 4) + 'px;font-family:IBM Plex Mono,monospace;font-size:10px;color:#A7AFB8' }));
+    const rowOf = (n, o) => (5 - o) * 12 + names.indexOf(n);
+    const st = 47;
+    const mk = (s, l, n, o, off) => ({ label: l >= 2 ? n + o : '', style: 'position:absolute;box-sizing:border-box;border-radius:3px;font-family:IBM Plex Mono,monospace;font-size:9px;padding-left:4px;line-height:' + (H - 4) + 'px;color:#1B1405;background:#F5B544;top:' + (22 + rowOf(n, o) * H + 1) + 'px;left:' + (s * st + 1) + 'px;width:' + (l * st - 2) + 'px;height:' + (H - 2) + 'px;' + (off ? 'box-shadow:0 0 0 2px #FF9C8F' : 'border:1px solid #FFD58A') });
+    const notes = [mk(0,4,'C',4), mk(0,4,'D#',4), mk(0,4,'G',4), mk(4,4,'G#',3), mk(4,4,'C',4), mk(4,4,'D#',4), mk(8,2,'A#',3), mk(10,2,'D',4), mk(12,3,'E',4,true), mk(12,3,'G',4)];
+    const warnX = 12 * st - 286, warnY = 22 + rowOf('E', 4) * H - 4;
+    const tb = (on) => 'height:30px;border-radius:6px;font-family:IBM Plex Mono,monospace;font-size:11.5px;' + (on ? 'border:1px solid #6FCF97;background:rgba(111,207,151,.16);color:#9BE2B8' : 'border:1px solid #39404A;background:#252A30;color:#C9CFD6');
+    const tonics = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'].map((n) => ({ n, style: tb(n === 'C') }));
+    const mb = (on) => 'display:flex;align-items:center;gap:8px;height:24px;padding:0 8px;border-radius:5px;font-size:11.5px;' + (on ? 'background:rgba(111,207,151,.14);color:#E9ECEF;box-shadow:inset 2px 0 0 #6FCF97' : 'color:#A7AFB8');
+    const modes = [['Major','2 2 1 2 2 2 1'],['Minor','2 1 2 2 1 2 2'],['Harmonic minor','2 1 2 2 1 3 1'],['Dorian','2 1 2 2 2 1 2'],['Phrygian','1 2 2 2 1 2 2'],['Lydian','2 2 2 1 2 2 1'],['Mixolydian','2 2 1 2 2 1 2'],['Locrian','1 2 2 1 2 2 2'],['Pentatonic major','2 2 3 2 3'],['Pentatonic minor','3 2 2 3 2'],['Blues','3 2 1 1 3 2']]
+      .map(([name, pattern]) => ({ name, pattern, style: mb(name === 'Minor') + ';font-variant-numeric:tabular-nums' }));
+    return { keys, rows, bars, notes, warnX, warnY, tonics, modes };
+  }
+}
+</script>
+</body>
+</html>

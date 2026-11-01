@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>C · Workspaces</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#121212}
+a{color:#8CC8F0}a:hover{color:#B5DBF5}
+button{font-family:inherit;cursor:pointer}
+</style>
+</helmet>
+<div style="width:1440px;height:900px;box-sizing:border-box;background:#121212;color:#ECEAE6;font-family:'IBM Plex Sans',sans-serif;font-size:12.5px;display:flex;flex-direction:column;overflow:hidden">
+
+<!-- One header row -->
+<div style="height:50px;flex:none;display:grid;grid-template-columns:1fr auto 1fr;align-items:center;padding:0 12px;background:#181817;border-bottom:1px solid #2B2A28">
+<div style="display:flex;align-items:center;gap:10px">
+<button aria-label="Main menu" style="width:32px;height:32px;border:0;border-radius:8px;background:#242322;display:flex;align-items:center;justify-content:center"><svg width="14" height="14" viewBox="0 0 14 14" stroke="#ECEAE6" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M2 3.5h10M2 7h10M2 10.5h10"></path></svg></button>
+<div style="display:flex;flex-direction:column;line-height:1.2">
+<span style="font-weight:600">demo.jdance <span style="color:#FFC27A">•</span></span>
+<span style="font-size:10.5px;color:#8E8A84">124 BPM · 4/4 · 48 kHz</span>
+</div>
+<div style="width:1px;height:26px;background:#2B2A28;margin:0 4px"></div>
+<button aria-label="Play" style="width:36px;height:32px;border:0;border-radius:8px;background:#F5B544;display:flex;align-items:center;justify-content:center"><svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 1v10L11 6z" fill="#1B1405"></path></svg></button>
+<button aria-label="Stop" style="width:36px;height:32px;border:0;border-radius:8px;background:#242322;display:flex;align-items:center;justify-content:center"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><rect width="10" height="10" rx="1.5" fill="#ECEAE6"></rect></svg></button>
+<button aria-label="Record" style="width:36px;height:32px;border:0;border-radius:8px;background:#242322;display:flex;align-items:center;justify-content:center"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><circle cx="5" cy="5" r="4.5" fill="#FF8A7A"></circle></svg></button>
+<span style="font-family:'IBM Plex Mono',monospace;font-size:18px;color:#F5B544;margin-left:6px">001:3:000</span>
+</div>
+<!-- workspace tabs -->
+<div style="display:flex;background:#0E0E0D;border:1px solid #2B2A28;border-radius:10px;padding:3px;gap:2px">
+<sc-for list="{{spaces}}" as="s" hint-placeholder-count="3">
+<button style="{{s.style}}">{{s.name}}<span style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;color:#8E8A84;margin-left:8px">{{s.key}}</span></button>
+</sc-for>
+</div>
+<div style="display:flex;align-items:center;gap:10px;justify-content:flex-end">
+<div style="display:flex;background:#0E0E0D;border:1px solid #2B2A28;border-radius:8px;padding:2px">
+<button style="height:26px;padding:0 10px;border:0;border-radius:6px;background:#2E2D2B;color:#ECEAE6;font-size:11.5px">Pattern</button>
+<button style="height:26px;padding:0 10px;border:0;border-radius:6px;background:transparent;color:#8E8A84;font-size:11.5px">Song</button>
+</div>
+<button style="height:30px;padding:0 10px;border:0;border-radius:8px;background:#242322;color:#ECEAE6;font-size:12px;display:flex;align-items:center;gap:6px"><span style="width:9px;height:9px;border-radius:2px;background:#C9774F"></span>Beat ▾</button>
+<span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:#8E8A84">DSP 18%</span>
+<button aria-label="Command palette" style="height:30px;padding:0 10px;border:1px solid #2B2A28;border-radius:8px;background:transparent;color:#8E8A84;font-size:11.5px;display:flex;align-items:center;gap:6px"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="#8E8A84" stroke-width="1.4" aria-hidden="true"><circle cx="5" cy="5" r="3.5"></circle><path d="M8 8l3 3"></path></svg>Ctrl K</button>
+</div>
+</div>
+
+<!-- Pattern workspace: rack + piano roll -->
+<div style="flex:1;min-height:0;display:flex">
+<!-- Rack column -->
+<div style="width:380px;flex:none;background:#181817;border-right:1px solid #2B2A28;display:flex;flex-direction:column">
+<div style="height:40px;flex:none;display:flex;align-items:center;gap:8px;padding:0 12px">
+<span style="font-weight:600">Channels</span>
+<span style="font-size:11px;color:#8E8A84">5</span>
+<div style="flex:1"></div>
+<button style="height:26px;padding:0 10px;border:0;border-radius:7px;background:#242322;color:#ECEAE6;font-size:11.5px">+ Add</button>
+</div>
+<div style="padding:0 8px;display:flex;flex-direction:column;gap:4px">
+<sc-for list="{{channels}}" as="c" hint-placeholder-count="5">
+<div style="{{c.card}}">
+<div style="display:flex;align-items:center;gap:8px">
+<span style="{{c.dot}}"></span>
+<span style="font-weight:500;flex:1">{{c.name}}</span>
+<span style="font-size:10px;color:#8E8A84">{{c.kind}}</span>
+<span style="font-family:'IBM Plex Mono',monospace;font-size:10px;padding:1px 5px;border-radius:4px;background:#0E0E0D;color:#B8B4AE">→ {{c.track}}</span>
+<span style="{{c.led}}"></span>
+</div>
+<div style="display:flex;gap:2px;margin-top:7px">
+<sc-for list="{{c.steps}}" as="s" hint-placeholder-count="16"><span style="{{s.style}}"></span></sc-for>
+</div>
+</div>
+</sc-for>
+</div>
+<div style="margin-top:auto;padding:10px 12px;border-top:1px solid #2B2A28;display:flex;gap:6px;align-items:center;font-size:11px;color:#8E8A84">
+<span>Swing</span><div style="flex:1;height:4px;border-radius:2px;background:#2E2D2B"><div style="width:20%;height:4px;border-radius:2px;background:#B8B4AE"></div></div><span style="font-family:'IBM Plex Mono',monospace;color:#ECEAE6">20%</span>
+</div>
+</div>
+
+<!-- Piano roll -->
+<div style="flex:1;min-width:0;display:flex;flex-direction:column;background:#121212">
+<div style="height:40px;flex:none;display:flex;align-items:center;gap:8px;padding:0 12px;border-bottom:1px solid #2B2A28;background:#181817">
+<span style="font-weight:600">Piano Roll</span>
+<button style="height:26px;padding:0 8px;border:0;border-radius:7px;background:#242322;color:#ECEAE6;font-size:12px;display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:2px;background:#C9A94F"></span>Bass ▾</button>
+<div style="display:flex;gap:2px;background:#0E0E0D;border-radius:7px;padding:2px;margin-left:8px">
+<sc-for list="{{tools}}" as="t" hint-placeholder-count="4"><button aria-label="{{t.name}}" title="{{t.name}} ({{t.key}})" style="{{t.style}}"><svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="{{t.color}}" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="{{t.path}}"></path></svg></button></sc-for>
+</div>
+<button style="height:26px;padding:0 10px;border:0;border-radius:7px;background:#242322;color:#ECEAE6;font-size:11.5px">Tools ▾</button>
+<div style="flex:1"></div>
+<span style="font-size:11px;color:#8E8A84">Snap</span>
+<span style="height:24px;padding:0 8px;display:flex;align-items:center;background:#0E0E0D;border-radius:6px;font-size:11.5px">1/4 step</span>
+</div>
+<div style="flex:1;min-height:0;display:flex">
+<!-- keys -->
+<div style="width:56px;flex:none;display:flex;flex-direction:column;border-right:1px solid #2B2A28">
+<div style="height:24px;background:#181817;border-bottom:1px solid #2B2A28"></div>
+<sc-for list="{{keys}}" as="k" hint-placeholder-count="30"><div style="{{k.style}}"><span style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:#5A5650;padding-right:4px">{{k.label}}</span></div></sc-for>
+</div>
+<div style="flex:1;min-width:0;position:relative;overflow:hidden">
+<div style="height:24px;background:#181817;border-bottom:1px solid #2B2A28;position:relative">
+<sc-for list="{{beats}}" as="b" hint-placeholder-count="16"><span style="{{b.style}}">{{b.n}}</span></sc-for>
+</div>
+<div style="position:absolute;left:0;right:0;top:24px;bottom:0">
+<sc-for list="{{rows}}" as="r" hint-placeholder-count="30"><div style="{{r.style}}"></div></sc-for>
+</div>
+<div style="position:absolute;left:0;right:0;top:24px;bottom:0;background-image:repeating-linear-gradient(90deg,#3A3835 0 1px,transparent 1px 256px),repeating-linear-gradient(90deg,#2A2927 0 1px,transparent 1px 64px),repeating-linear-gradient(90deg,#1E1D1C 0 1px,transparent 1px 16px)"></div>
+<sc-for list="{{notes}}" as="n" hint-placeholder-count="12"><div style="{{n.style}}">{{n.label}}</div></sc-for>
+<div style="position:absolute;top:0;bottom:0;left:448px;width:2px;background:#F2F0EC"></div>
+<!-- selection summary -->
+<div style="position:absolute;right:14px;bottom:14px;width:230px;padding:10px 12px;background:#1E1D1C;border:1px solid #3A3835;border-radius:10px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 12px;font-size:11px">
+<span style="grid-column:1 / span 2;font-weight:600;font-size:12px">2 notes selected</span>
+<span style="color:#8E8A84">Start</span><span style="font-family:'IBM Plex Mono',monospace">001:3:000</span>
+<span style="color:#8E8A84">Length</span><span style="font-family:'IBM Plex Mono',monospace">1 step</span>
+<span style="color:#8E8A84">Pitch</span><span style="font-family:'IBM Plex Mono',monospace">mixed</span>
+<span style="color:#8E8A84">Velocity</span><span style="font-family:'IBM Plex Mono',monospace">100</span>
+</div>
+</div>
+</div>
+<!-- velocity lane -->
+<div style="height:96px;flex:none;display:flex;border-top:1px solid #2B2A28;background:#181817">
+<div style="width:56px;flex:none;display:flex;align-items:flex-start;justify-content:center;padding-top:8px;font-size:10px;color:#8E8A84;border-right:1px solid #2B2A28">Velocity</div>
+<div style="flex:1;position:relative">
+<sc-for list="{{vels}}" as="v" hint-placeholder-count="12"><div style="{{v.style}}"></div></sc-for>
+</div>
+</div>
+</div>
+</div>
+
+<!-- Status -->
+<div style="height:26px;flex:none;display:flex;align-items:center;gap:14px;padding:0 12px;background:#181817;border-top:1px solid #2B2A28;font-size:11px;color:#8E8A84">
+<span>Pattern workspace · Rack + Piano Roll</span>
+<div style="flex:1;text-align:center;color:#B8B4AE">Alt+wheel over a note — velocity · Ctrl+B — duplicate selection</div>
+<span>Voices 4</span><span style="font-family:'IBM Plex Mono',monospace">48 000 Hz</span>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const pal = ['#C9774F','#4F8FC9','#5FA86B','#B565A7','#C9A94F','#4FB3AE','#C96F6F','#8F8FD6'];
+    const sp = (on) => 'height:32px;padding:0 16px;border:0;border-radius:8px;font-size:12.5px;display:flex;align-items:center;' + (on ? 'background:#2E2D2B;color:#ECEAE6;font-weight:500' : 'background:transparent;color:#8E8A84');
+    const spaces = [['Arrange','F5',false],['Pattern','F6',true],['Mix','F9',false]].map(([name,key,on]) => ({ name, key, style: sp(on) }));
+    const pats = { Kick:[0,4,8,12], Snare:[4,12], Hat:[2,6,10,14], Clap:[12,15], Bass:[] };
+    const defs = [['Kick','Sampler','1',0,false,false],['Snare','Sampler','2',1,false,false],['Hat','Sampler','2',2,false,false],['Clap','Sampler','3',3,true,false],['Bass','VST3','4',4,false,true]];
+    const channels = defs.map(([name, kind, track, ci, muted, sel]) => ({
+      name, kind, track,
+      card: 'padding:8px 10px;border-radius:9px;' + (sel ? 'background:#22303A;box-shadow:inset 0 0 0 1px #6FB4E0' : 'background:#1F1E1D'),
+      dot: 'width:10px;height:10px;border-radius:3px;background:' + pal[ci],
+      led: 'width:8px;height:8px;border-radius:50%;' + (muted ? 'background:#3E3C39' : 'background:#6DB27A'),
+      steps: Array.from({ length: 16 }, (_, i) => {
+        const on = name === 'Bass' ? [0,3,6,10,11,14].includes(i) : pats[name].includes(i);
+        const g = Math.floor(i / 4) % 2;
+        const bg = on ? (name === 'Bass' ? '#8C6B2A' : '#F5B544') : (g ? '#2E2D2B' : '#282725');
+        return { style: 'flex:1;height:' + (name === 'Bass' && on ? '10px;align-self:center' : '18px') + ';border-radius:3px;background:' + bg + (muted ? ';opacity:.4' : '') + (i % 4 === 3 && i < 15 ? ';margin-right:3px' : '') };
+      }),
+    }));
+    const tb = (on) => 'width:26px;height:24px;border:0;border-radius:5px;display:flex;align-items:center;justify-content:center;' + (on ? 'background:#22303A' : 'background:transparent');
+    const tools = [['Draw','P','M2 12l1-3 6-6 2 2-6 6z',true],['Paint','B','M2 3h8v3H2zM6 6v2M5 8h2v4H5z',false],['Delete','D','M3 10l5-7 3 3-5 6H4z',false],['Select','E','M2 2h10v10H2z',false]].map(([name,key,path,on]) => ({ name, key, path, color: on ? '#6FB4E0' : '#B8B4AE', style: tb(on) }));
+    const names = ['B','A#','A','G#','G','F#','F','E','D#','D','C#','C'];
+    const H = 18, N = 37;
+    const keys = [], rows = [];
+    for (let i = 0; i < N; i++) {
+      const nm = names[i % 12];
+      const oct = 3 - Math.floor(i / 12);
+      const black = nm.includes('#');
+      keys.push({ label: nm === 'C' ? 'C' + oct : '', style: 'height:' + H + 'px;box-sizing:border-box;display:flex;align-items:center;justify-content:flex-end;border-bottom:1px solid ' + (black ? '#151514' : '#C9C5BE') + ';background:' + (black ? 'linear-gradient(90deg,#1A1918 60%,#DAD6CF 60%)' : '#DAD6CF') });
+      rows.push({ style: 'height:' + H + 'px;box-sizing:border-box;border-bottom:1px solid ' + (nm === 'C' ? '#3A3835' : '#1B1A19') + ';background:' + (black ? '#141413' : '#191918') });
+    }
+    const beats = Array.from({ length: 16 }, (_, i) => ({ n: i % 4 === 0 ? String(i / 4 + 1) : '', style: 'position:absolute;top:5px;left:' + (i * 64 + 4) + 'px;font-family:IBM Plex Mono,monospace;font-size:10px;color:#8E8A84' }));
+    const noteRow = (name, oct) => (3 - oct) * 12 + names.indexOf(name);
+    const mk = (step, len, name, oct, vel, sel) => ({
+      label: len >= 2 ? name + oct : '',
+      style: 'position:absolute;box-sizing:border-box;border-radius:3px;font-size:9.5px;font-family:IBM Plex Mono,monospace;padding-left:4px;line-height:' + (H - 2) + 'px;color:#1B1405;top:' + (24 + noteRow(name, oct) * H + 1) + 'px;left:' + (step * 64 + 1) + 'px;width:' + (len * 64 - 2) + 'px;height:' + (H - 2) + 'px;' + (sel ? 'background:#8CC8F0;box-shadow:0 0 0 2px #F2F0EC' : 'background:#F5B544;opacity:' + (0.55 + vel * 0.45)),
+      vel, step,
+    });
+    const notes = [mk(0,2,'C',2,1), mk(3,1,'C',2,.8), mk(6,2,'D#',2,.9), mk(8,1,'G',1,1,true), mk(10,1,'A#',1,.7), mk(11,2,'C',2,1,true), mk(14,1,'G',1,.6), mk(2,1,'C',3,.5)];
+    const vels = notes.map((n) => ({ style: 'position:absolute;bottom:8px;width:5px;border-radius:2px 2px 0 0;left:' + (n.step * 64 + 1) + 'px;height:' + Math.round(n.vel * 72) + 'px;background:#F5B544' }));
+    return { spaces, channels, tools, keys, rows, beats, notes, vels };
+  }
+}
+</script>
+</body>
+</html>
