@@ -87,23 +87,54 @@ impl ProjectBrowser {
             };
         }
         self.last_source = source;
+        // UI-RD §2.2: vertical tabs, glyph over label, within the width.
         ui.horizontal(|ui| {
+            use crate::icons::Glyph as G;
             ui.spacing_mut().item_spacing.x = 2.0;
-            for (tab, label) in [
-                (Tab::Patterns, "Patterns"),
-                (Tab::Samples, "Samples"),
-                (Tab::Automations, "Auto"),
+            let w = ((WIDTH - 8.0) / 3.0).floor();
+            for (tab, glyph, label) in [
+                (Tab::Patterns, G::Pattern, "Patterns"),
+                (Tab::Samples, G::Sample, "Samples"),
+                (Tab::Automations, G::Automation, "Auto"),
             ] {
-                if ui.selectable_label(self.tab == tab, label).clicked() {
+                let on = self.tab == tab;
+                let (r, resp) = ui.allocate_exact_size(egui::vec2(w, 40.0), egui::Sense::click());
+                let p = ui.painter();
+                if on {
+                    p.rect_filled(r, 6.0, theme::RAISED);
+                    p.hline(
+                        r.x_range().shrink(6.0),
+                        r.top() + 1.0,
+                        egui::Stroke::new(2.0, theme::BLUE),
+                    );
+                } else if resp.hovered() {
+                    p.rect_filled(r, 6.0, theme::RAISED.gamma_multiply(0.6));
+                }
+                let c = if on { theme::TEXT } else { theme::DIM };
+                crate::icons::paint_with(
+                    p,
+                    glyph,
+                    egui::Rect::from_center_size(
+                        r.center_top() + egui::vec2(0.0, 13.0),
+                        egui::vec2(14.0, 14.0),
+                    ),
+                    c,
+                );
+                p.text(
+                    r.center_bottom() - egui::vec2(0.0, 4.0),
+                    egui::Align2::CENTER_BOTTOM,
+                    label,
+                    egui::FontId::proportional(10.5),
+                    c,
+                );
+                resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Tab, true, on, label));
+                if resp.clicked() {
                     self.tab = tab;
                 }
             }
         });
-        ui.add(
-            egui::TextEdit::singleline(&mut self.query)
-                .hint_text("Search")
-                .desired_width(WIDTH - 8.0),
-        );
+        ui.add_space(2.0);
+        crate::browser::search_field(ui, &mut self.query, "Filter");
         let q = self.query.to_lowercase();
         let matches = |name: &str| q.is_empty() || name.to_lowercase().contains(&q);
         egui::ScrollArea::vertical()

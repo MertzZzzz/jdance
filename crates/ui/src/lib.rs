@@ -1454,6 +1454,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             ui.add_space(8.0);
             let menu = |t: &str| egui::RichText::new(t).color(theme::MUTED).size(12.0);
             ui.spacing_mut().button_padding = egui::vec2(8.0, 6.0);
+            ui.spacing_mut().item_spacing.x = 4.0;
             ui.menu_button(menu("File"), |ui| {
                 use icons::Glyph as G;
                 if widgets::menu_item(ui, Some(G::New), "New", "Ctrl+N").clicked() {
@@ -5003,6 +5004,9 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
         }
         for edit in pl_out.gesture {
             self.apply(edit, true, now);
+        }
+        if pl_out.close {
+            self.show_playlist = false;
         }
         if pl_out.end_gesture {
             self.history.end_gesture();
