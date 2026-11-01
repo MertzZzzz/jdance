@@ -129,6 +129,33 @@ impl Dialog {
                 let mut error = None;
                 // Notes the Fit button moves (UI-RD §10.8).
                 let mut outside = 0;
+                // Board R5 · Transpose: steppers and common intervals.
+                if let Self::Transpose { semitones, octaves } = self {
+                    ui.set_width(300.0);
+                    crate::widgets::caption(ui, "Semitones");
+                    stepper(ui, semitones, -24..=24);
+                    ui.add_space(4.0);
+                    crate::widgets::caption(ui, "Octaves");
+                    stepper(ui, octaves, -10..=10);
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        for k in [-12, -7, -5, 5, 7, 12] {
+                            let text = format!("{k:+}").replace('-', "−");
+                            if crate::widgets::chip(ui, None, &text, *semitones == k).clicked() {
+                                *semitones = k;
+                            }
+                        }
+                    });
+                    ui.label(
+                        RichText::new("Shift+↑↓ — semitone, Ctrl+↑↓ — octave right in the roll.")
+                            .size(11.0)
+                            .color(theme::MUTED),
+                    );
+                    match notes::transpose(notes, selected, *semitones + 12 * *octaves) {
+                        Some(n) => apply = Some(n),
+                        None => error = Some("Some notes would leave the key range C0–G10"),
+                    }
+                }
                 if let Self::Scale { scale, highlight } = self {
                     ui.set_width(330.0);
                     crate::widgets::caption(ui, "Tonic");
@@ -181,18 +208,7 @@ impl Dialog {
                     .num_columns(2)
                     .spacing([12.0, 8.0])
                     .show(ui, |ui| match self {
-                        Self::Transpose { semitones, octaves } => {
-                            ui.label("Semitones");
-                            ui.add(egui::DragValue::new(semitones).range(-24..=24));
-                            ui.end_row();
-                            ui.label("Octaves");
-                            ui.add(egui::DragValue::new(octaves).range(-10..=10));
-                            ui.end_row();
-                            match notes::transpose(notes, selected, *semitones + 12 * *octaves) {
-                                Some(n) => apply = Some(n),
-                                None => error = Some("Some notes would leave the key range C0–G10"),
-                            }
-                        }
+                        Self::Transpose { .. } => {}
                         Self::Scale { scale, highlight } => {
                             // UI-RD §5 (board R5 · Scale): tonic tiles, the
                             // modes with their steps, the highlight switch.
@@ -320,6 +336,38 @@ fn props_ui(ui: &mut egui::Ui, p: &mut Props, sig: jdance_domain::TimeSignature)
     opt_field(ui, "Slide", &mut p.slide, true, |ui, v| {
         ui.checkbox(v, "")
             .on_hover_text("A slide note does not sound: it glides the notes under it to its key")
+    });
+}
+
+/// [−] value [+]: a wide signed value with buttons (board R5 · Transpose).
+fn stepper(ui: &mut egui::Ui, v: &mut i32, range: std::ops::RangeInclusive<i32>) {
+    ui.horizontal(|ui| {
+        let size = vec2(34.0, 34.0);
+        if ui
+            .add(egui::Button::new(RichText::new("−").size(16.0)).min_size(size))
+            .clicked()
+        {
+            *v = (*v - 1).max(*range.start());
+        }
+        let w = ui.available_width() - 40.0;
+        ui.add_sized(
+            vec2(w, 34.0),
+            egui::DragValue::new(v)
+                .range(range.clone())
+                .custom_formatter(|x, _| {
+                    if x > 0.0 {
+                        format!("+{x:.0}")
+                    } else {
+                        format!("{x:.0}")
+                    }
+                }),
+        );
+        if ui
+            .add(egui::Button::new(RichText::new("+").size(16.0)).min_size(size))
+            .clicked()
+        {
+            *v = (*v + 1).min(*range.end());
+        }
     });
 }
 
