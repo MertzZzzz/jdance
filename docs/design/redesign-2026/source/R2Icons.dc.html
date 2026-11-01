@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>R2 · Иконки</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400&amp;family=IBM+Plex+Sans:wght@400;600&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#0E1013}
+</style>
+</helmet>
+<div style="width:760px;height:900px;box-sizing:border-box;background:#0E1013;color:#E9ECEF;font-family:'IBM Plex Sans',sans-serif;padding:28px;display:flex;flex-direction:column;gap:18px">
+<div style="display:flex;flex-direction:column;gap:4px">
+<span style="font-weight:600;font-size:18px">Иконки jdance</span>
+<span style="font-size:12px;color:#A7AFB8">Сетка 16×16, линия 1.5 px, рисуются фигурами (egui Shape), цвет MUTED / TEXT у активной</span>
+</div>
+<sc-for list="{{groups}}" as="g" hint-placeholder-count="5">
+<div style="display:flex;flex-direction:column;gap:8px">
+<span style="font-size:9.5px;letter-spacing:1px;color:#7E8792">{{g.title}}</span>
+<div style="display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:8px">
+<sc-for list="{{g.items}}" as="i" hint-placeholder-count="8">
+<div style="height:66px;border-radius:8px;background:#171A1E;border:1px solid #2A3037;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:7px">
+<svg width="20" height="20" viewBox="0 0 16 16" fill="none" stroke="#E9ECEF" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="{{i.name}}"><path d="{{i.path}}"></path></svg>
+<span style="font-size:10px;color:#A7AFB8">{{i.name}}</span>
+</div>
+</sc-for>
+</div>
+</div>
+</sc-for>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":760,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const g = (title, items) => ({ title, items: items.map(([name, path]) => ({ name, path })) });
+    const groups = [
+      g('ТРАНСПОРТ И ПРОЕКТ', [
+        ['Pattern','M2 2h5v5H2zM9 2h5v5H9zM2 9h5v5H2zM9 9h5v5H9z'],['Song','M2 4h6M10 4h4M2 8h3M7 8h7M2 12h8M12 12h2'],['Tap','M8 7a3.5 3.5 0 1 1 0 7 3.5 3.5 0 1 1 0-7zM8 1.5v2M3 3.5l1.4 1.4M13 3.5l-1.4 1.4'],['Metronome','M5 14h6L9 2H7zM8 10l4-5'],
+        ['Count-in','M8 2a6 6 0 1 1 0 12A6 6 0 0 1 8 2zM8 5v3l2 2'],['Panic','M2 6h3l4-3v10l-4-3H2zM11 6l4 4M15 6l-4 4'],['Save','M3 2h8l2 2v10H3zM5 2v4h5V2M5 14v-4h6v4'],['Export','M8 2v8M5 7l3 3 3-3M3 11v3h10v-3'],
+      ]),
+      g('ОКНА', [
+        ['Browser','M2 4h4l1.5 1.5H14V13H2z'],['Rack','M2 3h12M2 6.5h12M2 10h12M2 13.5h12'],['Piano Roll','M2 2h12v12H2zM5.5 2v7M8 2v7M10.5 2v7M5.5 9v5M10.5 9v5'],['Playlist','M2 4h6M10 4h4M2 8h3M7 8h7M2 12h8M12 12h2'],
+        ['Mixer','M4 2v12M8 2v12M12 2v12M2.5 10h3M6.5 5h3M10.5 8h3'],['Undock','M9 2h5v5M14 2L8.5 7.5M12 10v4H2V4h4'],['Dock','M6 2H2v12h12v-4M14 2L8 8M8 4v4h4'],['Close','M4 4l8 8M12 4l-8 8'],
+      ]),
+      g('ИНСТРУМЕНТЫ РЕДАКТОРОВ', [
+        ['Draw','M2 14l1-3.5 7.5-7.5 2.5 2.5L5.5 13zM9 4.5l2.5 2.5'],['Paint','M2 2.5h9v3.5H2zM11 4h2v4H7v2M6 10h2v4.5H6z'],['Delete','M6 13.5l-3.5-3.5 7-7 4 4-6.5 6.5zM6 13.5h8M5 7.5l4 4'],['Mute','M8 2a6 6 0 1 1 0 12A6 6 0 0 1 8 2zM3.8 3.8l8.4 8.4'],
+        ['Slice','M5 2a2 2 0 1 1 0 4 2 2 0 0 1 0-4zM5 10a2 2 0 1 1 0 4 2 2 0 0 1 0-4zM6.5 5.5L14 12M6.5 10.5L14 4'],['Select','M2 2h3M7 2h2M11 2h3v3M14 7v2M14 11v3h-3M9 14H7M5 14H2v-3M2 9V7M2 5V2'],['Zoom','M7 2.5a4.5 4.5 0 1 1 0 9 4.5 4.5 0 1 1 0-9zM10.5 10.5L14 14M5 7h4M7 5v4'],['Playback','M8 2a6 6 0 1 1 0 12A6 6 0 0 1 8 2zM6.5 5.5v5l4-2.5z'],['Speed','M2 12.5a6 6 0 1 1 12 0M8 12.5l3.2-4.2M4.2 8.6l.9.6M8 6.5v1M11.8 8.6l-.9.6'],
+      ]),
+      g('БРАУЗЕР И ИСТОЧНИКИ', [
+        ['Files','M4 2h5l3 3v9H4zM9 2v3h3'],['Plugins','M6 2v3M10 2v3M4 5h8v2.5a4 4 0 0 1-8 0zM8 11.5V14'],['History','M2.5 8a5.5 5.5 0 1 0 1.6-3.9M2.5 2.5v3h3M8 5v3l2 1.5'],['Sample','M1 8h2l1.5-4 2 8 2-10 2 9 1.5-3H15'],
+        ['Automation','M1.5 12c3 0 3.5-8 6.5-8s3.5 6 6.5 6'],['MIDI / Notes','M2 11h4M7 7h4M10 4h4M4 13.5h5'],['Favorite','M8 2l1.8 3.8 4.2.5-3.1 2.9.8 4.1L8 11.3 4.3 13.3l.8-4.1L2 6.3l4.2-.5z'],['Search','M7 2.5a4.5 4.5 0 1 1 0 9 4.5 4.5 0 1 1 0-9zM10.5 10.5L14 14'],
+      ]),
+      g('МИКШЕР И ЭФФЕКТЫ', [
+        ['FX slots','M3 4h10M3 8h10M3 12h10'],['Arm','M8 2a6 6 0 1 1 0 12A6 6 0 0 1 8 2zM8 6.5a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3z'],['PDC','M4 2h8M4 14h8M5 2c0 4 6 4 6 6s-6 2-6 6M11 2c0 4-6 4-6 6'],['Send','M2 8h10M9 4.5L12.5 8 9 11.5M14 3v10'],
+        ['EQ','M1.5 10c2 0 2-5 4-5s2 7 4 7 2-4 5-4'],['Compressor','M2 14L8 8h6M2 2v12h12'],['Delay','M2 12V4M6 12V6M10 12V8M14 12v-2'],['Ghost','M3 14V7a5 5 0 0 1 10 0v7l-2-1.5L9.5 14 8 12.5 6.5 14 5 12.5z'],
+      ]),
+      g('ПАТТЕРН И КАНАЛЫ', [
+        ['New','M8 3v10M3 8h10'],['Rename','M2 14l1-3 7-7 2 2-7 7zM9 5l2 2'],['Clone','M5 5h8v8H5zM3 11V3h8'],['Loop','M3 9V7a3 3 0 0 1 3-3h7M11 2l2 2-2 2M13 7v2a3 3 0 0 1-3 3H3M5 14l-2-2 2-2'],
+        ['Snap','M3.5 2.5v5.5a4.5 4.5 0 0 0 9 0V2.5h-3v5.5a1.5 1.5 0 0 1-3 0V2.5zM3.5 5.5h3M9.5 5.5h3'],['Steps view','M2 5h3v6H2zM6.5 5h3v6h-3zM11 5h3v6h-3z'],['Filter','M2 3h12l-4.5 5.5V13l-3-1.5v-3z'],['Clean up','M10 2L7 8M4 8h6l1 6H3zM6 11v3M8.5 11v3'],
+      ]),
+    ];
+    return { groups };
+  }
+}
+</script>
+</body>
+</html>

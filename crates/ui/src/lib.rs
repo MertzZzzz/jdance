@@ -68,6 +68,7 @@ use jdance_domain::{
 };
 use settings::SettingsWindow;
 use std::path::{Path, PathBuf};
+use widgets::Hint;
 
 pub const APP_NAME: &str = "jdance";
 const PROJECT_EXT: &str = "jdance";
@@ -244,6 +245,9 @@ pub struct JdanceApp<H: Host, S: ProjectStore> {
     show_rack: bool,
     show_playlist: bool,
     show_browser: bool,
+    /// The status line's hint from the last frame (UI-RD §1.5).
+    last_hint: Option<String>,
+    shown_hint: Option<String>,
     browser_view: browser::BrowserView,
     show_plugins: bool,
     /// Position shown as time instead of bars.
@@ -376,6 +380,8 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             show_rack: true,
             show_playlist: true,
             show_browser: true,
+            last_hint: None,
+            shown_hint: None,
             browser_view: browser::BrowserView::new(),
             show_plugins: false,
             time_display: false,
@@ -725,14 +731,13 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             if blocked {
                 ui.colored_label(ui.visuals().warn_fg_color, "The playlist is empty.");
             }
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(!blocked, egui::Button::new("Export…"))
-                    .clicked()
-                {
+            ui.add_space(6.0);
+            // UI-RD §7: the main action amber, bottom right; Cancel outlined.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if widgets::primary_button(ui, "Export…", !blocked).clicked() {
                     choice = Some(true);
                 }
-                if ui.button("Cancel").clicked() {
+                if widgets::outline_button(ui, "Cancel").clicked() {
                     choice = Some(false);
                 }
             });
@@ -818,7 +823,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                     "Writing the file"
                 };
                 ui.add(egui::ProgressBar::new(f).text(format!("{stage} · {:.0}%", f * 100.0)));
-                if ui.button("Cancel").clicked() {
+                if crate::widgets::outline_button(ui, "Cancel").clicked() {
                     self.host.cancel_export();
                 }
             });
@@ -872,6 +877,23 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                     self.piano = Some(piano::PianoRoll::new(c.id));
                     self.key_focus = KeyFocus::PianoRoll;
                 }
+            }
+        }
+        // Window toggles (UI-RD-011 item 7): F5 Playlist, F6 Channel
+        // Rack, F9 Mixer, Alt+F8 Browser.
+        if !ctx.text_edit_focused() {
+            let none = egui::Modifiers::NONE;
+            if ctx.input_mut(|i| i.consume_key(none, Key::F5)) {
+                self.show_playlist = !self.show_playlist;
+            }
+            if ctx.input_mut(|i| i.consume_key(none, Key::F6)) {
+                self.show_rack = !self.show_rack;
+            }
+            if ctx.input_mut(|i| i.consume_key(none, Key::F9)) {
+                self.show_mixer = !self.show_mixer;
+            }
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::ALT, Key::F8)) {
+                self.show_browser = !self.show_browser;
             }
         }
         // F8: the plugin picker.
@@ -1410,54 +1432,79 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
 
     fn menu_bar(&mut self, ui: &mut egui::Ui, now: f64) {
         let ctx = ui.ctx().clone();
-        ui.horizontal(|ui| {
+        ui.horizontal_centered(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
             ui.style_mut().visuals.button_frame = false;
-            ui.label(egui::RichText::new(APP_NAME).font(theme::strong(13.0)));
-            ui.menu_button("File", |ui| {
-                if ui.button("New").clicked() {
+            // Logo: an amber tile with a play mark (UI-RD-010).
+            let (logo, _) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::hover());
+            ui.painter().rect_filled(logo, 5.0, theme::AMBER);
+            let c = logo.center();
+            ui.painter().add(egui::Shape::convex_polygon(
+                vec![
+                    c + egui::vec2(-3.0, -4.0),
+                    c + egui::vec2(4.0, 0.0),
+                    c + egui::vec2(-3.0, 4.0),
+                ],
+                theme::ON_AMBER,
+                egui::Stroke::NONE,
+            ));
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new(APP_NAME).font(theme::strong(12.5)));
+            ui.add_space(8.0);
+            let menu = |t: &str| egui::RichText::new(t).color(theme::MUTED).size(12.0);
+            ui.spacing_mut().button_padding = egui::vec2(8.0, 6.0);
+            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.menu_button(menu("File"), |ui| {
+                use icons::Glyph as G;
+                if widgets::menu_item(ui, Some(G::New), "New", "Ctrl+N").clicked() {
                     self.guarded(Pending::New, &ctx, now);
                 }
-                if ui.button("Open…").clicked() {
+                if widgets::menu_item(ui, Some(G::Open), "Open…", "Ctrl+O").clicked() {
                     self.guarded(Pending::Open, &ctx, now);
                 }
-                if ui.button("Save").clicked() {
+                if widgets::menu_item(ui, Some(G::Save), "Save", "Ctrl+S").clicked() {
                     self.save(false, now);
                 }
-                if ui.button("Save As…").clicked() {
+                if widgets::menu_item(ui, None, "Save As…", "Ctrl+Shift+S").clicked() {
                     self.save(true, now);
                 }
                 ui.separator();
-                if ui.button("Export audio…").clicked() {
+                if widgets::menu_item(ui, Some(G::Export), "Export audio…", "").clicked() {
                     self.open_export_dialog(None);
                 }
                 ui.separator();
-                if ui.button("Quit").clicked() {
+                if widgets::menu_item(ui, Some(G::Close), "Quit", "").clicked() {
                     self.guarded(Pending::Quit, &ctx, now);
                 }
             });
-            ui.menu_button("Edit", |ui| {
+            ui.menu_button(menu("Edit"), |ui| {
+                use icons::Glyph as G;
                 let undo = self.history.undo_label().map(|l| format!("Undo {l}"));
-                if ui
-                    .add_enabled(
-                        undo.is_some(),
-                        egui::Button::new(undo.unwrap_or("Undo".into())),
-                    )
-                    .clicked()
+                if widgets::menu_item_on(
+                    ui,
+                    Some(G::Undo),
+                    undo.as_deref().unwrap_or("Undo"),
+                    "Ctrl+Z",
+                    undo.is_some(),
+                )
+                .clicked()
                 {
                     self.undo(now);
                 }
                 let redo = self.history.redo_label().map(|l| format!("Redo {l}"));
-                if ui
-                    .add_enabled(
-                        redo.is_some(),
-                        egui::Button::new(redo.unwrap_or("Redo".into())),
-                    )
-                    .clicked()
+                if widgets::menu_item_on(
+                    ui,
+                    Some(G::Redo),
+                    redo.as_deref().unwrap_or("Redo"),
+                    "Ctrl+Y",
+                    redo.is_some(),
+                )
+                .clicked()
                 {
                     self.redo(now);
                 }
             });
-            ui.menu_button("View", |ui| {
+            ui.menu_button(menu("View"), |ui| {
                 ui.toggle_value(&mut self.show_browser, "Browser");
                 ui.toggle_value(&mut self.show_rack, "Channel Rack");
                 ui.toggle_value(&mut self.show_playlist, "Playlist");
@@ -1519,39 +1566,34 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                     ui.close();
                 }
             });
-            ui.menu_button("Options", |ui| {
-                if ui.button("Audio settings…").clicked() {
+            ui.menu_button(menu("Options"), |ui| {
+                use icons::Glyph as G;
+                if widgets::menu_item(ui, Some(G::Speaker), "Audio settings…", "").clicked() {
                     self.settings = Some(SettingsWindow::new(&self.host));
-                    ui.close();
                 }
-                if ui.button("Plugins…").clicked() {
+                if widgets::menu_item(ui, Some(G::Plugins), "Plugins…", "").clicked() {
                     self.show_plugins = true;
-                    ui.close();
                 }
-                if ui.button("Library folders…").clicked() {
+                if widgets::menu_item(ui, Some(G::Folder), "Library folders…", "").clicked() {
                     self.show_library = true;
-                    ui.close();
                 }
-                if ui.button("Pattern name presets…").clicked() {
+                if widgets::menu_item(ui, Some(G::Rename), "Pattern name presets…", "").clicked()
+                {
                     self.show_presets = true;
-                    ui.close();
                 }
-                if ui.button("Keyboard shortcuts…").clicked() {
+                if widgets::menu_item(ui, Some(G::Keyboard), "Keyboard shortcuts…", "").clicked()
+                {
                     self.show_keys = true;
-                    ui.close();
                 }
-                if ui.button("MIDI settings…").clicked() {
+                if widgets::menu_item(ui, Some(G::Midi), "MIDI settings…", "").clicked() {
                     self.host.rescan_midi();
                     self.show_midi = true;
-                    ui.close();
                 }
-                if ui.button("Plugin picker (F8)").clicked() {
+                if widgets::menu_item(ui, Some(G::Plugins), "Plugin picker", "F8").clicked() {
                     self.plugin_picker = Some(PluginPicker::new(plugin_list::Scope::All, None));
-                    ui.close();
                 }
-                if ui.button("Recording…").clicked() {
+                if widgets::menu_item(ui, Some(G::Mic), "Recording…", "").clicked() {
                     self.show_recording = true;
-                    ui.close();
                 }
                 ui.menu_button("Metronome", |ui| {
                     let mut m = self.host.metronome();
@@ -1577,44 +1619,151 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                     ui.weak("Other: the field next to the tempo");
                 });
             });
+            ui.menu_button(menu("Help"), |ui| {
+                use icons::Glyph as G;
+                if widgets::menu_item(ui, Some(G::Keyboard), "Keyboard shortcuts…", "").clicked()
+                {
+                    self.show_keys = true;
+                }
+                ui.separator();
+                ui.label(
+                    egui::RichText::new(format!("{APP_NAME} {}", env!("CARGO_PKG_VERSION")))
+                        .color(theme::DIM)
+                        .font(theme::mono(10.5)),
+                );
+            });
+            ui.add_space(4.0);
+            widgets::divider(ui, 18.0);
+            ui.add_space(4.0);
+            // Quick actions (UI-RD-010).
+            {
+                use icons::Glyph as G;
+                let small = egui::vec2(28.0, 26.0);
+                if icons::icon_button_sized(ui, G::Save, false, "Save (Ctrl+S)", small, 15.0)
+                    .clicked()
+                {
+                    self.save(false, now);
+                }
+                let can_undo = self.history.undo_label().is_some();
+                let can_redo = self.history.redo_label().is_some();
+                if ui
+                    .add_enabled_ui(can_undo, |ui| {
+                        icons::icon_button_sized(ui, G::Undo, false, "Undo (Ctrl+Z)", small, 15.0)
+                    })
+                    .inner
+                    .clicked()
+                {
+                    self.undo(now);
+                }
+                if ui
+                    .add_enabled_ui(can_redo, |ui| {
+                        icons::icon_button_sized(ui, G::Redo, false, "Redo (Ctrl+Y)", small, 15.0)
+                    })
+                    .inner
+                    .clicked()
+                {
+                    self.redo(now);
+                }
+                if icons::icon_button_sized(ui, G::Export, false, "Export audio…", small, 15.0)
+                    .clicked()
+                {
+                    self.open_export_dialog(None);
+                }
+            }
+            // The project name in the middle, the device on the right.
             let name = self.path.as_ref().and_then(|p| p.file_name()).map_or_else(
                 || "Untitled".to_owned(),
                 |n| n.to_string_lossy().into_owned(),
             );
-            let dirty = if self.history.is_dirty() { " •" } else { "" };
+            let device = self.host.stream().map(|s| {
+                let frames = s
+                    .stats
+                    .last_frames
+                    .or(s.stats.max_frames)
+                    .map_or(String::new(), |f| format!(" · {f} smp"));
+                format!(
+                    "{} kHz{frames} · {}",
+                    f64::from(s.info.sample_rate) / 1000.0,
+                    s.info.backend
+                )
+            });
+            let full = ui.max_rect();
+            let galley = ui.painter().layout_no_wrap(
+                name.clone(),
+                egui::FontId::proportional(12.5),
+                theme::TEXT,
+            );
+            let at = egui::pos2(
+                full.center().x - galley.size().x / 2.0,
+                full.center().y - galley.size().y / 2.0,
+            );
+            if at.x > ui.min_rect().right() + 12.0 {
+                ui.painter().galley(at, galley.clone(), theme::TEXT);
+                if self.history.is_dirty() {
+                    ui.painter().circle_filled(
+                        egui::pos2(at.x + galley.size().x + 9.0, full.center().y),
+                        3.0,
+                        theme::WARN,
+                    );
+                }
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(egui::RichText::new(format!("{name}{dirty}")).color(theme::MUTED));
+                ui.add_space(4.0);
+                match device {
+                    Some(d) => {
+                        ui.label(
+                            egui::RichText::new(d)
+                                .font(theme::mono(10.5))
+                                .color(theme::DIM),
+                        );
+                    }
+                    None => {
+                        ui.label(
+                            egui::RichText::new("no audio device")
+                                .font(theme::mono(10.5))
+                                .color(theme::WARN),
+                        );
+                    }
+                }
             });
         });
     }
 
     fn toolbar(&mut self, ui: &mut egui::Ui, now: f64) {
+        use icons::Glyph as G;
         let transport = self.host.transport();
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing.x = 5.0;
-            // Transport.
+        ui.horizontal_centered(|ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            // 1. Transport: one segmented group (UI-RD-011).
             let playing = transport.playing;
-            if theme::icon_button(ui, theme::Icon::Play, playing, "Play")
-                .on_hover_text("Play / pause (Space)")
-                .clicked()
-            {
-                self.toggle_play();
-            }
-            if theme::icon_button(ui, theme::Icon::Stop, false, "Stop")
-                .on_hover_text("Stop and return to the caret; when already stopped, the caret goes to the start")
-                .clicked()
-            {
-                self.stop_pressed(playing, transport.count_in);
-            }
             let rec_state = self.host.recording_state();
             let counting = transport.count_in > 0;
             let recording = matches!(rec_state, RecordingState::Recording { .. });
             // The button blinks during the count-in (MET-022).
             let blink = counting && (now * 4.0) as i64 % 2 == 0;
-            if theme::icon_button(ui, theme::Icon::Record, recording || blink, "Record")
-                .on_hover_text("Record the input from the caret")
-                .clicked()
-            {
+            let (play, stop, rec) = widgets::segmented(ui, |ui| {
+                let play = widgets::transport_button(ui, G::Play, playing, theme::AMBER, "Play")
+                    .hint("Play / pause (Space)");
+                let stop = widgets::transport_button(ui, G::Stop, false, theme::TEXT, "Stop").hint(
+                    "Stop and return to the caret; when already stopped, the caret goes to the start",
+                );
+                let rec = widgets::transport_button(
+                    ui,
+                    G::Record,
+                    recording || blink,
+                    theme::RED,
+                    "Record",
+                )
+                .hint("Record the input from the caret");
+                (play, stop, rec)
+            });
+            if play.clicked() {
+                self.toggle_play();
+            }
+            if stop.clicked() {
+                self.stop_pressed(playing, transport.count_in);
+            }
+            if rec.clicked() {
                 if recording || counting || self.record_target.is_some() {
                     self.record_cancelled = counting;
                     self.host.stop_recording();
@@ -1626,65 +1775,208 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             if counting {
                 ui.ctx().request_repaint_after(std::time::Duration::from_millis(125));
             }
+            // 2. Pattern / Song.
+            widgets::segmented(ui, |ui| {
+                use widgets::Look;
+                if widgets::button(ui, Some(G::Pattern), "PAT", !self.song_mode, Look::Raised, "Pattern mode: Play loops the current pattern").clicked() {
+                    self.song_mode = false;
+                }
+                if widgets::button(ui, Some(G::Song), "SONG", self.song_mode, Look::Raised, "Song mode: Play plays the playlist arrangement").clicked() {
+                    self.song_mode = true;
+                }
+            });
+            // 3. The display: position, tempo, signature, tap.
+            self.position_display(ui, &transport, counting, now);
+            // 4. Metronome, count-in, panic, MIDI.
+            ui.spacing_mut().item_spacing.x = 4.0;
+            self.metronome_buttons(ui);
+            if icons::icon_button(ui, G::Panic, false, "Panic: silence all sounding notes and voices").clicked() {
+                self.host.panic();
+            }
+            let midi = self.host.midi_active();
+            let (r, resp) = ui.allocate_exact_size(egui::vec2(10.0, 28.0), egui::Sense::hover());
+            widgets::led(ui.painter(), r.center(), 3.0, midi);
+            resp.hint("MIDI input (Options › MIDI settings)");
+            if midi {
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(160));
+            }
+            ui.spacing_mut().item_spacing.x = 10.0;
+            widgets::divider(ui, 26.0);
+            // 5. Pattern.
+            ui.spacing_mut().item_spacing.x = 4.0;
+            self.pattern_controls(ui, now);
+            // 6. Snap.
+            ui.spacing_mut().item_spacing.x = 10.0;
+            let snap = widgets::drop_button(
+                ui,
+                Some((G::Snap, theme::AMBER)),
+                self.snap.name(),
+                "Snap (global): grid for the Playlist and the Piano Roll",
+            );
+            egui::Popup::menu(&snap).show(|ui| {
+                for v in toolbar::SNAPS {
+                    if ui.selectable_label(self.snap == v, v.name()).clicked() {
+                        self.snap = v;
+                        ui.close();
+                    }
+                }
+            });
             // Plugins still loading (spec 0.3.0 §8.3).
             if let Some((done, total, name)) = self.host.plugin_loading() {
                 ui.label(
                     egui::RichText::new(format!("Loading plugins {done}/{total} · {name}"))
-                        .color(theme::MUTED),
+                        .color(theme::MUTED)
+                        .size(11.0),
                 );
                 ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
             }
-            // MIDI activity (spec 0.3.0 §12.4).
-            let midi = self.host.midi_active();
-            let (r, resp) = ui.allocate_exact_size(egui::vec2(14.0, 28.0), egui::Sense::hover());
-            ui.painter().circle_filled(
-                r.center(),
-                3.5,
-                if midi { theme::GREEN } else { theme::RAISED },
-            );
-            resp.on_hover_text("MIDI input (Options › MIDI settings)");
-            if midi {
-                ui.ctx().request_repaint_after(std::time::Duration::from_millis(160));
-            }
-            self.metronome_buttons(ui);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                // 8. DSP and the output level.
+                let (rect, resp) = ui.allocate_exact_size(egui::vec2(84.0, 30.0), egui::Sense::hover());
+                let p = ui.painter();
+                let load = transport.peak_load.clamp(0.0, 1.0);
+                let pct = transport.peak_load * 100.0;
+                let late = transport.overloads > 0;
+                p.text(
+                    rect.left_top(),
+                    egui::Align2::LEFT_TOP,
+                    "DSP",
+                    theme::mono(10.0),
+                    theme::MUTED,
+                );
+                p.text(
+                    rect.right_top(),
+                    egui::Align2::RIGHT_TOP,
+                    if late {
+                        format!("{pct:.0}% · {}", transport.overloads)
+                    } else {
+                        format!("{pct:.0}%")
+                    },
+                    theme::mono(10.0),
+                    if late { theme::RED } else { theme::MUTED },
+                );
+                let bar = |y: f32, v: f32, c: egui::Color32| {
+                    let r = egui::Rect::from_min_size(egui::pos2(rect.left(), y), egui::vec2(rect.width(), 4.0));
+                    p.rect_filled(r, 2.0, theme::RAISED);
+                    let mut f = r;
+                    f.set_width(r.width() * v.clamp(0.0, 1.0));
+                    p.rect_filled(f, 2.0, c);
+                };
+                let dsp_color = if load > 0.85 {
+                    theme::RED
+                } else if load > 0.6 {
+                    theme::AMBER
+                } else {
+                    theme::GREEN
+                };
+                bar(rect.top() + 16.0, load, dsp_color);
+                let out = self.host.meters().output;
+                let peak = out.0.max(out.1);
+                // -60..0 dBFS across the bar.
+                let level = if peak > 0.0 {
+                    ((20.0 * peak.log10() + 60.0) / 60.0).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let out_color = if peak >= 1.0 {
+                    theme::RED
+                } else if level > 0.85 {
+                    theme::WARN
+                } else {
+                    theme::OK
+                };
+                bar(rect.top() + 24.0, level, out_color);
+                if playing {
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+                }
+                resp.hint(
+                    "DSP: audio processing time per buffer, as a share of its duration \
+                     (late buffers likely dropped out) · below: the output level",
+                );
+                // 7. Window toggles: glyph and F-key.
+                widgets::segmented(ui, |ui| {
+                    let mut piano = self.piano.is_some();
+                    let mixer = widgets::window_toggle(ui, G::Mixer, "F9", self.show_mixer, "Mixer (F9)");
+                    let playlist = widgets::window_toggle(ui, G::Playlist, "F5", self.show_playlist, "Playlist (F5)");
+                    let piano_r = widgets::window_toggle(ui, G::PianoRoll, "F7", piano, "Piano Roll (F7): the selected channel; a channel's Piano button opens another");
+                    let rack = widgets::window_toggle(ui, G::Rack, "F6", self.show_rack, "Channel Rack (F6)");
+                    let browser = widgets::window_toggle(ui, G::Browser, "Alt F8", self.show_browser, "Browser (Alt+F8)");
+                    // Laid out right to left: put them back in reading order.
+                    if mixer.clicked() {
+                        self.show_mixer = !self.show_mixer;
+                    }
+                    if playlist.clicked() {
+                        self.show_playlist = !self.show_playlist;
+                    }
+                    if piano_r.clicked() {
+                        piano = !piano;
+                        self.piano = match (piano, self.project.channels.first()) {
+                            (true, Some(c)) => Some(piano::PianoRoll::new(c.id)),
+                            _ => None,
+                        };
+                    }
+                    if rack.clicked() {
+                        self.show_rack = !self.show_rack;
+                    }
+                    if browser.clicked() {
+                        self.show_browser = !self.show_browser;
+                    }
+                });
+            });
+        });
+    }
 
-            if ui
-                .button("Panic")
-                .on_hover_text("Silence all sounding notes and voices")
-                .clicked()
-            {
-                self.host.panic();
-            }
-            ui.separator();
-            // Mode.
-            ui.selectable_value(&mut self.song_mode, false, "Pattern")
-                .on_hover_text("Play loops the current pattern");
-            ui.selectable_value(&mut self.song_mode, true, "Song")
-                .on_hover_text("Play the playlist arrangement");
-            ui.separator();
+    /// The position display (UI-RD-011 item 3): BAR · BEAT · TICK in amber,
+    /// BPM, SIG and TAP in one LCD field.
+    fn position_display(
+        &mut self,
+        ui: &mut egui::Ui,
+        transport: &TransportStatus,
+        counting: bool,
+        now: f64,
+    ) {
+        let frame = egui::Frame::new()
+            .fill(theme::LCD)
+            .stroke(egui::Stroke::new(1.0, theme::LINE))
+            .corner_radius(8)
+            .inner_margin(egui::Margin::ZERO);
+        frame.show(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            ui.set_height(38.0);
             // Position; stopped in song mode the caret; during a count-in
-            // the beats left (MET-022).
-            // Also the caret while it is dragged on the ruler (CUR-014).
+            // the beats left (MET-022). Also the caret while it is dragged
+            // on the ruler (CUR-014).
             let ticks = match transport.position_ticks {
                 Some(_) if self.song_mode && self.playlist_view.caret_dragging() => self.caret,
                 Some(p) if transport.playing => p,
                 _ => self.mode_caret(),
             };
-            let text = if counting {
-                format!("— {} —", transport.count_in)
+            let (caption, text) = if counting {
+                ("COUNT-IN", format!("— {} —", transport.count_in))
             } else if self.time_display {
-                toolbar::time_text(ticks, self.project.tempo_bpm)
-            } else {
-                toolbar::bars_text(ticks, self.project.time_signature)
-            };
-            let display = ui
-                .add(
-                    egui::Button::new(egui::RichText::new(text).font(theme::mono(18.0)))
-                        .fill(theme::FIELD)
-                        .min_size(egui::vec2(130.0, 30.0))
-                        .sense(egui::Sense::click_and_drag()),
+                (
+                    "MIN · SEC · MS",
+                    toolbar::time_text(ticks, self.project.tempo_bpm),
                 )
-                .on_hover_text("Click to switch between bars and time; drag to move the caret by beats");
+            } else {
+                (
+                    "BAR · BEAT · TICK",
+                    toolbar::bars_text(ticks, self.project.time_signature),
+                )
+            };
+            let (rect, display) =
+                ui.allocate_exact_size(egui::vec2(124.0, 38.0), egui::Sense::click_and_drag());
+            widgets::lcd_cell(ui.painter(), rect, caption, &text, theme::AMBER);
+            ui.painter().vline(
+                rect.right() - 0.5,
+                rect.y_range(),
+                egui::Stroke::new(1.0, theme::LCD_LINE),
+            );
+            let label = text.clone();
+            display.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
+            let display = display
+                .hint("Click to switch between bars and time; drag to move the caret by beats");
             if display.clicked() {
                 self.time_display = !self.time_display;
             }
@@ -1696,7 +1988,8 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 if beats != 0.0 {
                     self.caret_drag -= beats * PX_PER_BEAT;
                     let beat = i64::from(self.project.time_signature.beat_ticks());
-                    let at = ((self.mode_caret() as i64 / beat + beats as i64).max(0) * beat) as u64;
+                    let at =
+                        ((self.mode_caret() as i64 / beat + beats as i64).max(0) * beat) as u64;
                     if self.song_mode {
                         self.set_caret(at);
                     } else {
@@ -1713,113 +2006,122 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 self.caret_drag = 0.0;
             }
             // Tempo.
+            let cell =
+                |ui: &mut egui::Ui, caption: &str, w: f32, add: &mut dyn FnMut(&mut egui::Ui)| {
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(w, 38.0), egui::Sense::hover());
+                    ui.painter().text(
+                        egui::pos2(rect.left() + 12.0, rect.top() + 5.0),
+                        egui::Align2::LEFT_TOP,
+                        caption,
+                        egui::FontId::proportional(9.0),
+                        theme::DIM,
+                    );
+                    ui.painter().vline(
+                        rect.right() - 0.5,
+                        rect.y_range(),
+                        egui::Stroke::new(1.0, theme::LCD_LINE),
+                    );
+                    let inner = egui::Rect::from_min_max(
+                        egui::pos2(rect.left() + 6.0, rect.top() + 14.0),
+                        egui::pos2(rect.right() - 4.0, rect.bottom() - 1.0),
+                    );
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
+                        ui.style_mut().override_font_id = Some(theme::mono(18.0));
+                        let w = &mut ui.visuals_mut().widgets;
+                        for s in [&mut w.inactive, &mut w.hovered, &mut w.active, &mut w.open] {
+                            s.weak_bg_fill = egui::Color32::TRANSPARENT;
+                            s.bg_fill = egui::Color32::TRANSPARENT;
+                            s.bg_stroke = egui::Stroke::NONE;
+                            s.expansion = 0.0;
+                        }
+                        ui.spacing_mut().button_padding = egui::vec2(6.0, 0.0);
+                        ui.spacing_mut().interact_size.y = 22.0;
+                        add(ui);
+                    });
+                };
             let mut tempo = self.project.tempo_bpm;
-            let r = ui
-                .add(
-                    egui::DragValue::new(&mut tempo)
-                        .range(MIN_TEMPO_BPM..=MAX_TEMPO_BPM)
-                        .speed(0.5)
-                        .fixed_decimals(3)
-                        .suffix(" BPM"),
-                )
-                .on_hover_text("Drag or type; one drag is one undo step");
-            if r.changed() && tempo != self.project.tempo_bpm {
-                self.apply(Edit::SetTempo(tempo), true, now);
+            let mut tempo_resp = None;
+            cell(ui, "BPM", 96.0, &mut |ui| {
+                tempo_resp = Some(
+                    ui.add(
+                        egui::DragValue::new(&mut tempo)
+                            .range(MIN_TEMPO_BPM..=MAX_TEMPO_BPM)
+                            .speed(0.5)
+                            .fixed_decimals(3),
+                    )
+                    .hint("Tempo: drag or type; one drag is one undo step"),
+                );
+            });
+            if let Some(r) = tempo_resp {
+                if r.changed() && tempo != self.project.tempo_bpm {
+                    self.apply(Edit::SetTempo(tempo), true, now);
+                }
+                if r.drag_stopped() || r.lost_focus() {
+                    self.history.end_gesture();
+                }
             }
-            if r.drag_stopped() || r.lost_focus() {
-                self.history.end_gesture();
-            }
-            if ui.button("Tap").on_hover_text("Tap Tempo").clicked() {
-                self.tap.get_or_insert_with(toolbar::TapTempo::default);
-            }
-            if let Some(sig) = toolbar::signature_field(ui, self.project.time_signature) {
+            let mut sig = None;
+            let current = self.project.time_signature;
+            cell(ui, "SIG", 60.0, &mut |ui| {
+                sig = toolbar::signature_field(ui, current);
+            });
+            if let Some(sig) = sig {
                 self.apply(Edit::SetTimeSignature(sig), false, now);
             }
-            ui.separator();
-            self.pattern_controls(ui, now);
-            ui.separator();
-            ui.label(egui::RichText::new("Snap").color(theme::MUTED));
-            egui::ComboBox::from_id_salt("snap")
-                .width(90.0)
-                .selected_text(self.snap.name())
-                .show_ui(ui, |ui| {
-                    for v in toolbar::SNAPS {
-                        ui.selectable_value(&mut self.snap, v, v.name());
-                    }
-                })
-                .response
-                .on_hover_text("Grid for the Playlist and the Piano Roll");
-            ui.separator();
-            ui.toggle_value(&mut self.show_browser, "Browser");
-            ui.toggle_value(&mut self.show_rack, "Rack");
-            let mut piano = self.piano.is_some();
-            if ui
-                .toggle_value(&mut piano, "Piano")
-                .on_hover_text(
-                    "Open the Piano Roll for the first channel; \
-                     use a channel's Piano button for another",
-                )
-                .changed()
-            {
-                self.piano = match (piano, self.project.channels.first()) {
-                    (true, Some(c)) => Some(piano::PianoRoll::new(c.id)),
-                    _ => None,
-                };
+            // TAP.
+            let (rect, tap) = ui.allocate_exact_size(egui::vec2(54.0, 38.0), egui::Sense::click());
+            let color = if tap.hovered() {
+                theme::TEXT
+            } else {
+                theme::MUTED
+            };
+            icons::paint(
+                ui,
+                icons::Glyph::Tap,
+                egui::Rect::from_center_size(
+                    rect.left_center() + egui::vec2(16.0, 0.0),
+                    egui::vec2(14.0, 14.0),
+                ),
+                color,
+            );
+            ui.painter().text(
+                rect.left_center() + egui::vec2(27.0, 0.0),
+                egui::Align2::LEFT_CENTER,
+                "TAP",
+                egui::FontId::proportional(10.5),
+                color,
+            );
+            tap.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Tap"));
+            if tap.hint("Tap Tempo").clicked() {
+                self.tap.get_or_insert_with(toolbar::TapTempo::default);
             }
-            ui.toggle_value(&mut self.show_playlist, "Playlist");
-            ui.toggle_value(&mut self.show_mixer, "Mixer");
-            ui.separator();
-            // Performance.
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing.y = 2.0;
-                let load = transport.peak_load.clamp(0.0, 1.0);
-                let pct = transport.peak_load * 100.0;
-                let text = if transport.overloads > 0 {
-                    egui::RichText::new(format!("DSP {pct:.0}% · {} late", transport.overloads))
-                        .color(theme::RED)
-                } else {
-                    egui::RichText::new(format!("DSP {pct:.0}%"))
-                };
-                ui.label(text.font(theme::mono(11.0))).on_hover_text(
-                    "Late: buffers that took longer to process than to play; \
-                     each one likely caused a dropout",
-                );
-                let (rect, _) = ui.allocate_exact_size(egui::vec2(90.0, 5.0), egui::Sense::hover());
-                ui.painter().rect_filled(rect, 2.0, theme::RAISED);
-                let mut fill = rect;
-                fill.set_width(rect.width() * load);
-                let color = if load > 0.85 {
-                    theme::RED
-                } else if load > 0.6 {
-                    theme::AMBER
-                } else {
-                    theme::GREEN
-                };
-                ui.painter().rect_filled(fill, 2.0, color);
-            })
-            .response
-            .on_hover_text("Audio processing time per buffer, as a share of the buffer's duration");
         });
     }
 
-    fn status_bar(&mut self, ui: &mut egui::Ui) {
+    fn status_bar(&mut self, ui: &mut egui::Ui, hint: Option<String>) {
         let t = self.host.transport();
-        ui.horizontal(|ui| {
-            let changes = if self.history.is_dirty() {
-                egui::RichText::new("Unsaved changes").color(theme::WARN)
+        ui.horizontal_centered(|ui| {
+            ui.spacing_mut().item_spacing.x = 12.0;
+            let (color, text) = if self.history.is_dirty() {
+                (theme::WARN, "Unsaved changes")
             } else {
-                egui::RichText::new("All changes saved").color(theme::OK)
+                (theme::OK, "All changes saved")
             };
-            ui.label(changes.size(11.0));
+            let (r, _) = ui.allocate_exact_size(egui::vec2(6.0, 12.0), egui::Sense::hover());
+            ui.painter().circle_filled(r.center(), 3.0, color);
+            ui.add_space(-8.0);
+            ui.label(egui::RichText::new(text).size(11.0).color(color));
             ui.label(
                 egui::RichText::new(format!("Voices {}", t.voices))
                     .size(11.0)
                     .color(theme::MUTED),
             );
             if t.dropped_commands > 0 {
-                ui.colored_label(
-                    theme::WARN,
-                    format!("Dropped commands {}", t.dropped_commands),
+                ui.label(
+                    egui::RichText::new(format!("Dropped commands {}", t.dropped_commands))
+                        .size(11.0)
+                        .color(theme::WARN),
                 );
             }
             // Armed input: its level, and the take's length while recording.
@@ -1843,6 +2145,24 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 recording::input_meter(ui, meter, 80.0);
                 ui.ctx().request_repaint_after_secs(0.05);
             }
+            // The hint line in the middle (UI-RD §1.5).
+            if let Some(hint) = hint {
+                let full = ui.max_rect();
+                let galley = widgets::fit_galley(
+                    ui.painter(),
+                    hint,
+                    egui::FontId::proportional(11.0),
+                    theme::MUTED,
+                    full.width() * 0.5,
+                );
+                let at = egui::pos2(
+                    full.center().x - galley.size().x / 2.0,
+                    full.center().y - galley.size().y / 2.0,
+                );
+                if at.x > ui.min_rect().right() + 12.0 {
+                    ui.painter().galley(at, galley, theme::MUTED);
+                }
+            }
             ui.with_layout(
                 egui::Layout::right_to_left(egui::Align::Center),
                 |ui| match self.host.stream() {
@@ -1864,14 +2184,20 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                         });
                         ui.label(
                             egui::RichText::new(format!(
-                                "{} · {} · {} Hz · {buffer}{ms}{state}",
-                                s.info.backend, s.info.device_name, s.info.sample_rate
+                                "{} · {} Hz · {buffer}{ms}{state}",
+                                s.info.device_name, s.info.sample_rate
                             ))
-                            .font(theme::mono(11.0)),
-                        );
+                            .font(theme::mono(10.5))
+                            .color(theme::MUTED),
+                        )
+                        .on_hover_text(s.info.backend.to_string());
                     }
                     None => {
-                        ui.colored_label(theme::WARN, "No audio device open");
+                        ui.label(
+                            egui::RichText::new("No audio device open")
+                                .size(11.0)
+                                .color(theme::WARN),
+                        );
                     }
                 },
             );
@@ -2692,7 +3018,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 if ui.button("Delete").clicked() {
                     choice = Some(true);
                 }
-                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                if crate::widgets::outline_button(ui, "Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                     choice = Some(false);
                 }
             });
@@ -2913,51 +3239,92 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
 
     /// Pattern selector, new/rename, length and loop toggle.
     fn pattern_controls(&mut self, ui: &mut egui::Ui, now: f64) {
+        use icons::Glyph as G;
         if self.project.pattern(self.current_pattern).is_none() {
             self.current_pattern = self.project.patterns[0].id;
         }
         let current = self.project.pattern(self.current_pattern).expect("checked");
         let (current_name, current_len) = (current.name.clone(), current.length_steps);
+        let color = current.color.map_or(theme::MUTED, theme::rgb);
+        // Colour, name, length ▾ (UI-RD-011 item 5).
+        let text = format!("{current_name}  {current_len} st");
+        let pick = widgets::drop_button(
+            ui,
+            Some((G::Pattern, color)),
+            &text,
+            "Pattern edited in the channel rack; new clips use it",
+        );
         let mut selected = self.current_pattern;
-        egui::ComboBox::from_id_salt("pattern")
-            .width(92.0)
-            .selected_text(current_name)
-            .show_ui(ui, |ui| {
-                for p in &self.project.patterns {
-                    ui.selectable_value(&mut selected, p.id, &p.name);
-                }
-            })
-            .response
-            .on_hover_text("Pattern edited in the channel rack; new clips use it");
-        self.current_pattern = selected;
-        if ui
-            .small_button("+")
-            .on_hover_text("New pattern (F4)")
-            .clicked()
-        {
-            self.new_pattern(now);
-        }
-        if ui.small_button("Rename").clicked() {
-            self.start_rename(RenameTarget::Pattern(self.current_pattern));
-        }
         let mut steps = current_len;
-        let r = ui
-            .add(
-                egui::DragValue::new(&mut steps)
-                    .range(1..=jdance_domain::MAX_PATTERN_STEPS)
-                    .suffix(" steps"),
-            )
-            .on_hover_text("Pattern length; playlist clips keep their length (looped clips repeat the new length)");
-        if r.changed() && steps != current_len {
+        let mut length_resp = None;
+        egui::Popup::from_toggle_button_response(&pick)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
+                ui.set_min_width(200.0);
+                widgets::caption(ui, "Patterns");
+                egui::ScrollArea::vertical()
+                    .max_height(260.0)
+                    .show(ui, |ui| {
+                        for p in &self.project.patterns {
+                            let c = p.color.map_or(theme::MUTED, theme::rgb);
+                            let r = ui.horizontal(|ui| {
+                                let (sw, _) = ui.allocate_exact_size(
+                                    egui::vec2(9.0, 9.0),
+                                    egui::Sense::hover(),
+                                );
+                                ui.painter().rect_filled(sw, 2.0, c);
+                                ui.selectable_label(p.id == selected, &p.name)
+                            });
+                            if r.inner.clicked() {
+                                selected = p.id;
+                            }
+                        }
+                    });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    widgets::caption(ui, "Length");
+                    length_resp = Some(
+                        ui.add(
+                            egui::DragValue::new(&mut steps)
+                                .range(1..=jdance_domain::MAX_PATTERN_STEPS)
+                                .suffix(" steps"),
+                        )
+                        .on_hover_text(
+                            "Pattern length; playlist clips keep their length \
+                             (looped clips repeat the new length)",
+                        ),
+                    );
+                });
+            });
+        if selected != self.current_pattern {
+            self.current_pattern = selected;
+            egui::Popup::close_all(ui.ctx());
+        }
+        if length_resp.is_some_and(|r| r.changed()) && steps != current_len {
             self.set_pattern_length(self.current_pattern, steps, false, now);
         }
-        ui.separator();
-        let mut looping = self.project.playlist.loop_enabled;
-        if ui
-            .toggle_value(&mut looping, "Loop")
-            .on_hover_text("Loop the region set with Shift+drag on the playlist ruler (default: whole arrangement)")
-            .changed()
+        if icons::icon_button(ui, G::New, false, "New pattern (F4)").clicked() {
+            self.new_pattern(now);
+        }
+        if icons::icon_button(ui, G::Rename, false, "Rename the pattern").clicked() {
+            self.start_rename(RenameTarget::Pattern(self.current_pattern));
+        }
+        if icons::icon_button(ui, G::Clone, false, "Clone the pattern").clicked() {
+            self.project_action(
+                project_browser::ProjectAction::DuplicatePattern(self.current_pattern),
+                now,
+            );
+        }
+        let looping = self.project.playlist.loop_enabled;
+        if icons::icon_button(
+            ui,
+            G::Loop,
+            looping,
+            "Loop the region set with Shift+drag on the playlist ruler (default: whole arrangement)",
+        )
+        .clicked()
         {
+            let looping = !looping;
             let bar = u64::from(self.project.time_signature.bar_ticks());
             let end = self.project.arrangement_end_ticks().max(bar);
             let range = self.project.playlist.loop_range.or(Some((0, end)));
@@ -2995,7 +3362,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 if ui.button("Truncate").clicked() {
                     choice = Some(true);
                 }
-                if ui.button("Cancel").clicked() {
+                if crate::widgets::outline_button(ui, "Cancel").clicked() {
                     choice = Some(false);
                 }
             });
@@ -3255,14 +3622,26 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
     fn metronome_buttons(&mut self, ui: &mut egui::Ui) {
         let mut m = self.host.metronome();
         let before = m;
-        let r = ui
-            .toggle_value(&mut m.on, "Metro")
-            .on_hover_text("Metronome (Ctrl+M) · right-click: level");
+        let r = icons::icon_button(
+            ui,
+            icons::Glyph::Metronome,
+            m.on,
+            "Metronome (Ctrl+M) · right-click: level",
+        );
+        if r.clicked() {
+            m.on = !m.on;
+        }
         r.context_menu(|ui| metronome_settings_ui(ui, &mut m));
-        ui.toggle_value(&mut m.count_in, "1·2·3·4")
-            .on_hover_text(format!(
-                "Count {COUNT_IN_BARS} bars before recording (Ctrl+P)"
-            ));
+        if icons::icon_button(
+            ui,
+            icons::Glyph::CountIn,
+            m.count_in,
+            &format!("Count {COUNT_IN_BARS} bars before recording (Ctrl+P)"),
+        )
+        .clicked()
+        {
+            m.count_in = !m.count_in;
+        }
         if m != before {
             self.host.set_metronome(m);
         }
@@ -3282,7 +3661,9 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 if ui.button("Turn loop off and record").clicked() {
                     choice = Some(true);
                 }
-                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
+                if crate::widgets::outline_button(ui, "Cancel").clicked()
+                    || ui.input(|i| i.key_pressed(Key::Escape))
+                {
                     choice = Some(false);
                 }
             });
@@ -3823,8 +4204,8 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             }
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                cancel |= ui.button("Cancel").clicked();
-                commit |= ui.button("Apply").clicked();
+                cancel |= crate::widgets::outline_button(ui, "Cancel").clicked();
+                commit |= widgets::primary_button(ui, "Apply", true).clicked();
             });
             if dialog.color != color_before && !commit {
                 dialog.color_manual = true;
@@ -4064,7 +4445,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
             ui.label(egui::RichText::new("Undo restores all of it.").color(theme::MUTED));
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                cancel |= ui.button("Cancel").clicked();
+                cancel |= crate::widgets::outline_button(ui, "Cancel").clicked();
                 confirm |= ui
                     .button(egui::RichText::new("Delete").color(theme::ERROR))
                     .clicked();
@@ -4113,7 +4494,7 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 if ui.button("Discard").clicked() {
                     choice = Some(false);
                 }
-                if ui.button("Cancel").clicked() {
+                if crate::widgets::outline_button(ui, "Cancel").clicked() {
                     self.pending = None;
                 }
             });
@@ -4221,15 +4602,34 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
                 .fill(fill)
                 .inner_margin(egui::Margin::symmetric(12, 4))
         };
+        // UI-RD §2: top bar 34 px, transport 52 px, status line 24 px.
+        let line = egui::Stroke::new(1.0, theme::LINE);
         egui::Panel::top("menu")
-            .frame(bar(theme::SIDEBAR))
+            .exact_size(34.0)
+            .frame(
+                bar(theme::SIDEBAR)
+                    .inner_margin(egui::Margin::symmetric(10, 0))
+                    .stroke(line),
+            )
             .show(ui, |ui| self.menu_bar(ui, now));
         egui::Panel::top("toolbar")
-            .frame(bar(theme::BAR).inner_margin(egui::Margin::symmetric(12, 8)))
+            .exact_size(52.0)
+            .frame(
+                bar(theme::BAR)
+                    .inner_margin(egui::Margin::symmetric(10, 0))
+                    .stroke(line),
+            )
             .show(ui, |ui| self.toolbar(ui, now));
+        // The status line reads last frame's hint (panels below set it).
+        let hint = self.last_hint.take();
         egui::Panel::bottom("status")
-            .frame(bar(theme::SIDEBAR))
-            .show(ui, |ui| self.status_bar(ui));
+            .exact_size(24.0)
+            .frame(
+                bar(theme::SIDEBAR)
+                    .inner_margin(egui::Margin::symmetric(10, 0))
+                    .stroke(line),
+            )
+            .show(ui, |ui| self.status_bar(ui, hint));
         if let Some(mut tap) = self.tap.take() {
             let (apply, open) = tap.window(&ctx, now);
             if let Some(bpm) = apply {
@@ -4242,27 +4642,65 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
         let mut browser_actions = Vec::new();
         if self.show_browser {
             let labels: Vec<&'static str> = self.history.undo_labels().collect();
-            egui::Panel::left("browser")
-                .resizable(true)
-                .default_size(270.0)
-                .min_size(180.0)
-                .frame(
-                    egui::Frame::new()
-                        .fill(theme::SIDEBAR)
-                        .inner_margin(egui::Margin::same(10)),
-                )
-                .show(ui, |ui| {
-                    let dir = self.path.as_deref().and_then(Path::parent);
-                    browser_actions =
-                        self.browser_view
-                            .show(ui, &self.project, dir, &labels, &mut self.host);
-                });
+            let dir = self
+                .path
+                .as_deref()
+                .and_then(Path::parent)
+                .map(Path::to_path_buf);
+            if self.layout.is_undocked(dock::Panel::Browser) {
+                let (view, project, host) = (&mut self.browser_view, &self.project, &mut self.host);
+                let event =
+                    self.layout
+                        .window(&ctx, dock::Panel::Browser, 0, "Browser", &mut |ui| {
+                            browser_actions = view.show(ui, project, dir.as_deref(), &labels, host);
+                        });
+                match event {
+                    dock::WindowEvent::Closed => self.show_browser = false,
+                    dock::WindowEvent::DockBack => self.layout.dock(dock::Panel::Browser),
+                    dock::WindowEvent::None => {}
+                }
+            } else {
+                egui::Panel::left("browser")
+                    .resizable(true)
+                    .default_size(240.0)
+                    .min_size(180.0)
+                    .frame(
+                        egui::Frame::new()
+                            .fill(theme::SIDEBAR)
+                            .inner_margin(egui::Margin::symmetric(8, 0)),
+                    )
+                    .show(ui, |ui| {
+                        let h = widgets::panel_header(
+                            ui,
+                            icons::Glyph::Browser,
+                            "Browser",
+                            &[],
+                            widgets::WindowButtons::UndockClose(false),
+                            |_| {},
+                        );
+                        if h.undock {
+                            self.layout.undock(dock::Panel::Browser);
+                        }
+                        if h.close {
+                            self.show_browser = false;
+                        }
+                        ui.add_space(6.0);
+                        browser_actions = self.browser_view.show(
+                            ui,
+                            &self.project,
+                            dir.as_deref(),
+                            &labels,
+                            &mut self.host,
+                        );
+                    });
+            }
         }
         for action in browser_actions {
             self.browser_action(action, now);
         }
         let mut mix = mixer::MixerOutput::default();
         let mixer_docked = !self.layout.is_undocked(dock::Panel::Mixer);
+        self.mixer_view.window_buttons = widgets::WindowButtons::UndockClose(!mixer_docked);
         if self.show_mixer && !mixer_docked {
             let latency = self.host.latency();
             let meters = self.host.meters();
@@ -4281,8 +4719,11 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
                         );
                     });
                 });
-            if event == dock::WindowEvent::Closed {
+            if event == dock::WindowEvent::Closed || mix.header.close {
                 self.show_mixer = false;
+            }
+            if mix.header.undock {
+                self.layout.dock(dock::Panel::Mixer);
             }
         }
         if self.show_mixer && mixer_docked {
@@ -4290,44 +4731,96 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
             let meters = self.host.meters();
             egui::Panel::bottom("mixer")
                 .resizable(true)
-                .default_size(430.0)
+                .default_size(300.0)
                 .min_size(120.0)
+                .frame(
+                    egui::Frame::new()
+                        .fill(theme::PANEL)
+                        .inner_margin(egui::Margin::symmetric(8, 0))
+                        .stroke(egui::Stroke::new(1.0, theme::LINE)),
+                )
                 .show(ui, |ui| {
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        mix = mixer::show(
-                            ui,
-                            &self.project.mixer,
-                            &self.project.automation,
-                            &latency,
-                            &meters,
-                            &mut self.host,
-                            &mut self.mixer_view,
-                        );
-                    });
+                    mix = mixer::show(
+                        ui,
+                        &self.project.mixer,
+                        &self.project.automation,
+                        &latency,
+                        &meters,
+                        &mut self.host,
+                        &mut self.mixer_view,
+                    );
                 });
+            if mix.header.close {
+                self.show_mixer = false;
+            }
+            if mix.header.undock {
+                self.layout.undock(dock::Panel::Mixer);
+            }
         }
         let mut out = rack::RackOutput::default();
         if self.show_rack {
-            egui::Panel::top("rack")
-                .resizable(true)
-                .default_size(230.0)
-                .min_size(60.0)
-                .show(ui, |ui| {
-                    let marks = self
-                        .project
-                        .pattern(self.current_pattern)
-                        .map(|p| self.pattern_marks(p))
-                        .unwrap_or_default();
-                    let dir = self.path.as_deref().and_then(Path::parent);
-                    out = self.rack_view.show(
-                        ui,
-                        &self.project,
-                        self.current_pattern,
-                        &mut self.host,
-                        dir,
-                        marks,
-                    );
-                });
+            let marks = self
+                .project
+                .pattern(self.current_pattern)
+                .map(|p| self.pattern_marks(p))
+                .unwrap_or_default();
+            let dir = self
+                .path
+                .as_deref()
+                .and_then(Path::parent)
+                .map(Path::to_path_buf);
+            let rack_docked = !self.layout.is_undocked(dock::Panel::ChannelRack);
+            self.rack_view.window_buttons = widgets::WindowButtons::UndockClose(!rack_docked);
+            if rack_docked {
+                egui::Panel::top("rack")
+                    .resizable(true)
+                    .default_size(200.0)
+                    .min_size(60.0)
+                    .frame(
+                        egui::Frame::new()
+                            .fill(theme::PANEL)
+                            .inner_margin(egui::Margin::symmetric(8, 0))
+                            .stroke(egui::Stroke::new(1.0, theme::LINE)),
+                    )
+                    .show(ui, |ui| {
+                        out = self.rack_view.show(
+                            ui,
+                            &self.project,
+                            self.current_pattern,
+                            &mut self.host,
+                            dir.as_deref(),
+                            marks,
+                        );
+                    });
+                if out.header.undock {
+                    self.layout.undock(dock::Panel::ChannelRack);
+                }
+            } else {
+                let (view, project, host, pattern) = (
+                    &mut self.rack_view,
+                    &self.project,
+                    &mut self.host,
+                    self.current_pattern,
+                );
+                let event = self.layout.window(
+                    &ctx,
+                    dock::Panel::ChannelRack,
+                    0,
+                    "Channel Rack",
+                    &mut |ui| {
+                        out = view.show(ui, project, pattern, host, dir.as_deref(), marks);
+                    },
+                );
+                if event == dock::WindowEvent::Closed {
+                    self.show_rack = false;
+                }
+                if out.header.undock {
+                    self.layout.dock(dock::Panel::ChannelRack);
+                }
+            }
+            if out.header.close {
+                self.show_rack = false;
+            }
         }
         let mut pl_out = playlist::PlaylistOutput::default();
         let mut project_actions = Vec::new();
@@ -4512,6 +5005,9 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
         }
         for edit in pl_out.gesture {
             self.apply(edit, true, now);
+        }
+        if pl_out.close {
+            self.show_playlist = false;
         }
         if pl_out.end_gesture {
             self.history.end_gesture();
@@ -4746,6 +5242,13 @@ impl<H: Host, S: ProjectStore> eframe::App for JdanceApp<H, S> {
         }
         self.confirm_dialog(&ctx, now);
         self.show_notices(&ctx, now);
+        // The hint for the next frame's status line; a change repaints.
+        let hint = widgets::take_hint(&ctx);
+        if hint != self.shown_hint {
+            self.shown_hint.clone_from(&hint);
+            ctx.request_repaint();
+        }
+        self.last_hint = hint;
         if self.layout.changed {
             self.layout.changed = false;
             self.host.set_ui_layout(self.layout.to_text());

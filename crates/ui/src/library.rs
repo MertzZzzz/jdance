@@ -85,7 +85,7 @@ pub(crate) fn library_window(ctx: &egui::Context, host: &mut dyn Host) -> bool {
                 if running {
                     ui.spinner();
                     ui.label(format!("Indexing… {files} files"));
-                    if ui.button("Cancel").clicked() {
+                    if crate::widgets::outline_button(ui, "Cancel").clicked() {
                         host.cancel_library_scan();
                     }
                     ui.ctx().request_repaint_after_secs(0.2);
@@ -289,7 +289,7 @@ impl SamplePicker {
                     {
                         result = Some(self.selected.clone());
                     }
-                    if ui.button("Cancel").clicked() {
+                    if crate::widgets::outline_button(ui, "Cancel").clicked() {
                         result = Some(None);
                     }
                 });

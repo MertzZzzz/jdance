@@ -416,6 +416,8 @@ pub(crate) enum PlaylistAction {
 
 #[derive(Debug, Default)]
 pub(crate) struct PlaylistOutput {
+    /// The header's Close: hide the Playlist.
+    pub close: bool,
     pub edits: Vec<Edit>,
     /// Edits of a continuous gesture (merged into one undo step).
     pub gesture: Vec<Edit>,
@@ -801,7 +803,7 @@ impl PlaylistView {
         let mut out = PlaylistOutput::default();
         self.retain_existing(project);
         let zoom_before = self.zoom;
-        self.header(ui, project);
+        out.close = self.header(ui, project);
         let fit = self.zoom_input(ui, project);
         let pointer = ui.ctx().pointer_latest_pos();
         let offset = self.zoom_offset(zoom_before, playhead.or(self.caret), fit, pointer);
@@ -837,42 +839,52 @@ impl PlaylistView {
         out
     }
 
-    fn header(&mut self, ui: &mut egui::Ui, project: &Project) {
-        ui.horizontal(|ui| {
-            for (tool, glyph, tip) in Tool::ALL {
-                if icons::tool_button(ui, glyph, self.tool == tool, tip).clicked() {
-                    self.tool = tool;
+    fn header(&mut self, ui: &mut egui::Ui, project: &Project) -> bool {
+        // UI-RD §2.2: Playlist › Arrangement › source, the tools as a
+        // segmented group, zoom on the right; the Playlist does not undock.
+        let source = self.source.and_then(|s| source_name(project, s));
+        let context: Vec<&str> = match &source {
+            Some(name) => vec!["Arrangement", name.as_str()],
+            None => vec!["Arrangement", "no source"],
+        };
+        let selected = self.selection.len();
+        let h = crate::widgets::panel_header(
+            ui,
+            icons::Glyph::Playlist,
+            "Playlist",
+            &context,
+            crate::widgets::WindowButtons::Close,
+            |ui| {
+                crate::widgets::segmented(ui, |ui| {
+                    for (tool, glyph, tip) in Tool::ALL {
+                        if icons::tool_button(ui, glyph, self.tool == tool, tip).clicked() {
+                            self.tool = tool;
+                        }
+                    }
+                });
+                if selected > 0 {
+                    ui.label(
+                        RichText::new(format!("{selected} selected"))
+                            .size(11.0)
+                            .color(theme::BLUE),
+                    );
                 }
-            }
-            ui.separator();
-            ui.label(RichText::new("Playlist").font(theme::strong(14.0)));
-            ui.label(RichText::new("› Arrangement ›").color(theme::MUTED));
-            match self.source.and_then(|s| source_name(project, s)) {
-                Some(name) => {
-                    ui.label(&name)
-                        .on_hover_text("What Draw and Paint place (choose a pattern above)");
-                }
-                None => {
-                    ui.label(RichText::new("no source").color(theme::WARN))
-                        .on_hover_text("Choose a pattern or a file to place with Draw and Paint");
-                }
-            }
-            ui.separator();
-            ui.add(
-                egui::Slider::new(&mut self.zoom, MIN_ZOOM..=MAX_ZOOM)
-                    .logarithmic(true)
-                    .show_value(false)
-                    .text("Zoom"),
-            )
-            .on_hover_text(
-                "Also Ctrl+wheel, Page Up / Page Down, Shift+1…4; Shift+5 fits the selection",
-            );
-            if !self.selection.is_empty() {
-                ui.label(
-                    RichText::new(format!("{} selected", self.selection.len())).color(theme::MUTED),
-                );
-            }
-        });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.spacing_mut().slider_width = 90.0;
+                    ui.add(
+                        egui::Slider::new(&mut self.zoom, MIN_ZOOM..=MAX_ZOOM)
+                            .logarithmic(true)
+                            .show_value(false),
+                    )
+                    .on_hover_text(
+                        "Zoom · also Ctrl+wheel, Page Up / Page Down, Shift+1…4; Shift+5 fits the selection",
+                    );
+                    let (r, _) = ui.allocate_exact_size(vec2(14.0, 14.0), egui::Sense::hover());
+                    icons::paint(ui, icons::Glyph::Zoom, r, theme::DIM);
+                });
+            },
+        );
+        h.close
     }
 
     /// Delete, Ctrl+B (duplicate), Ctrl+D (deselect) and tool keys, when
@@ -963,8 +975,17 @@ impl PlaylistView {
                 }
                 let ui = &mut child;
                 ui.spacing_mut().item_spacing.x = 4.0;
-                let (bar, resp) = ui.allocate_exact_size(vec2(4.0, ROW_H - 8.0), Sense::click());
-                ui.painter().rect_filled(bar, 2.0, color(lane.color));
+                // UI-RD §2.2: a lane header is a strip of the panel colour
+                // with the lane colour on its left edge.
+                let ground = Rect::from_min_max(row.min + vec2(0.0, 1.0), row.max - vec2(0.0, 1.0));
+                ui.painter().rect_filled(ground, 0.0, theme::PANEL);
+                ui.painter().hline(
+                    ground.x_range(),
+                    row.bottom() - 0.5,
+                    Stroke::new(1.0, theme::LINE),
+                );
+                let (bar, resp) = ui.allocate_exact_size(vec2(4.0, ROW_H - 2.0), Sense::click());
+                ui.painter().rect_filled(bar, 0.0, color(lane.color));
                 if resp
                     .on_hover_text("Lane color: click for the next one")
                     .clicked()
@@ -978,7 +999,9 @@ impl PlaylistView {
                 }
                 let name = ui.add_sized(
                     [74.0, 22.0],
-                    egui::Button::new(RichText::new(&lane.name).size(12.0)).truncate(),
+                    egui::Button::new(RichText::new(&lane.name).size(12.0))
+                        .frame(false)
+                        .truncate(),
                 );
                 if name.double_clicked() {
                     out.actions.push(PlaylistAction::RenameLane(lane.id));
@@ -1040,10 +1063,15 @@ impl PlaylistView {
                     .max_rect(row.shrink2(vec2(2.0, 4.0)))
                     .layout(egui::Layout::left_to_right(egui::Align::Center)),
             );
-            if child
-                .button("+ Lane")
-                .on_hover_text("Add a lane (dropping a file here also adds one)")
-                .clicked()
+            if crate::widgets::button(
+                &mut child,
+                Some(icons::Glyph::New),
+                "Lane",
+                false,
+                crate::widgets::Look::Raised,
+                "Add a lane (dropping a file here also adds one)",
+            )
+            .clicked()
             {
                 out.actions.push(PlaylistAction::AddLane);
             }
@@ -1770,30 +1798,19 @@ impl PlaylistView {
             _ => self.caret,
         };
         if let Some(c) = caret {
-            // Caret: a triangle on the ruler and a dashed line (CUR-005).
+            // Caret: a triangle on the ruler and a dashed line (CUR-005,
+            // UI-RD §1.5).
             let x = x_of(c);
-            painter.add(egui::Shape::convex_polygon(
-                vec![
-                    pos2(x - 6.0, origin.y + RULER_H - 9.0),
-                    pos2(x + 6.0, origin.y + RULER_H - 9.0),
-                    pos2(x, origin.y + RULER_H),
-                ],
-                theme::AMBER,
-                Stroke::NONE,
-            ));
-            painter.add(egui::Shape::dashed_line(
-                &[pos2(x, origin.y + RULER_H), pos2(x, rect.bottom())],
-                Stroke::new(1.0, theme::AMBER.gamma_multiply(0.7)),
-                4.0,
-                4.0,
-            ));
+            crate::widgets::caret(
+                &painter,
+                x,
+                Rect::from_min_max(pos2(x - 6.0, origin.y), pos2(x + 6.0, origin.y + RULER_H)),
+                Rect::from_min_max(pos2(x, origin.y + RULER_H), pos2(x, rect.bottom())),
+            );
         }
         if let Some(pos) = playhead {
             let x = x_of(pos);
-            painter.line_segment(
-                [pos2(x, origin.y), pos2(x, rect.bottom())],
-                Stroke::new(2.0, Color32::from_rgb(0xF2, 0xF4, 0xF6)),
-            );
+            crate::widgets::playhead(&painter, x, origin.y, rect.bottom());
         }
         // Cursors.
         if self.drag.is_none()
@@ -2471,7 +2488,29 @@ fn draw_pattern_preview(
         .filter(|row| project.channel(row.channel).is_some())
         .filter(|row| row.steps.iter().any(|s| s.on) || !row.notes.is_empty())
         .collect();
-    let row_h = (body.height() / rows.len().max(1) as f32).min(5.0);
+    // UI-RD §2.2: rows of notes get a taller band and show pitch; step
+    // rows stay thin lines.
+    let weight = |row: &&jdance_domain::StepRow| if row.notes.is_empty() { 1.0 } else { 4.0 };
+    let total: f32 = rows.iter().map(weight).sum::<f32>().max(1.0);
+    let unit = ((body.height() - 2.0) / total).min(5.0);
+    let mut bands = Vec::with_capacity(rows.len());
+    let mut y0 = body.top() + 1.0;
+    for row in &rows {
+        let h = if row.notes.is_empty() {
+            unit
+        } else {
+            // Note rows may use the free room of the body.
+            let notes_rows = rows.iter().filter(|r| !r.notes.is_empty()).count().max(1) as f32;
+            let steps_h = rows.iter().filter(|r| r.notes.is_empty()).count() as f32 * unit;
+            ((body.height() - 2.0 - steps_h) / notes_rows).max(unit)
+        };
+        let (lo_key, hi_key) = row
+            .notes
+            .iter()
+            .fold((u8::MAX, 0u8), |(a, b), n| (a.min(n.key), b.max(n.key)));
+        bands.push((y0, h, lo_key, hi_key));
+        y0 += h;
+    }
     let x_of = |t: i64| r.left() + (t - lo as i64) as f32 * ppt;
     let mut base = lo as i64 - offset as i64;
     let mut reps = 0;
@@ -2488,8 +2527,9 @@ fn draw_pattern_preview(
         }
         let rep_end = (base + len as i64).min(hi as i64);
         if x_of(rep_end) >= body.left() {
-            for (k, row) in rows.iter().enumerate() {
-                let y = body.top() + 1.0 + k as f32 * row_h;
+            for (row, &(top, band, lo_key, hi_key)) in rows.iter().zip(&bands) {
+                let line = unit.max(1.0) - 0.5;
+                let y = top + unit / 2.0;
                 for (i, s) in row.steps.iter().enumerate().take(pat.length_steps as usize) {
                     let t = base + (i as i64) * i64::from(TICKS_PER_STEP);
                     if s.on && t >= lo as i64 && t < rep_end {
@@ -2499,17 +2539,26 @@ fn draw_pattern_preview(
                                 pos2(x, y),
                                 pos2(x + (TICKS_PER_STEP as f32 * ppt * 0.6).max(1.0), y),
                             ],
-                            Stroke::new(row_h.max(1.0) - 0.5, ink),
+                            Stroke::new(line, ink),
                         );
                     }
                 }
+                let span = f32::from(hi_key.saturating_sub(lo_key).max(1));
+                let note_h = (band / (span + 1.0)).clamp(1.5, 3.0);
                 for n in &row.notes {
                     let t = base + i64::from(n.start);
                     if t >= lo as i64 && t < rep_end {
                         let e = (t + i64::from(n.length)).min(rep_end);
+                        let ny = if hi_key > lo_key {
+                            top + band
+                                - note_h / 2.0
+                                - f32::from(n.key - lo_key) / span * (band - note_h)
+                        } else {
+                            top + band / 2.0
+                        };
                         painter.line_segment(
-                            [pos2(x_of(t), y), pos2(x_of(e).max(x_of(t) + 1.0), y)],
-                            Stroke::new(row_h.max(1.0) - 0.5, ink),
+                            [pos2(x_of(t), ny), pos2(x_of(e).max(x_of(t) + 1.5), ny)],
+                            Stroke::new(note_h, ink),
                         );
                     }
                 }

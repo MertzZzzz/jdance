@@ -39,6 +39,7 @@ pub(crate) enum MixerAction {
 
 #[derive(Debug, Default)]
 pub(crate) struct MixerOutput {
+    pub header: crate::widgets::HeaderOut,
     pub edits: Vec<(Edit, bool)>,
     pub end_gesture: bool,
     pub actions: Vec<MixerAction>,
@@ -71,16 +72,16 @@ pub(crate) enum StripView {
 impl StripView {
     fn width(self) -> f32 {
         match self {
-            Self::Compact => 56.0,
-            Self::Wide => 72.0,
-            Self::WideFx => 96.0,
+            Self::Compact => 74.0,
+            Self::Wide => 88.0,
+            Self::WideFx => 108.0,
         }
     }
 
     fn fader(self) -> f32 {
         match self {
-            Self::Compact => 120.0,
-            _ => 180.0,
+            Self::Compact => 110.0,
+            _ => 160.0,
         }
     }
 }
@@ -97,6 +98,8 @@ pub(crate) struct MixerView {
     confirm_monitor: Option<TrackId>,
     /// What a drag in progress would name and colour (spec 0.2.5 §7).
     pub drop: Option<crate::drop_name::Dropped>,
+    /// Undock / Close in the header; the app sets them each frame.
+    pub window_buttons: crate::widgets::WindowButtons,
 }
 
 impl Default for MixerView {
@@ -107,6 +110,7 @@ impl Default for MixerView {
             monitor_warned: false,
             drop: None,
             confirm_monitor: None,
+            window_buttons: crate::widgets::WindowButtons::None,
         }
     }
 }
@@ -337,15 +341,14 @@ fn monitor_warning(
                 view.monitor_warned = true;
                 view.confirm_monitor = None;
             }
-            if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            if crate::widgets::outline_button(ui, "Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                 view.confirm_monitor = None;
             }
         });
     });
 }
 
-const INSPECTOR_W: f32 = 300.0;
-const SCALE_W: f32 = 28.0;
+const INSPECTOR_W: f32 = 270.0;
 
 /// The mixer (UI-VIS §8): a band of vertical strips (master first) and
 /// the inspector of the selected track on the right.
@@ -362,29 +365,66 @@ pub(crate) fn show(
     if mixer.track(view.selected).is_none() {
         view.selected = TrackId::MASTER;
     }
-    ui.horizontal(|ui| {
-        ui.strong("Mixer");
-        for (v, name) in [
-            (StripView::Compact, "Compact"),
-            (StripView::Wide, "Wide"),
-            (StripView::WideFx, "Wide + FX"),
-        ] {
-            ui.selectable_value(&mut view.view, v, name);
-        }
-        if mixer.tracks.len() < MAX_TRACKS && ui.button("+ Track").clicked() {
-            out.actions.push(MixerAction::AddTrack);
-        }
-        ui.label(
-            RichText::new(format!("output latency {}", latency.format(latency.total)))
-                .color(crate::theme::MUTED),
-        );
-        if latency.clamped {
-            ui.colored_label(
-                ui.visuals().warn_fg_color,
-                "delay compensation limit reached; some paths are not fully aligned",
-            );
-        }
-    });
+    // UI-RD §2.3: the panel header with the strip views, latency and
+    // + Track; Undock and Close on the right.
+    let buttons = view.window_buttons;
+    out.header = crate::widgets::panel_header(
+        ui,
+        crate::icons::Glyph::Mixer,
+        "Mixer",
+        &[],
+        buttons,
+        |ui| {
+            use crate::icons::Glyph as G;
+            crate::widgets::segmented(ui, |ui| {
+                for (v, g, name) in [
+                    (StripView::Compact, G::Mixer, "Compact"),
+                    (StripView::Wide, G::StepsView, "Wide"),
+                    (StripView::WideFx, G::FxSlots, "Wide + FX"),
+                ] {
+                    if crate::widgets::button(
+                        ui,
+                        Some(g),
+                        name,
+                        view.view == v,
+                        crate::widgets::Look::Raised,
+                        "",
+                    )
+                    .clicked()
+                    {
+                        view.view = v;
+                    }
+                }
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if mixer.tracks.len() < MAX_TRACKS
+                    && crate::widgets::button(
+                        ui,
+                        Some(G::New),
+                        "Track",
+                        false,
+                        crate::widgets::Look::Raised,
+                        "Add a mixer track",
+                    )
+                    .clicked()
+                {
+                    out.actions.push(MixerAction::AddTrack);
+                }
+                ui.label(
+                    RichText::new(latency.format(latency.total))
+                        .font(crate::theme::mono(10.5))
+                        .color(crate::theme::DIM),
+                )
+                .on_hover_text("Output latency (plugin delay compensation)");
+                let (r, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+                crate::icons::paint(ui, G::Pdc, r, crate::theme::DIM);
+                if latency.clamped {
+                    ui.colored_label(crate::theme::WARN, "delay compensation limit reached")
+                        .on_hover_text("Some paths are not fully aligned");
+                }
+            });
+        },
+    );
     let height = ui.available_height();
     ui.horizontal_top(|ui| {
         let band_w = (ui.available_width() - INSPECTOR_W - 12.0).max(200.0);
@@ -394,24 +434,65 @@ pub(crate) fn show(
                 .id_salt("mixer_strips")
                 .show(ui, |ui| {
                     crate::widgets::middle_pan(ui);
-                    ui.horizontal_top(|ui| {
-                        ui.spacing_mut().item_spacing.x = 2.0;
-                        scale(ui, view.view);
-                        let live = host.live_inputs();
-                        for (i, track) in mixer.all_tracks().enumerate() {
-                            strip(
-                                ui,
-                                mixer,
-                                automation,
-                                track,
-                                i,
-                                latency,
-                                meters,
-                                live.as_ref(),
-                                view,
-                                &mut out,
-                            );
-                        }
+                    ui.vertical(|ui| {
+                        let mut rects = Vec::new();
+                        ui.horizontal_top(|ui| {
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            let live = host.live_inputs();
+                            for (i, track) in mixer.all_tracks().enumerate() {
+                                let r = strip(
+                                    ui,
+                                    mixer,
+                                    automation,
+                                    track,
+                                    i,
+                                    latency,
+                                    meters,
+                                    live.as_ref(),
+                                    view,
+                                    &mut out,
+                                );
+                                let c = crate::theme::rgb(jdance_domain::color_or_default(
+                                    track.color,
+                                    i,
+                                ));
+                                rects.push((track.id, r, c));
+                            }
+                            // UI-RD §2.3: an empty dashed strip at the end.
+                            if mixer.tracks.len() < MAX_TRACKS {
+                                let h = rects.first().map_or(200.0, |(_, r, _)| r.height());
+                                let (r, resp) = ui.allocate_exact_size(
+                                    vec2(view.view.width(), h),
+                                    Sense::click(),
+                                );
+                                let c = if resp.hovered() {
+                                    crate::theme::MUTED
+                                } else {
+                                    crate::theme::LINE_STRONG
+                                };
+                                crate::rack::dashed_rect(ui.painter(), r, c);
+                                crate::icons::paint_with(
+                                    ui.painter(),
+                                    crate::icons::Glyph::New,
+                                    Rect::from_center_size(
+                                        r.center() - vec2(0.0, 10.0),
+                                        vec2(16.0, 16.0),
+                                    ),
+                                    c,
+                                );
+                                ui.painter().text(
+                                    r.center() + vec2(0.0, 12.0),
+                                    egui::Align2::CENTER_CENTER,
+                                    "New track",
+                                    egui::FontId::proportional(10.5),
+                                    crate::theme::MUTED,
+                                );
+                                if resp.on_hover_text("Add a mixer track").clicked() {
+                                    out.actions.push(MixerAction::AddTrack);
+                                }
+                            }
+                        });
+                        cables(ui, mixer, &rects);
                     });
                 });
         });
@@ -434,39 +515,6 @@ pub(crate) fn show(
     out
 }
 
-/// dB scale left of the master (UI-VIS-091), aligned with the strips'
-/// peak meters (in the name block).
-fn scale(ui: &mut egui::Ui, view: StripView) {
-    let (rect, _) = ui.allocate_exact_size(vec2(SCALE_W, STRIP_TOP + view.fader()), Sense::hover());
-    let p = ui.painter();
-    // The meter rectangle of a strip: see `strip`.
-    let (top, h) = (rect.top() + 16.0 + 6.0, 100.0 - 8.0);
-    for db in [6.0f32, 0.0, -6.0, -12.0, -24.0, -36.0, -48.0] {
-        let y = top + h * (1.0 - (db + 60.0) / 66.0);
-        p.text(
-            pos2(rect.right() - 2.0, y),
-            egui::Align2::RIGHT_CENTER,
-            if db == 0.0 {
-                "0".to_owned()
-            } else {
-                format!("{db:+.0}")
-            },
-            crate::theme::mono(9.5),
-            crate::theme::MUTED,
-        );
-    }
-    p.text(
-        pos2(rect.right() - 2.0, top + h),
-        egui::Align2::RIGHT_BOTTOM,
-        "∞",
-        crate::theme::mono(9.5),
-        crate::theme::MUTED,
-    );
-}
-
-/// Height above the fader: number, name and meter, lamp, pan.
-const STRIP_TOP: f32 = 16.0 + 100.0 + 18.0 + 30.0;
-
 #[allow(clippy::too_many_arguments)]
 fn strip(
     ui: &mut egui::Ui,
@@ -479,87 +527,110 @@ fn strip(
     live: Option<&(u16, Vec<String>)>,
     view: &mut MixerView,
     out: &mut MixerOutput,
-) {
+) -> Rect {
     use crate::theme;
     let width = view.view.width();
     let selected = view.selected == t.id;
     let color = theme::rgb(jdance_domain::color_or_default(t.color, index));
     let frame = egui::Frame::new()
         .fill(if selected {
-            theme::BLUE_BG.gamma_multiply(0.3)
+            Color32::from_rgb(0x1A, 0x26, 0x35)
         } else {
-            theme::PANEL
+            theme::CARD
         })
-        .corner_radius(CornerRadius::same(4));
+        .stroke(Stroke::new(
+            1.0,
+            if selected {
+                theme::BLUE
+            } else {
+                theme::CARD_LINE
+            },
+        ))
+        .corner_radius(CornerRadius::same(6));
     let strip_rect = frame
         .show(ui, |ui| {
             ui.vertical(|ui| {
                 ui.set_width(width);
                 ui.spacing_mut().item_spacing.y = 0.0;
-                // 1. Number.
+                // UI-RD §2.3. 1. Colour edge, number and lamp.
+                let (r, resp) = ui.allocate_exact_size(vec2(width, 20.0), Sense::click());
+                let p = ui.painter();
+                p.rect_filled(
+                    Rect::from_min_size(r.min, vec2(r.width(), 3.0)),
+                    CornerRadius {
+                        nw: 6,
+                        ne: 6,
+                        sw: 0,
+                        se: 0,
+                    },
+                    color,
+                );
                 let number = if t.is_master() {
                     "M".to_owned()
                 } else {
                     format!("{index}")
                 };
-                let (r, resp) = ui.allocate_exact_size(vec2(width, 16.0), Sense::click());
-                if selected {
-                    ui.painter().rect_filled(r, 3.0, theme::BLUE_BG);
-                }
-                ui.painter().text(
-                    r.center(),
-                    egui::Align2::CENTER_CENTER,
+                p.text(
+                    pos2(r.left() + 7.0, r.center().y + 2.0),
+                    egui::Align2::LEFT_CENTER,
                     number,
-                    theme::mono(11.0),
-                    theme::TEXT,
+                    theme::mono(10.0),
+                    theme::MUTED,
                 );
                 // A track feeding the selected one gets an amber dot.
                 let feeds = !selected
                     && (t.main_out == view.selected
                         || t.sends.iter().any(|s| s.dest == view.selected));
                 if feeds {
-                    ui.painter().circle_filled(
-                        pos2(r.right() - 6.0, r.center().y),
-                        2.5,
-                        theme::AMBER,
-                    );
+                    p.circle_filled(pos2(r.center().x, r.center().y + 2.0), 2.5, theme::AMBER);
                 }
                 if resp.clicked() {
                     view.selected = t.id;
                 }
-                // 2. Name (rotated) and peak meter.
-                let (r, resp) = ui.allocate_exact_size(vec2(width, 100.0), Sense::click());
-                let p = ui.painter();
-                p.rect_filled(
-                    Rect::from_min_size(r.min, vec2(r.width(), 3.0)),
-                    CornerRadius::ZERO,
-                    color,
+                let lamp_rect = Rect::from_center_size(
+                    pos2(r.right() - 10.0, r.center().y + 2.0),
+                    vec2(16.0, 16.0),
                 );
-                // Rotated: the strip's height is the room for the name.
-                let galley = crate::widgets::fit_galley(
-                    p,
+                let lamp = ui
+                    .interact(
+                        lamp_rect,
+                        egui::Id::unique(("strip_lamp", t.id.0)),
+                        Sense::click(),
+                    )
+                    .on_hover_text(if t.is_master() {
+                        "Mute"
+                    } else {
+                        "Mute (click) · solo (right-click; Ctrl+right-click adds)"
+                    });
+                crate::widgets::led(ui.painter(), lamp_rect.center(), 4.0, !t.muted);
+                if t.solo {
+                    ui.painter().circle_stroke(
+                        lamp_rect.center(),
+                        6.5,
+                        Stroke::new(1.5, theme::AMBER),
+                    );
+                }
+                if lamp.clicked() {
+                    out.edits.push((Edit::SetTrackMuted(t.id, !t.muted), false));
+                }
+                // Spec 0.3.0 §7: solo alone; Ctrl adds to the solo.
+                if lamp.secondary_clicked() {
+                    let add = ui.input(|i| i.modifiers.command);
+                    if let Some(e) = jdance_commands::solo_track(mixer, t.id, add) {
+                        out.edits.push((e, false));
+                    }
+                }
+                // 2. Name.
+                let (r, resp) = ui.allocate_exact_size(vec2(width, 20.0), Sense::click());
+                crate::widgets::fit_text(
+                    ui.painter(),
+                    r.center(),
+                    egui::Align2::CENTER_CENTER,
                     t.name.clone(),
-                    egui::FontId::proportional(12.0),
+                    theme::strong(11.5),
                     theme::TEXT,
-                    r.height() - 10.0,
+                    r.width() - 8.0,
                 );
-                let text = egui::epaint::TextShape::new(
-                    pos2(r.left() + 6.0, r.bottom() - 4.0),
-                    galley,
-                    theme::TEXT,
-                )
-                .with_angle(-std::f32::consts::FRAC_PI_2);
-                p.with_clip_rect(r).add(text);
-                let levels = if t.is_master() {
-                    meters.output
-                } else {
-                    meters.bus(t.id)
-                };
-                let mr = Rect::from_min_size(
-                    pos2(r.right() - 14.0, r.top() + 6.0),
-                    vec2(10.0, r.height() - 8.0),
-                );
-                draw_meter(ui.painter(), mr, levels, t.muted);
                 let resp = resp.on_hover_text(format!("{} · double-click or F2 to rename", t.name));
                 if resp.clicked() {
                     view.selected = t.id;
@@ -568,50 +639,51 @@ fn strip(
                     out.actions.push(MixerAction::Rename(t.id));
                 }
                 resp.context_menu(|ui| {
-                    if ui.button("Rename…").clicked() {
+                    use crate::icons::Glyph as G;
+                    if crate::widgets::menu_item(ui, Some(G::Rename), "Rename…", "F2").clicked() {
                         out.actions.push(MixerAction::Rename(t.id));
-                        ui.close();
                     }
-                    if ui.button("Color…").clicked() {
+                    if crate::widgets::menu_item(ui, Some(G::Color), "Color…", "").clicked() {
                         out.actions.push(MixerAction::Color(t.id));
-                        ui.close();
                     }
-                    if !t.is_master() && ui.button("Remove track").clicked() {
+                    if !t.is_master()
+                        && crate::widgets::menu_item(ui, Some(G::Close), "Remove track", "")
+                            .clicked()
+                    {
                         out.edits.push((Edit::RemoveTrack(t.id), false));
-                        ui.close();
                     }
                 });
-                // 3. Mute lamp (right-click: solo).
-                ui.horizontal(|ui| {
-                    ui.add_space((width - 20.0) / 2.0);
-                    let lamp = crate::widgets::lamp(ui, !t.muted).on_hover_text(if t.is_master() {
-                        "Mute"
+                // FX and Arm marks.
+                let (r, _) = ui.allocate_exact_size(vec2(width, 18.0), Sense::hover());
+                let fx_on = t.inserts.iter().any(|i| !i.bypass);
+                let fx_color = if fx_on {
+                    theme::MUTED
+                } else {
+                    theme::LINE_STRONG
+                };
+                crate::icons::paint_with(
+                    ui.painter(),
+                    crate::icons::Glyph::FxSlots,
+                    Rect::from_center_size(
+                        pos2(r.center().x - 10.0, r.center().y),
+                        vec2(12.0, 12.0),
+                    ),
+                    fx_color,
+                );
+                let armed = t.input.is_some();
+                crate::icons::paint_with(
+                    ui.painter(),
+                    crate::icons::Glyph::Arm,
+                    Rect::from_center_size(
+                        pos2(r.center().x + 10.0, r.center().y),
+                        vec2(12.0, 12.0),
+                    ),
+                    if armed {
+                        theme::RED
                     } else {
-                        "Mute (click) · solo (right-click; Ctrl+right-click adds)"
-                    });
-                    if lamp.clicked() {
-                        out.edits.push((Edit::SetTrackMuted(t.id, !t.muted), false));
-                    }
-                    // Spec 0.3.0 §7: solo alone; Ctrl adds to the solo.
-                    if lamp.secondary_clicked() {
-                        let add = ui.input(|i| i.modifiers.command);
-                        if let Some(e) = jdance_commands::solo_track(mixer, t.id, add) {
-                            out.edits.push((e, false));
-                        }
-                    }
-                    if t.solo {
-                        crate::widgets::solo_ring(ui, &lamp);
-                    }
-                    if t.solo {
-                        ui.painter().text(
-                            lamp.rect.right_top(),
-                            egui::Align2::LEFT_TOP,
-                            "S",
-                            theme::mono(9.0),
-                            theme::AMBER,
-                        );
-                    }
-                });
+                        theme::LINE_STRONG
+                    },
+                );
                 // Input and monitoring (INP-001, MON-001); every strip keeps
                 // the row so the faders line up.
                 let (row, _) = ui.allocate_exact_size(vec2(width, 22.0), Sense::hover());
@@ -620,9 +692,9 @@ fn strip(
                 strip_input(&mut cell, t, live, view, out);
                 // 4. Pan.
                 ui.horizontal(|ui| {
-                    ui.add_space((width - 26.0) / 2.0);
+                    ui.add_space((width - 22.0) / 2.0);
                     let mut pan = t.pan;
-                    let r = crate::widgets::knob(ui, &mut pan, -1.0..=1.0, 0.0, theme::BLUE, 26.0)
+                    let r = crate::widgets::knob(ui, &mut pan, -1.0..=1.0, 0.0, theme::TEXT, 22.0)
                         .on_hover_text(format!("Pan {:+.0} (double-click: centre)", t.pan * 100.0));
                     if r.changed() {
                         out.edits.push((Edit::SetTrackPan(t.id, pan), true));
@@ -638,43 +710,76 @@ fn strip(
                     );
                     out.end_gesture |= r.drag_stopped();
                 });
-                ui.add_space(4.0);
-                // 6. Fader.
-                ui.horizontal(|ui| {
-                    ui.add_space((width - 22.0) / 2.0);
-                    ui.spacing_mut().slider_width = view.view.fader();
-                    let mut vol = t.volume;
-                    let r = ui.add(
-                        egui::Slider::new(&mut vol, 0.0..=MAX_VOLUME)
-                            .vertical()
-                            .show_value(false),
-                    );
-                    let r = r.on_hover_text(db_label(t.volume));
-                    if r.changed() && !automation::secondary_press(ui) {
-                        out.edits.push((Edit::SetTrackVolume(t.id, vol), true));
-                    }
-                    if r.clicked() || r.drag_started() {
-                        view.selected = t.id;
-                    }
-                    automation::attach(
-                        ui,
-                        &r,
-                        automation,
-                        AutomationTarget::TrackVolume(t.id),
-                        t.volume / MAX_VOLUME,
-                        &mut out.automation,
-                    );
-                    out.end_gesture |= r.drag_stopped();
-                });
-                // 7. Mono/stereo input.
-                stereo_dot(ui, t, live, width, out);
-                if view.view != StripView::Compact {
-                    ui.label(
-                        RichText::new(format!("{}\n{:+.0}", db_label(t.volume), t.pan * 100.0))
-                            .font(theme::mono(9.5))
-                            .color(theme::MUTED),
+                ui.add_space(6.0);
+                // 5. Fader in its own 20 px column, 8 px to the meter:
+                // the cap never covers the scale (UI-RD §2.3).
+                let fader_h = view.view.fader();
+                let (area, _) = ui.allocate_exact_size(vec2(width, fader_h), Sense::hover());
+                let group_w = 20.0 + 8.0 + 12.0;
+                let fx = area.center().x - group_w / 2.0;
+                let fader_rect = Rect::from_min_size(pos2(fx, area.top()), vec2(20.0, fader_h));
+                let mut vol = t.volume;
+                let r = fader(
+                    ui,
+                    fader_rect,
+                    &mut vol,
+                    egui::Id::unique(("fader", t.id.0)),
+                );
+                let r = r.on_hover_text(format!(
+                    "{} · drag, Shift for fine, double-click: 0 dB",
+                    db_label(t.volume)
+                ));
+                if r.dragged() || r.hovered() {
+                    crate::widgets::set_hint(
+                        ui.ctx(),
+                        format!(
+                            "{} · Volume {} — drag, Shift for fine, double-click to reset",
+                            t.name,
+                            db_label(vol)
+                        ),
                     );
                 }
+                if r.changed() && !automation::secondary_press(ui) {
+                    out.edits.push((Edit::SetTrackVolume(t.id, vol), true));
+                }
+                if r.clicked() || r.drag_started() {
+                    view.selected = t.id;
+                }
+                automation::attach(
+                    ui,
+                    &r,
+                    automation,
+                    AutomationTarget::TrackVolume(t.id),
+                    t.volume / MAX_VOLUME,
+                    &mut out.automation,
+                );
+                out.end_gesture |= r.drag_stopped();
+                let levels = if t.is_master() {
+                    meters.output
+                } else {
+                    meters.bus(t.id)
+                };
+                let mr = Rect::from_min_size(
+                    pos2(fx + 28.0, area.top() + 4.0),
+                    vec2(12.0, fader_h - 8.0),
+                );
+                draw_meter(ui.painter(), mr, levels, t.muted);
+                // 6. The value.
+                let (r, _) = ui.allocate_exact_size(vec2(width, 18.0), Sense::hover());
+                let db = if t.volume <= 0.0 {
+                    "-inf".to_owned()
+                } else {
+                    format!("{:.1}", 20.0 * t.volume.log10())
+                };
+                ui.painter().text(
+                    r.center(),
+                    egui::Align2::CENTER_CENTER,
+                    db,
+                    theme::mono(10.0),
+                    theme::MUTED,
+                );
+                // 7. Mono/stereo input.
+                stereo_dot(ui, t, live, width, out);
                 ui.add_space(4.0);
                 // 8. PDC hourglass and 9/10. route from the selected track.
                 ui.horizontal(|ui| {
@@ -757,6 +862,113 @@ fn strip(
             out.actions.push(MixerAction::NameFromDrop(t.id));
         }
     }
+    strip_rect
+}
+
+/// The routing band under the strips (UI-RD §2.3, §10.2): every send is
+/// a cable from the source's output port (a dot under its strip, right)
+/// to the receiver's input (an oval, left), coloured from source to
+/// receiver, with the arrowhead at the receiver; sidechains are dashed.
+/// The level sits on the cable. Shown only; sends are made as before.
+fn cables(ui: &mut egui::Ui, mixer: &Mixer, rects: &[(TrackId, Rect, Color32)]) {
+    use crate::theme;
+    let w = rects.last().map_or(0.0, |(_, r, _)| r.right())
+        - rects.first().map_or(0.0, |(_, r, _)| r.left());
+    let (band, _) = ui.allocate_exact_size(vec2(w.max(10.0), 50.0), Sense::hover());
+    let p = ui.painter();
+    let find = |id: TrackId| rects.iter().find(|(t, _, _)| *t == id);
+    // Ports.
+    for (_, r, c) in rects {
+        let out_port = pos2(r.right() - 12.0, band.top() + 6.0);
+        p.circle(out_port, 3.5, theme::FIELD, Stroke::new(1.5, *c));
+        let in_port =
+            Rect::from_center_size(pos2(r.left() + 12.0, band.top() + 6.0), vec2(10.0, 6.0));
+        p.rect(
+            in_port,
+            3.0,
+            theme::FIELD,
+            Stroke::new(1.0, theme::LINE_STRONG),
+            egui::StrokeKind::Inside,
+        );
+    }
+    let mut lane = 0usize;
+    let mut cable = |from: TrackId, to: TrackId, dashed: bool, label: String| {
+        let (Some((_, a, ca)), Some((_, b, cb))) = (find(from), find(to)) else {
+            return;
+        };
+        let start = pos2(a.right() - 12.0, band.top() + 9.0);
+        let end = pos2(b.left() + 12.0, band.top() + 10.0);
+        let depth = 16.0 + (lane % 3) as f32 * 9.0;
+        lane += 1;
+        let c1 = start + vec2(0.0, depth);
+        let c2 = end + vec2(0.0, depth + 4.0);
+        let n = 28;
+        let pts: Vec<_> = (0..=n)
+            .map(|k| {
+                let t = k as f32 / n as f32;
+                let u = 1.0 - t;
+                (start.to_vec2() * (u * u * u)
+                    + c1.to_vec2() * (3.0 * u * u * t)
+                    + c2.to_vec2() * (3.0 * u * t * t)
+                    + end.to_vec2() * (t * t * t))
+                    .to_pos2()
+            })
+            .collect();
+        for k in 0..n {
+            if dashed && k % 2 == 1 {
+                continue;
+            }
+            let t = k as f32 / n as f32;
+            let col = lerp_color(*ca, *cb, t);
+            p.line_segment([pts[k], pts[k + 1]], Stroke::new(2.0, col));
+        }
+        // The arrowhead at the receiver's input.
+        let dir = (pts[n] - pts[n - 2]).normalized();
+        let side = vec2(-dir.y, dir.x);
+        let tip = end - dir * 1.0;
+        p.add(egui::Shape::convex_polygon(
+            vec![
+                tip,
+                tip - dir * 7.0 + side * 4.0,
+                tip - dir * 7.0 - side * 4.0,
+            ],
+            *cb,
+            Stroke::NONE,
+        ));
+        // The level on the cable.
+        let mid = pts[n / 2];
+        let galley = p.layout_no_wrap(label, theme::mono(9.0), theme::TEXT);
+        let pill = Rect::from_center_size(mid, galley.size() + vec2(10.0, 4.0));
+        p.rect(
+            pill,
+            7.0,
+            theme::LCD,
+            Stroke::new(1.0, lerp_color(*ca, *cb, 0.5)),
+            egui::StrokeKind::Inside,
+        );
+        p.galley(pill.center() - galley.size() / 2.0, galley, theme::TEXT);
+    };
+    for t in mixer.all_tracks() {
+        for s in &t.sends {
+            let db = if s.level <= 0.0 {
+                "-inf".to_owned()
+            } else {
+                format!("{:+.0}", 20.0 * s.level.log10())
+            };
+            let tap = if s.pre_fader { "pre" } else { "post" };
+            cable(t.id, s.dest, false, format!("{db} {tap}"));
+        }
+        for ins in &t.inserts {
+            if let Some(sc) = &ins.sidechain {
+                cable(sc.source, t.id, true, "sidechain".to_owned());
+            }
+        }
+    }
+}
+
+fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
+    let m = |x: u8, y: u8| (f32::from(x) + (f32::from(y) - f32::from(x)) * t).round() as u8;
+    Color32::from_rgb(m(a.r(), b.r()), m(a.g(), b.g()), m(a.b(), b.b()))
 }
 
 /// Sand-glass PDC mark.
@@ -836,7 +1048,6 @@ fn route_toggle(
 /// Peak meter in `r`; −60..+6 dB, red above 0 dBFS, half bright when
 /// muted.
 fn draw_meter(p: &egui::Painter, r: Rect, (l, rr): (f32, f32), muted: bool) {
-    p.rect_filled(r, CornerRadius::same(2), crate::theme::FIELD);
     let frac = |v: f32| {
         if v <= 0.0 {
             0.0
@@ -845,19 +1056,78 @@ fn draw_meter(p: &egui::Painter, r: Rect, (l, rr): (f32, f32), muted: bool) {
         }
     };
     let alpha = if muted { 0.5 } else { 1.0 };
+    let bw = (r.width() - 2.0) / 2.0;
     for (i, v) in [l, rr].into_iter().enumerate() {
-        let x0 = r.left() + 1.0 + i as f32 * (r.width() / 2.0);
+        let x0 = r.left() + i as f32 * (bw + 2.0);
+        let col = Rect::from_min_max(pos2(x0, r.top()), pos2(x0 + bw, r.bottom()));
+        p.rect_filled(col, CornerRadius::same(1), crate::theme::LCD);
         let top = r.bottom() - frac(v) * r.height();
-        let bar = Rect::from_min_max(pos2(x0, top), pos2(x0 + r.width() / 2.0 - 1.5, r.bottom()));
+        let bar = Rect::from_min_max(pos2(x0, top), pos2(x0 + bw, r.bottom()));
         let color = if v > 1.0 {
             crate::theme::RED
         } else if v > 0.5 {
-            crate::theme::AMBER
+            crate::theme::WARN
         } else {
-            crate::theme::GREEN
+            crate::theme::OK
         };
-        p.rect_filled(bar, CornerRadius::ZERO, color.gamma_multiply(alpha));
+        p.rect_filled(bar, CornerRadius::same(1), color.gamma_multiply(alpha));
     }
+    // 0 dBFS mark.
+    let y0 = r.bottom() - 60.0 / 66.0 * r.height();
+    p.hline(r.x_range(), y0, Stroke::new(1.0, crate::theme::LINE_STRONG));
+}
+
+/// The fader (UI-RD §2.3): a 20 px column, the groove in the middle and an
+/// 18×10 cap; drag (Shift: fine), double-click: unity.
+fn fader(ui: &mut egui::Ui, rect: Rect, value: &mut f32, id: egui::Id) -> egui::Response {
+    let mut resp = ui.interact(rect, id, Sense::click_and_drag());
+    let travel = rect.height() - 10.0;
+    if resp.dragged() {
+        let fine = if ui.input(|i| i.modifiers.shift) {
+            0.25
+        } else {
+            1.0
+        };
+        let dv = -resp.drag_delta().y / travel * MAX_VOLUME * fine;
+        let v = (*value + dv).clamp(0.0, MAX_VOLUME);
+        if v != *value {
+            *value = v;
+            resp.mark_changed();
+        }
+    }
+    if resp.double_clicked() && *value != 1.0 {
+        *value = 1.0;
+        resp.mark_changed();
+    }
+    let p = ui.painter();
+    let groove = Rect::from_center_size(rect.center(), vec2(4.0, rect.height() - 6.0));
+    p.rect_filled(groove, 2.0, crate::theme::LCD);
+    // Unity mark.
+    let y_of = |v: f32| rect.bottom() - 5.0 - v / MAX_VOLUME * travel;
+    p.hline(
+        (rect.left() + 2.0)..=(rect.right() - 2.0),
+        y_of(1.0),
+        Stroke::new(1.0, crate::theme::LINE_STRONG),
+    );
+    let cap = Rect::from_center_size(pos2(rect.center().x, y_of(*value)), vec2(18.0, 10.0));
+    let hot = resp.hovered() || resp.dragged();
+    p.rect(
+        cap,
+        3.0,
+        if hot {
+            crate::theme::TEXT
+        } else {
+            Color32::from_rgb(0xC9, 0xCF, 0xD6)
+        },
+        Stroke::new(1.0, crate::theme::LINE_STRONG),
+        egui::StrokeKind::Inside,
+    );
+    p.hline(
+        (cap.left() + 3.0)..=(cap.right() - 3.0),
+        cap.center().y,
+        Stroke::new(1.0, crate::theme::LINE_STRONG),
+    );
+    resp
 }
 
 /// Input of a track (INP-001/002) with its monitoring and delay (MON-004).
@@ -935,33 +1205,66 @@ fn inspector(
     view: &mut MixerView,
     out: &mut MixerOutput,
 ) {
-    ui.label(RichText::new(format!("Mixer › {}", t.name)).strong());
+    // UI-RD §2.3: the selected track, its effects with Dry/Wet, + Effect,
+    // the sends summary; Safety limiter on the master.
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        let index = mixer.all_tracks().position(|x| x.id == t.id).unwrap_or(0);
+        let c = crate::theme::rgb(jdance_domain::color_or_default(t.color, index));
+        let (r, _) = ui.allocate_exact_size(vec2(9.0, 9.0), Sense::hover());
+        ui.painter().rect_filled(r, 2.0, c);
+        let number = if t.is_master() {
+            "M".to_owned()
+        } else {
+            index.to_string()
+        };
+        ui.label(RichText::new(format!("{number} · {}", t.name)).font(crate::theme::strong(12.5)));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(
+                RichText::new(format!("{} / {MAX_INSERTS_PER_TRACK}", t.inserts.len()))
+                    .font(crate::theme::mono(10.0))
+                    .color(crate::theme::DIM),
+            );
+        });
+    });
     if !t.is_master() {
         input_ui(ui, t, latency, host, view, out);
     }
-    ui.separator();
-    ui.label(RichText::new("Effects").color(crate::theme::MUTED));
+    ui.add_space(4.0);
     for (index, ins) in t.inserts.iter().enumerate() {
         insert_ui(ui, mixer, automation, t, ins, index, host, out);
     }
     if t.inserts.len() < MAX_INSERTS_PER_TRACK {
-        ui.menu_button(
-            format!("+ Effect ({}/{MAX_INSERTS_PER_TRACK})", t.inserts.len()),
-            |ui| {
-                for kind in EffectKind::ALL {
-                    if ui.button(kind.name()).clicked() {
-                        out.actions.push(MixerAction::AddEffect(t.id, kind));
-                        ui.close();
-                    }
-                }
-                ui.separator();
-                if ui.button("VST3…").clicked() {
-                    out.actions.push(MixerAction::PickPlugin(t.id));
-                    ui.close();
-                }
-            },
+        let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
+        let c = if resp.hovered() {
+            crate::theme::MUTED
+        } else {
+            crate::theme::LINE_STRONG
+        };
+        crate::rack::dashed_rect(ui.painter(), r, c);
+        ui.painter().text(
+            r.center(),
+            egui::Align2::CENTER_CENTER,
+            "+  Effect",
+            egui::FontId::proportional(11.5),
+            crate::theme::MUTED,
         );
+        egui::Popup::menu(&resp).show(|ui| {
+            use crate::icons::Glyph as G;
+            for kind in EffectKind::ALL {
+                if crate::widgets::menu_item(ui, Some(effect_glyph(kind)), kind.name(), "")
+                    .clicked()
+                {
+                    out.actions.push(MixerAction::AddEffect(t.id, kind));
+                }
+            }
+            ui.separator();
+            if crate::widgets::menu_item(ui, Some(G::Plugins), "VST3…", "").clicked() {
+                out.actions.push(MixerAction::PickPlugin(t.id));
+            }
+        });
     }
+    ui.add_space(6.0);
     ui.separator();
     if t.is_master() {
         limiter_ui(ui, &mixer.limiter, meters.limiter_gain, out);
@@ -1110,96 +1413,154 @@ fn insert_ui(
     host: &mut dyn Host,
     out: &mut MixerOutput,
 ) {
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(ins.effect.name()).strong());
-        let mut on = !ins.bypass;
-        let r = ui
-            .toggle_value(&mut on, "On")
-            .on_hover_text("Bypass crossfades to dry; the effect's tail is dropped");
-        if r.changed() {
-            out.edits.push((Edit::SetInsertBypass(ins.id, !on), false));
-        }
-        automation::attach(
-            ui,
-            &r,
-            automation,
-            AutomationTarget::InsertBypass(ins.id),
-            if ins.bypass { 1.0 } else { 0.0 },
-            &mut out.automation,
-        );
-        // Wet/dry of the slot: the effect's share of the output.
-        let mut wet = ins.wet;
-        let r = crate::widgets::knob(ui, &mut wet, 0.0..=1.0, 1.0, crate::theme::AMBER, 20.0)
-            .on_hover_text(format!(
-                "Mix {:.0}% wet (double-click: 100%)",
-                ins.wet * 100.0
-            ));
-        r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Slider, true, "Mix"));
-        if r.changed() {
-            out.edits.push((Edit::SetInsertWet(ins.id, wet), true));
-        }
-        out.end_gesture |= r.drag_stopped();
-        if ins.sidechain.is_some() {
-            ui.colored_label(Color32::from_rgb(120, 170, 235), "SC");
-        }
-        if ins.effect.kind == EffectKind::Plugin {
-            let open = host.plugin_editor_open(PluginTarget::Insert(ins.id));
-            let title = format!("{} — {}", ins.effect.name(), t.name);
-            let r = ui
-                .selectable_label(open, "Edit")
-                .on_hover_text("Open the plugin's own editor window (right-click: scaling)");
+    let frame = egui::Frame::new()
+        .fill(crate::theme::CARD)
+        .stroke(Stroke::new(1.0, crate::theme::CARD_LINE))
+        .corner_radius(7)
+        .inner_margin(egui::Margin::symmetric(8, 4));
+    frame.show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            // Lamp: on / bypassed.
+            let (lr, r) = ui.allocate_exact_size(vec2(12.0, 22.0), Sense::click());
+            crate::widgets::led(ui.painter(), lr.center(), 3.5, !ins.bypass);
+            let r = r.on_hover_text(
+                "On / bypass: bypass crossfades to dry; the effect's tail is dropped",
+            );
             if r.clicked() {
-                host.toggle_plugin_editor(PluginTarget::Insert(ins.id), &title);
+                out.edits
+                    .push((Edit::SetInsertBypass(ins.id, !ins.bypass), false));
             }
-            editor_scaling_menu(&r, host, PluginTarget::Insert(ins.id), &title);
-        }
-        if index > 0
-            && ui
-                .small_button("Up")
-                .on_hover_text("Move earlier in the chain")
-                .clicked()
-        {
-            out.edits.push((Edit::MoveInsert(ins.id, index - 1), false));
-        }
-        if index + 1 < t.inserts.len()
-            && ui
-                .small_button("Dn")
-                .on_hover_text("Move later in the chain")
-                .clicked()
-        {
-            out.edits.push((Edit::MoveInsert(ins.id, index + 1), false));
-        }
-        if ui
-            .small_button("x")
-            .on_hover_text("Remove effect")
-            .clicked()
-        {
-            out.edits.push((Edit::RemoveInsert(ins.id), false));
-        }
-    });
-    egui::CollapsingHeader::new("Parameters")
-        .id_salt(("insert", ins.id.0))
-        .default_open(false)
-        .show(ui, |ui| {
-            if ins.effect.kind == EffectKind::ParametricEq {
-                eq_graph(ui, &ins.effect);
+            automation::attach(
+                ui,
+                &r,
+                automation,
+                AutomationTarget::InsertBypass(ins.id),
+                if ins.bypass { 1.0 } else { 0.0 },
+                &mut out.automation,
+            );
+            let (gr, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
+            crate::icons::paint(ui, effect_glyph(ins.effect.kind), gr, crate::theme::MUTED);
+            ui.add(
+                egui::Label::new(RichText::new(ins.effect.name()).size(12.0).color(
+                    if ins.bypass {
+                        crate::theme::DIM
+                    } else {
+                        crate::theme::TEXT
+                    },
+                ))
+                .truncate(),
+            );
+            // Wet/dry of the slot: the effect's share of the output.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    RichText::new(format!("{:.0}%", ins.wet * 100.0))
+                        .font(crate::theme::mono(10.0))
+                        .color(crate::theme::MUTED),
+                );
+                let mut wet = ins.wet;
+                let r =
+                    crate::widgets::knob(ui, &mut wet, 0.0..=1.0, 1.0, crate::theme::BLUE, 22.0)
+                        .on_hover_text(format!(
+                            "Dry/Wet {:.0}% wet (double-click: 100%)",
+                            ins.wet * 100.0
+                        ));
+                r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Slider, true, "Mix"));
+                if r.changed() {
+                    out.edits.push((Edit::SetInsertWet(ins.id, wet), true));
+                }
+                out.end_gesture |= r.drag_stopped();
+            });
+        });
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.add_space(26.0);
+            ui.label(
+                RichText::new(ins.effect.kind.name())
+                    .size(10.5)
+                    .color(crate::theme::DIM),
+            );
+            if let Some(sc) = &ins.sidechain {
+                ui.label(
+                    RichText::new(format!("sc ← {}", track_name(mixer, sc.source)))
+                        .size(10.5)
+                        .color(Color32::from_rgb(0x7D, 0xBB, 0xFF)),
+                );
             }
             if ins.effect.kind == EffectKind::Plugin {
-                plugin_params_ui(
-                    ui,
-                    PluginTarget::Insert(ins.id),
-                    ins.effect.plugin.as_ref(),
-                    automation,
-                    host,
-                    &mut out.automation,
-                );
-            } else {
-                params_ui(ui, ins, automation, out);
+                let open = host.plugin_editor_open(PluginTarget::Insert(ins.id));
+                let title = format!("{} — {}", ins.effect.name(), t.name);
+                let r = ui
+                    .selectable_label(open, "Edit")
+                    .on_hover_text("Open the plugin's own editor window (right-click: scaling)");
+                if r.clicked() {
+                    host.toggle_plugin_editor(PluginTarget::Insert(ins.id), &title);
+                }
+                editor_scaling_menu(&r, host, PluginTarget::Insert(ins.id), &title);
             }
-            if ins.effect.accepts_sidechain() {
-                sidechain_ui(ui, mixer, t, ins, out);
-            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let small = vec2(20.0, 20.0);
+                use crate::icons::{Glyph as G, icon_button_sized as ib};
+                if ib(ui, G::Close, false, "Remove effect", small, 11.0).clicked() {
+                    out.edits.push((Edit::RemoveInsert(ins.id), false));
+                }
+                if index + 1 < t.inserts.len()
+                    && ib(
+                        ui,
+                        G::ChevronDown,
+                        false,
+                        "Move later in the chain",
+                        small,
+                        11.0,
+                    )
+                    .clicked()
+                {
+                    out.edits.push((Edit::MoveInsert(ins.id, index + 1), false));
+                }
+                if index > 0
+                    && ib(ui, G::Prev, false, "Move earlier in the chain", small, 11.0).clicked()
+                {
+                    out.edits.push((Edit::MoveInsert(ins.id, index - 1), false));
+                }
+            });
         });
+        egui::CollapsingHeader::new("Parameters")
+            .id_salt(("insert", ins.id.0))
+            .default_open(false)
+            .show(ui, |ui| {
+                if ins.effect.kind == EffectKind::ParametricEq {
+                    eq_graph(ui, &ins.effect);
+                }
+                if ins.effect.kind == EffectKind::Plugin {
+                    plugin_params_ui(
+                        ui,
+                        PluginTarget::Insert(ins.id),
+                        ins.effect.plugin.as_ref(),
+                        automation,
+                        host,
+                        &mut out.automation,
+                    );
+                } else {
+                    params_ui(ui, ins, automation, out);
+                }
+                if ins.effect.accepts_sidechain() {
+                    sidechain_ui(ui, mixer, t, ins, out);
+                }
+            });
+    });
+    ui.add_space(2.0);
+}
+
+/// Glyph of an effect kind (UI-RD §1.4).
+fn effect_glyph(kind: EffectKind) -> crate::icons::Glyph {
+    use crate::icons::Glyph as G;
+    match kind {
+        EffectKind::ParametricEq => G::Eq,
+        EffectKind::TempoDelay => G::Delay,
+        EffectKind::Reverb => G::Speaker,
+        EffectKind::Compressor => G::Compressor,
+        EffectKind::Plugin => G::Plugins,
+    }
 }
 
 /// Generic editor for a plugin (PLG-064): every parameter with the

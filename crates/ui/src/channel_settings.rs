@@ -130,32 +130,126 @@ impl ChannelSettingsWindow {
         )
         .id(egui::Id::unique(("channel_settings", self.channel.0)))
         .open(&mut open)
-        .default_size([760.0, 520.0])
+        .default_size([840.0, 600.0])
         .resizable(true)
         .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                let (r, _) = ui.allocate_exact_size(vec2(12.0, 12.0), Sense::hover());
-                ui.painter().rect_filled(r, 3.0, color);
-                let tabs: &[(Tab, &str)] = if instrument {
-                    &[(Tab::Channel, "Channel"), (Tab::Instrument, "Instrument")]
+            // UI-RD §4: glyph tabs on the left, ON / PAN / VOL / PITCH /
+            // TRACK on the right; the same strip on every tab.
+            let tabs: &[(Tab, crate::icons::Glyph, &str)] = {
+                use crate::icons::Glyph as G;
+                if instrument {
+                    &[
+                        (Tab::Channel, G::Channel, "Channel"),
+                        (Tab::Instrument, G::Plugins, "Instrument"),
+                    ]
                 } else if audio {
-                    &[(Tab::Channel, "Channel")]
+                    &[(Tab::Channel, G::Channel, "Channel")]
                 } else {
                     &[
-                        (Tab::Channel, "Channel"),
-                        (Tab::Sample, "Sample"),
-                        (Tab::Keys, "Instrument"),
-                        (Tab::Envelope, "Envelope"),
+                        (Tab::Channel, G::Channel, "Channel"),
+                        (Tab::Sample, G::Sample, "Sample"),
+                        (Tab::Keys, G::PianoRoll, "Instrument"),
+                        (Tab::Envelope, G::Envelope, "Envelope"),
                     ]
-                };
-                for (tab, label) in tabs {
-                    ui.selectable_value(&mut self.tab, *tab, *label);
                 }
+            };
+            ui.horizontal(|ui| {
+                // §10.4: the previous / next channel of the same kind.
+                let same_kind =
+                    |c: &Channel| c.instrument().is_some() == instrument && c.is_audio() == audio;
+                let ids: Vec<ChannelId> = project
+                    .channels
+                    .iter()
+                    .filter(|c| same_kind(c))
+                    .map(|c| c.id)
+                    .collect();
+                let at = ids.iter().position(|id| *id == self.channel).unwrap_or(0);
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    let small = vec2(20.0, 18.0);
+                    if ui
+                        .add_enabled_ui(at > 0, |ui| {
+                            crate::icons::icon_button_sized(
+                                ui,
+                                crate::icons::Glyph::Prev,
+                                false,
+                                "Previous channel",
+                                small,
+                                11.0,
+                            )
+                        })
+                        .inner
+                        .clicked()
+                    {
+                        self.channel = ids[at - 1];
+                    }
+                    if ui
+                        .add_enabled_ui(at + 1 < ids.len(), |ui| {
+                            crate::icons::icon_button_sized(
+                                ui,
+                                crate::icons::Glyph::Next,
+                                false,
+                                "Next channel",
+                                small,
+                                11.0,
+                            )
+                        })
+                        .inner
+                        .clicked()
+                    {
+                        self.channel = ids[at + 1];
+                    }
+                });
+                let (r, _) = ui.allocate_exact_size(vec2(4.0, 38.0), Sense::hover());
+                ui.painter().rect_filled(r, 2.0, color);
+                for (tab, glyph, label) in tabs {
+                    let on = self.tab == *tab;
+                    let (r, resp) = ui.allocate_exact_size(vec2(66.0, 46.0), Sense::click());
+                    let p = ui.painter();
+                    if on {
+                        p.rect(
+                            r,
+                            8.0,
+                            theme::RAISED,
+                            egui::Stroke::NONE,
+                            egui::StrokeKind::Inside,
+                        );
+                        p.hline(
+                            r.x_range().shrink(10.0),
+                            r.bottom() - 1.0,
+                            egui::Stroke::new(2.0, theme::AMBER),
+                        );
+                    } else if resp.hovered() {
+                        p.rect_filled(r, 8.0, theme::RAISED.gamma_multiply(0.6));
+                    }
+                    let c = if on { theme::AMBER } else { theme::MUTED };
+                    crate::icons::paint_with(
+                        p,
+                        *glyph,
+                        egui::Rect::from_center_size(
+                            r.center_top() + vec2(0.0, 16.0),
+                            vec2(16.0, 16.0),
+                        ),
+                        c,
+                    );
+                    p.text(
+                        r.center_bottom() - vec2(0.0, 7.0),
+                        egui::Align2::CENTER_BOTTOM,
+                        *label,
+                        egui::FontId::proportional(10.5),
+                        if on { theme::TEXT } else { theme::MUTED },
+                    );
+                    resp.widget_info(|| {
+                        egui::WidgetInfo::selected(egui::Role::Tab, true, on, *label)
+                    });
+                    if resp.clicked() {
+                        self.tab = *tab;
+                    }
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    header(ui, project, ch, &mut out);
+                });
             });
-            // The header stays while the sampler's tabs change (§4).
-            if matches!(self.tab, Tab::Sample | Tab::Keys) {
-                header(ui, project, ch, &mut out);
-            }
             ui.separator();
             match self.tab {
                 Tab::Channel => self.channel_tab(ui, project, index, &mut out),
@@ -662,43 +756,66 @@ impl ChannelSettingsWindow {
 
 /// ON, PAN, VOL, PITCH and TRACK above the sampler's tabs (§4).
 fn header(ui: &mut egui::Ui, project: &Project, ch: &Channel, out: &mut SettingsOutput) {
+    // Laid out right to left: TRACK, PITCH, VOL, PAN, ON.
     let id = ch.id;
-    ui.horizontal(|ui| {
-        let mut on = !ch.muted;
-        if ui
-            .checkbox(&mut on, "ON")
-            .on_hover_text("The channel plays")
-            .changed()
-        {
-            out.edits.push((Edit::SetChannelMuted(id, !on), false));
-        }
-        ui.label("PAN");
-        let mut pan = ch.pan;
-        let r = ui.add(egui::DragValue::new(&mut pan).range(-1.0..=1.0).speed(0.01));
-        if r.changed() {
-            out.edits.push((Edit::SetChannelPan(id, pan), true));
-        }
-        out.end_gesture |= r.drag_stopped() || r.lost_focus();
-        ui.label("VOL");
-        let mut vol = ch.volume;
-        let r = ui.add(
-            egui::DragValue::new(&mut vol)
-                .range(0.0..=MAX_VOLUME)
-                .speed(0.01)
-                .custom_formatter(|v, _| db_text(v as f32)),
+    let knob_cell = |ui: &mut egui::Ui, caption: &str, add: &mut dyn FnMut(&mut egui::Ui)| {
+        ui.allocate_ui_with_layout(
+            vec2(42.0, 48.0),
+            egui::Layout::top_down(egui::Align::Center),
+            |ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                add(ui);
+                ui.label(crate::widgets::caption_text(caption));
+            },
         );
-        if r.changed() {
-            out.edits.push((Edit::SetChannelVolume(id, vol), true));
-        }
-        out.end_gesture |= r.drag_stopped() || r.lost_focus();
-        ui.label("PITCH");
-        let mut pitch = ch.pitch;
-        let r = ui.add(
-            egui::DragValue::new(&mut pitch)
-                .range(-MAX_CHANNEL_PITCH..=MAX_CHANNEL_PITCH)
-                .suffix(" st"),
-        );
-        if r.changed() {
+    };
+    ui.spacing_mut().item_spacing.x = 8.0;
+    // Spec 0.3.0 §5: a mixer track of its own in one click.
+    if crate::icons::icon_button(
+        ui,
+        crate::icons::Glyph::Send,
+        false,
+        "Route this channel to the first free mixer track (a new one if none)",
+    )
+    .clicked()
+    {
+        out.free_track = true;
+    }
+    ui.allocate_ui_with_layout(
+        vec2(72.0, 48.0),
+        egui::Layout::top_down(egui::Align::Center),
+        |ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            egui::ComboBox::from_id_salt("sampler_header_track")
+                .width(64.0)
+                .selected_text(
+                    RichText::new(crate::rack::track_number(project, ch.track))
+                        .font(theme::mono(13.0)),
+                )
+                .show_ui(ui, |ui| {
+                    for t in project.mixer.all_tracks() {
+                        if ui
+                            .selectable_label(t.id == ch.track, track_label(project, t.id))
+                            .clicked()
+                            && t.id != ch.track
+                        {
+                            out.edits.push((Edit::SetChannelTrack(id, t.id), false));
+                        }
+                    }
+                })
+                .response
+                .on_hover_text(track_label(project, ch.track));
+            ui.label(crate::widgets::caption_text("Track"));
+        },
+    );
+    crate::widgets::divider(ui, 34.0);
+    knob_cell(ui, "Pitch", &mut |ui| {
+        let mut pitch = ch.pitch as f32;
+        let lim = MAX_CHANNEL_PITCH as f32;
+        let r = crate::widgets::knob(ui, &mut pitch, -lim..=lim, 0.0, theme::TEXT, 28.0)
+            .on_hover_text(format!("Pitch {:+} semitones (double-click: 0)", ch.pitch));
+        let pitch = pitch.round() as i32;
+        if r.changed() && pitch != ch.pitch {
             out.edits.push((
                 Edit::SetChannelPlayback {
                     channel: id,
@@ -709,29 +826,32 @@ fn header(ui: &mut egui::Ui, project: &Project, ch: &Channel, out: &mut Settings
                 true,
             ));
         }
-        out.end_gesture |= r.drag_stopped() || r.lost_focus();
-        ui.label("TRACK");
-        egui::ComboBox::from_id_salt("sampler_header_track")
-            .width(120.0)
-            .selected_text(track_label(project, ch.track))
-            .show_ui(ui, |ui| {
-                for t in project.mixer.all_tracks() {
-                    if ui
-                        .selectable_label(t.id == ch.track, track_label(project, t.id))
-                        .clicked()
-                        && t.id != ch.track
-                    {
-                        out.edits.push((Edit::SetChannelTrack(id, t.id), false));
-                    }
-                }
-            });
-        // Spec 0.3.0 §5: a mixer track of its own in one click.
-        if ui
-            .button("→ Free track")
-            .on_hover_text("Route this channel to the first free mixer track (a new one if none)")
-            .clicked()
-        {
-            out.free_track = true;
+        out.end_gesture |= r.drag_stopped();
+    });
+    knob_cell(ui, "Vol", &mut |ui| {
+        let mut vol = ch.volume;
+        let r = crate::widgets::knob(ui, &mut vol, 0.0..=MAX_VOLUME, 0.8, theme::AMBER, 28.0)
+            .on_hover_text(format!("Volume {}", db_text(ch.volume)));
+        if r.changed() {
+            out.edits.push((Edit::SetChannelVolume(id, vol), true));
+        }
+        out.end_gesture |= r.drag_stopped();
+    });
+    knob_cell(ui, "Pan", &mut |ui| {
+        let mut pan = ch.pan;
+        let r = crate::widgets::knob(ui, &mut pan, -1.0..=1.0, 0.0, theme::TEXT, 28.0)
+            .on_hover_text(format!("Pan {:+.0}", ch.pan * 100.0));
+        if r.changed() {
+            out.edits.push((Edit::SetChannelPan(id, pan), true));
+        }
+        out.end_gesture |= r.drag_stopped();
+    });
+    knob_cell(ui, "On", &mut |ui| {
+        let (r, resp) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::click());
+        crate::widgets::led(ui.painter(), r.center(), 5.0, !ch.muted);
+        if resp.on_hover_text("The channel plays").clicked() {
+            out.edits
+                .push((Edit::SetChannelMuted(id, !ch.muted), false));
         }
     });
 }

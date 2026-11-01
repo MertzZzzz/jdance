@@ -19,16 +19,41 @@ pub(crate) enum Panel {
     AutomationEditor,
     Mixer,
     ProjectBrowser,
+    /// UI-RD §10.1: the Browser and the Channel Rack undock too.
+    Browser,
+    ChannelRack,
 }
 
 impl Panel {
-    pub const ALL: [Panel; 5] = [
+    pub const ALL: [Panel; 7] = [
+        Self::Browser,
+        Self::ChannelRack,
         Self::PianoRoll,
         Self::SampleEditor,
         Self::AutomationEditor,
         Self::Mixer,
         Self::ProjectBrowser,
     ];
+
+    /// The panel draws its own header with Dock and Close (the window
+    /// then shows none).
+    pub fn own_header(self) -> bool {
+        matches!(self, Self::Mixer | Self::ChannelRack)
+    }
+
+    /// The glyph of the panel's header (UI-RD §1.4).
+    pub fn glyph(self) -> crate::icons::Glyph {
+        use crate::icons::Glyph as G;
+        match self {
+            Self::PianoRoll => G::PianoRoll,
+            Self::SampleEditor => G::Sample,
+            Self::AutomationEditor => G::Automation,
+            Self::Mixer => G::Mixer,
+            Self::ProjectBrowser => G::Files,
+            Self::Browser => G::Browser,
+            Self::ChannelRack => G::Rack,
+        }
+    }
 
     fn key(self) -> &'static str {
         match self {
@@ -37,6 +62,8 @@ impl Panel {
             Self::AutomationEditor => "automation_editor",
             Self::Mixer => "mixer",
             Self::ProjectBrowser => "project_browser",
+            Self::Browser => "browser",
+            Self::ChannelRack => "channel_rack",
         }
     }
 
@@ -47,6 +74,8 @@ impl Panel {
             Self::AutomationEditor => "Automation Editor",
             Self::Mixer => "Mixer",
             Self::ProjectBrowser => "Project Browser",
+            Self::Browser => "Browser",
+            Self::ChannelRack => "Channel Rack",
         }
     }
 
@@ -57,6 +86,8 @@ impl Panel {
             Self::AutomationEditor => Vec2::new(760.0, 340.0),
             Self::Mixer => Vec2::new(1100.0, 420.0),
             Self::ProjectBrowser => Vec2::new(260.0, 560.0),
+            Self::Browser => Vec2::new(280.0, 620.0),
+            Self::ChannelRack => Vec2::new(900.0, 320.0),
         }
     }
 }
@@ -269,23 +300,34 @@ impl Layout {
                 keys = crate::keys::take(ui.ctx());
             }
             egui::CentralPanel::default().show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    if ui
-                        .button("Dock back")
-                        .on_hover_text("Return this panel to the main window")
-                        .clicked()
-                    {
-                        event = WindowEvent::DockBack;
-                    }
-                    if embedded {
-                        ui.label(
-                            egui::RichText::new("(this system shows it inside the main window)")
-                                .size(11.0)
-                                .color(crate::theme::MUTED),
-                        );
-                    }
-                });
-                ui.separator();
+                // UI-RD §1.5: the window's header with Dock and Close.
+                let h = if p.own_header() {
+                    crate::widgets::HeaderOut::default()
+                } else {
+                    crate::widgets::panel_header(
+                        ui,
+                        p.glyph(),
+                        title,
+                        &[],
+                        crate::widgets::WindowButtons::UndockClose(true),
+                        |ui| {
+                            if embedded {
+                                ui.label(
+                                    egui::RichText::new("inside the main window on this system")
+                                        .size(10.5)
+                                        .color(crate::theme::DIM),
+                                );
+                            }
+                        },
+                    )
+                };
+                if h.undock {
+                    event = WindowEvent::DockBack;
+                }
+                if h.close {
+                    event = WindowEvent::Closed;
+                }
+                ui.add_space(4.0);
                 contents(ui);
             });
             let vp = ui.ctx().input(|i| {

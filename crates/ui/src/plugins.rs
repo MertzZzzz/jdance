@@ -164,7 +164,7 @@ fn scan(ui: &mut egui::Ui, host: &mut dyn Host) {
                 host.rescan_plugins(true);
             }
         });
-        if running && ui.button("Cancel").clicked() {
+        if running && crate::widgets::outline_button(ui, "Cancel").clicked() {
             host.cancel_plugin_scan();
         }
     });

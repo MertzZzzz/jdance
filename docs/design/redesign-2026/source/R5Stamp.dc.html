@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>R5 · Stamp</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#2B3038}
+button{font-family:inherit;cursor:pointer}
+</style>
+</helmet>
+<div style="width:1100px;height:780px;box-sizing:border-box;background:#2B3038;padding:20px;font-family:'IBM Plex Sans',sans-serif;font-size:12px;color:#E9ECEF;position:relative">
+
+<!-- Piano roll behind the menu -->
+<div style="position:absolute;left:20px;top:20px;width:1060px;height:740px;display:flex;flex-direction:column;border-radius:10px;overflow:hidden;background:#0E1013;border:1px solid #39404A">
+<div style="height:38px;flex:none;display:flex;align-items:center;gap:6px;padding:0 8px;background:#171A1E;border-bottom:1px solid #2A3037">
+<div style="display:flex;gap:1px;background:#0F1215;border:1px solid #2A3037;border-radius:7px;padding:2px">
+<sc-for list="{{tools}}" as="t" hint-placeholder-count="6"><button aria-label="{{t.name}}" title="{{t.name}}" style="{{t.style}}"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="{{t.color}}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{t.path}}"></path></svg></button></sc-for>
+</div>
+<button aria-expanded="true" style="height:26px;padding:0 8px;border:1px solid #F5B544;border-radius:6px;background:rgba(245,181,68,.16);color:#F5B544;font-size:11.5px;display:flex;align-items:center;gap:5px"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#F5B544" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ic.stamp}}"></path></svg>Minor 7th<svg width="9" height="9" viewBox="0 0 10 10" aria-hidden="true"><path d="M2 6l3-3 3 3" stroke="#F5B544" stroke-width="1.4" fill="none"></path></svg></button>
+<button style="height:26px;padding:0 8px;border:1px solid #39404A;border-radius:6px;background:#252A30;color:#A7AFB8;font-size:11.5px;display:flex;align-items:center;gap:5px"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#B58CFF" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12h4l4-8h4M11 2l3 2-3 2"></path></svg>Slide</button>
+<span style="font-weight:600;font-size:12.5px;margin-left:8px">Piano Roll</span><span style="color:#7E8792">›</span><span>Keys</span>
+</div>
+<div style="flex:1;display:flex">
+<div style="width:52px;flex:none;display:flex;flex-direction:column;padding-top:22px"><sc-for list="{{keys}}" as="k" hint-placeholder-count="38"><div style="{{k.style}}"><span style="font-family:'IBM Plex Mono',monospace;font-size:8px;color:#4A5059;padding-right:3px">{{k.label}}</span></div></sc-for></div>
+<div style="flex:1;position:relative;background-image:repeating-linear-gradient(90deg,#39404A 0 1px,transparent 1px 256px),repeating-linear-gradient(90deg,#1B1F24 0 1px,transparent 1px 64px)">
+<div style="height:22px;background:#171A1E;border-bottom:1px solid #2A3037"></div>
+<div style="position:absolute;left:0;right:0;top:22px;bottom:0"><sc-for list="{{rows}}" as="r" hint-placeholder-count="38"><div style="{{r.style}}"></div></sc-for></div>
+<!-- stamp ghost under the cursor, being dragged to length -->
+<sc-for list="{{ghost}}" as="g" hint-placeholder-count="4"><div style="{{g.style}}">{{g.label}}</div></sc-for>
+<svg width="18" height="18" viewBox="0 0 16 16" aria-hidden="true" style="position:absolute;left:765px;top:{{cursorTop}}px"><path d="M2 2l5 12 2-5 5-2z" fill="#F2F4F6" stroke="#0E1013" stroke-width="1"></path></svg>
+<div style="position:absolute;left:640px;top:{{tagTop}}px;padding:3px 8px;border-radius:6px;background:#171A1E;border:1px solid #F5B544;font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:#F5B544">Cm7 · 2 beats</div>
+</div>
+</div>
+</div>
+
+<!-- Stamp menu -->
+<div style="position:absolute;left:208px;top:62px;width:270px;padding:6px;background:#1E2227;border:1px solid #39404A;border-radius:10px;box-shadow:0 16px 40px rgba(0,0,0,.6);display:flex;flex-direction:column;gap:1px">
+<label style="display:flex;align-items:center;gap:9px;height:30px;padding:0 8px;font-size:12px"><span style="width:28px;height:16px;border-radius:8px;background:#5FA86B;position:relative;display:inline-block"><span style="position:absolute;right:2px;top:2px;width:12px;height:12px;border-radius:50%;background:#0E1013"></span></span>Only one<span style="margin-left:auto;font-size:10px;color:#7E8792">back to notes after one</span></label>
+<div style="height:1px;background:#2A3037;margin:3px 6px"></div>
+<sc-for list="{{menu}}" as="m" hint-placeholder-count="30">
+<sc-if value="{{m.head}}" hint-placeholder-val="{{ false }}"><div style="display:flex;align-items:center;gap:6px;padding:8px 8px 3px;font-size:9.5px;letter-spacing:1px;color:#7E8792"><svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="#7E8792" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{m.path}}"></path></svg>{{m.name}}</div></sc-if>
+<sc-if value="{{m.item}}" hint-placeholder-val="{{ true }}"><div style="{{m.style}}"><span style="{{m.dot}}"></span><span style="flex:1;white-space:nowrap">{{m.name}}</span><span style="{{m.keyStyle}}">{{m.key}}</span><span style="color:#7E8792;font-size:11px">{{m.arrow}}</span></div></sc-if>
+<sc-if value="{{m.grid}}" hint-placeholder-val="{{ false }}"><div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:3px;padding:2px 6px"><sc-for list="{{m.cells}}" as="c" hint-placeholder-count="6"><span style="{{c.style}}">{{c.name}}</span></sc-for></div></sc-if>
+</sc-for>
+</div>
+
+<!-- Advanced submenu -->
+<div style="position:absolute;left:482px;top:168px;width:210px;padding:6px;background:#1E2227;border:1px solid #39404A;border-radius:10px;box-shadow:0 16px 40px rgba(0,0,0,.6);display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1px 4px">
+<div style="grid-column:1 / span 2;padding:4px 6px 4px;font-size:9.5px;letter-spacing:1px;color:#7E8792">ADVANCED · 20</div>
+<sc-for list="{{advanced}}" as="a" hint-placeholder-count="20"><span style="{{a.style}}">{{a.name}}</span></sc-for>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1100,"height":780}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const ic = { stamp: 'M6 2h4v4l2 2v2H4V8l2-2zM3 13h10' };
+    const tb = (on) => 'width:28px;height:24px;border:0;border-radius:5px;display:flex;align-items:center;justify-content:center;' + (on ? 'background:#1F3550;box-shadow:inset 0 0 0 1px #5AA9FF' : 'background:transparent');
+    const tools = [['Draw (P)','M2 14l1-3.5 7.5-7.5 2.5 2.5L5.5 13zM9 4.5l2.5 2.5',true],['Paint (B)','M2 2.5h9v3.5H2zM11 4h2v4H7v2M6 10h2v4.5H6z',false],['Delete (D)','M6 13.5l-3.5-3.5 7-7 4 4-6.5 6.5zM6 13.5h8M5 7.5l4 4',false],['Slice (C)','M5 2a2 2 0 1 1 0 4 2 2 0 0 1 0-4zM5 10a2 2 0 1 1 0 4 2 2 0 0 1 0-4zM6.5 5.5L14 12M6.5 10.5L14 4',false],['Select (E)','M2 2h3M7 2h2M11 2h3v3M14 7v2M14 11v3h-3M9 14H7M5 14H2v-3M2 9V7M2 5V2',false],['Mute (T)','M8 2a6 6 0 1 1 0 12A6 6 0 0 1 8 2zM3.8 3.8l8.4 8.4',false]]
+      .map(([name, path, on]) => ({ name, path, style: tb(on), color: on ? '#E9ECEF' : '#A7AFB8' }));
+    const names = ['B','A#','A','G#','G','F#','F','E','D#','D','C#','C'];
+    const H = 17, N = 38;
+    const keys = [], rows = [];
+    for (let i = 0; i < N; i++) {
+      const nm = names[i % 12], oct = 5 - Math.floor(i / 12), blk = nm.includes('#');
+      keys.push({ label: nm + oct, style: 'height:' + H + 'px;box-sizing:border-box;display:flex;align-items:center;justify-content:flex-end;background:' + (blk ? 'linear-gradient(90deg,#15181B 0%,#262A30 52%,#1A1D21 60%,#C9CED4 64%,#DCE0E5 100%)' : 'linear-gradient(90deg,#C4C9CF 0%,#DCE0E5 35%,#E6E9ED 100%)') + ';box-shadow:inset 0 -1px 0 rgba(26,29,33,' + (nm === 'C' ? '.55' : '.14') + ')' });
+      rows.push({ style: 'height:' + H + 'px;box-sizing:border-box;border-bottom:1px solid ' + (nm === 'C' ? '#39404A' : 'rgba(26,29,33,.6)') + ';background:' + (blk ? '#131619' : '#16191D') });
+    }
+    const rowOf = (n, o) => (5 - o) * 12 + names.indexOf(n);
+    // Cm7 at C4: C4, D#4, G4, A#4 — 2 beats (128 px) at x=640
+    const ghost = [['C',4],['D#',4],['G',4],['A#',4]].map(([n, o], i) => ({ label: i === 0 ? 'C4' : '', style: 'position:absolute;left:640px;width:126px;height:' + (H - 3) + 'px;top:' + (22 + rowOf(n, o) * H + 1) + 'px;border-radius:3px;border:1.5px dashed #F5B544;background:rgba(245,181,68,.28);box-sizing:border-box;font-family:IBM Plex Mono,monospace;font-size:9px;color:#FFD58A;padding-left:4px;line-height:' + (H - 5) + 'px' }));
+    const cursorTop = 22 + rowOf('C', 4) * H + 4;
+    const tagTop = 22 + rowOf('A#', 4) * H - 26;
+    const it = (name, opts) => {
+      const o = opts || {};
+      return { head: false, item: true, grid: false, name, key: o.key || '', arrow: o.sub ? '▸' : '',
+        keyStyle: o.key ? "font-family:'IBM Plex Mono',monospace;font-size:9.5px;color:#A7AFB8;padding:1px 5px;border-radius:4px;background:#171A1E;border:1px solid #2F353D" : 'display:none',
+        dot: 'width:8px;height:8px;border-radius:50%;flex:none;' + (o.sel ? 'background:#F5B544' : 'border:1px solid #39404A;box-sizing:border-box'),
+        style: 'display:flex;align-items:center;gap:9px;height:27px;padding:0 8px;border-radius:6px;font-size:12px;' + (o.hl ? 'background:#1F3550;' : '') + (o.sel ? 'color:#F5B544;' : '') };
+    };
+    const head = (name, path) => ({ head: true, item: false, grid: false, name, path });
+    const cell = (name, sel) => ({ name, style: 'display:flex;align-items:center;justify-content:center;height:26px;border-radius:6px;font-size:11px;white-space:nowrap;' + (sel ? 'background:rgba(245,181,68,.16);color:#F5B544;box-shadow:inset 0 0 0 1px #F5B544' : 'background:#252A30;color:#C9CFD6') });
+    const grid = (names, sel) => ({ head: false, item: false, grid: true, cells: names.map((n) => cell(n, n === sel)) });
+    const menu = [
+      it('(none) — single notes', { key: 'Shift+N' }),
+      it('Automatic chord'),
+      head('MELODIC — CHORDS', 'M3 13V5M8 13V3M13 13V7'),
+      it('Advanced', { sub: true, hl: true }),
+      grid(['Major','Minor','Major 7th','Minor 7th','Minor 9th','Augmented','Diminished','Sus 2','Sus 4','Fifth','Fifth 9th','Fifth Oct.','Octave'], 'Minor 7th'),
+      head('MELODIC — SCALES', 'M2 13h3v-3h3V7h3V4h3'),
+      it('Scales · 32', { sub: true }),
+      head('PERCUSSIONS', 'M3 10l10-6M5 13a3 3 0 1 1 6 0'),
+      grid(['Fill ×1','Fill ×2','Fill ×3','Fill ×4','Fill ×8','Flam fast','Flam med','Flam slow','Roll fast','Roll med','Roll slow'], ''),
+      grid(['Roll: dynamic','Roll: relative'], 'Roll: dynamic'),
+      head('SPECIAL', 'M2 12h4l4-8h4'),
+      it('Slide up'),
+    ];
+    const advanced = ['6th','Minor 6th','6/9','Dominant 7th','7th sus4','7th ♭5','7th ♯5','7th ♭9','7th ♯9','Half-dim 7th','Dim 7th','Min-maj 7th','Add 9','Minor add 9','Dominant 9th','Major 9th','Dominant 11th','Minor 11th','Dominant 13th','Major 13th']
+      .map((name) => ({ name, style: 'display:flex;align-items:center;height:24px;padding:0 6px;border-radius:5px;font-size:11px;color:#C9CFD6;white-space:nowrap' }));
+    return { ic, tools, keys, rows, ghost, cursorTop, tagTop, menu, advanced };
+  }
+}
+</script>
+</body>
+</html>

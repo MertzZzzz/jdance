@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>R5 · Piano Roll tools</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#2B3038}
+button{font-family:inherit;cursor:pointer}
+</style>
+</helmet>
+<div style="width:1240px;height:920px;box-sizing:border-box;background:#2B3038;padding:20px;font-family:'IBM Plex Sans',sans-serif;font-size:12px;color:#E9ECEF;display:flex;gap:20px;align-items:flex-start">
+
+<!-- Tools menu -->
+<div style="width:290px;flex:none;padding:5px;background:#1E2227;border:1px solid #39404A;border-radius:10px;box-shadow:0 14px 36px rgba(0,0,0,.55);display:flex;flex-direction:column;gap:1px">
+<div style="display:flex;align-items:center;gap:6px;padding:6px 8px 4px;font-size:9.5px;letter-spacing:1px;color:#7E8792"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="#7E8792" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M2 14l8-8M10 6l1.5-1.5M12 2v2M14 4h-2M13.5 7.5l-1-1M8.5 2.5l1 1"></path></svg>TOOLS · selection or all notes</div>
+<sc-for list="{{menu}}" as="m" hint-placeholder-count="20">
+<sc-if value="{{m.sep}}" hint-placeholder-val="{{ false }}"><div style="height:1px;background:#2A3037;margin:3px 6px"></div></sc-if>
+<sc-if value="{{m.item}}" hint-placeholder-val="{{ true }}">
+<div style="{{m.style}}"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="{{m.color}}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{m.path}}"></path></svg><span style="flex:1;white-space:nowrap">{{m.name}}</span><span style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;color:#A7AFB8;padding:1px 5px;border-radius:4px;background:#171A1E;border:1px solid #2F353D;white-space:nowrap">{{m.key}}</span></div>
+</sc-if>
+</sc-for>
+<div style="margin-top:4px;padding:7px 8px;border-top:1px solid #2A3037;display:flex;flex-direction:column;gap:4px;font-size:10.5px;color:#7E8792">
+<span style="display:flex;align-items:center;gap:6px"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="#3CC9B0" stroke-width="1.5" aria-hidden="true"><path d="M1.5 8s2.5-4.5 6.5-4.5 6.5 4.5 6.5 4.5-2.5 4.5-6.5 4.5S1.5 8 1.5 8zM8 6a2 2 0 1 1 0 4 2 2 0 0 1 0-4z"></path></svg>Hover — preview on the roll</span>
+<span style="display:flex;align-items:center;gap:6px"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="#3CC9B0" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M3 9V8a5 5 0 0 1 10 0v1M3 9h2v4H3zM11 9h2v4h-2z"></path></svg><span style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;color:#C9CFD6;padding:0 4px;border:1px solid #39404A;border-radius:3px">Space</span> listen to the result</span>
+</div>
+</div>
+
+<!-- Quantize dialog + roll preview -->
+<div style="width:520px;flex:none;display:flex;flex-direction:column;gap:16px">
+<div style="display:flex;flex-direction:column;border-radius:10px;overflow:hidden;background:#171A1E;border:1px solid #39404A;box-shadow:0 18px 50px rgba(0,0,0,.5)">
+<div style="height:38px;display:flex;align-items:center;gap:8px;padding:0 6px 0 14px;background:#13161A;border-bottom:1px solid #2A3037">
+<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="#F5B544" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="{{ic.quant}}"></path></svg>
+<span style="font-weight:600;font-size:13px">Quantize</span><span style="font-size:11px;color:#7E8792">12 notes selected</span>
+<div style="flex:1"></div>
+<button aria-label="Close (cancels)" style="width:26px;height:26px;border:0;border-radius:6px;background:transparent;display:flex;align-items:center;justify-content:center"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="#A7AFB8" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"></path></svg></button>
+</div>
+<div style="padding:14px;display:flex;flex-direction:column;gap:12px">
+<!-- live preview -->
+<div style="height:110px;border-radius:9px;background:#0F1215;border:1px solid #2A3037;position:relative;overflow:hidden;background-image:repeating-linear-gradient(90deg,#2A3037 0 1px,transparent 1px 61px),repeating-linear-gradient(90deg,#1A1E23 0 1px,transparent 1px 15.25px)">
+<sc-for list="{{before}}" as="n" hint-placeholder-count="12"><span style="{{n.style}}"></span></sc-for>
+<sc-for list="{{after}}" as="n" hint-placeholder-count="12"><span style="{{n.style}}"></span></sc-for>
+<span style="position:absolute;right:8px;top:6px;display:flex;gap:10px;font-size:10px;color:#A7AFB8"><span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:5px;border:1px dashed #7E8792;border-radius:2px"></span>before</span><span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:5px;background:#F5B544;border-radius:2px"></span>after · live</span></span>
+</div>
+<!-- knobs -->
+<div style="display:flex;align-items:flex-start;gap:14px;padding:10px 12px;border-radius:9px;background:#13161A;border:1px solid #22272D">
+<div style="display:flex;flex-direction:column;gap:5px;width:130px">
+<span style="font-size:9.5px;letter-spacing:1px;color:#7E8792">GRID</span>
+<button style="height:30px;padding:0 10px;border:1px solid #39404A;border-radius:7px;background:#252A30;color:#E9ECEF;font-size:12px;display:flex;align-items:center;gap:6px"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#F5B544" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ic.magnet}}"></path></svg><span style="flex:1;text-align:left">1/4 beat</span><svg width="9" height="9" viewBox="0 0 10 10" aria-hidden="true"><path d="M2 4l3 3 3-3" stroke="#A7AFB8" stroke-width="1.4" fill="none"></path></svg></button>
+<span style="font-size:10px;color:#7E8792">or a groove ▾</span>
+</div>
+<sc-for list="{{knobs}}" as="k" hint-placeholder-count="3">
+<div style="display:flex;flex-direction:column;align-items:center;gap:2px;width:70px">
+<svg width="40" height="40" viewBox="0 0 34 34" aria-hidden="true"><circle cx="17" cy="17" r="13" fill="#0F1215" stroke="#39404A"></circle><path d="{{k.arc}}" stroke="#F5B544" stroke-width="3" fill="none" stroke-linecap="round"></path><path d="{{k.tick}}" stroke="#E9ECEF" stroke-width="1.8" stroke-linecap="round"></path></svg>
+<span style="font-size:9px;letter-spacing:1px;color:#7E8792">{{k.label}}</span><span style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">{{k.value}}</span>
+</div>
+</sc-for>
+</div>
+<div style="display:flex;gap:6px;flex-wrap:wrap">
+<sc-for list="{{opts}}" as="o" hint-placeholder-count="3"><span style="{{o.style}}"><span style="{{o.dot}}"></span>{{o.name}}</span></sc-for>
+</div>
+<div style="display:flex;align-items:center;gap:8px;margin-top:4px">
+<button aria-label="Listen to the result" title="Listen to the result (Space) — plays the preview, not the original" style="height:32px;padding:0 10px;border:1px solid #3CC9B0;border-radius:7px;background:rgba(60,201,176,.12);color:#3CC9B0;font-size:12px;display:flex;align-items:center;gap:6px"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#3CC9B0" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M3 9V8a5 5 0 0 1 10 0v1M3 9h2v4H3zM11 9h2v4h-2z"></path></svg>Listen</button>
+<button title="Default settings" style="height:32px;padding:0 10px;border:0;border-radius:7px;background:transparent;color:#A7AFB8;font-size:12px;display:flex;align-items:center;gap:5px"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="#A7AFB8" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M2.5 8a5.5 5.5 0 1 0 1.6-3.9M2.5 2.5v3h3"></path></svg>Reset</button>
+<div style="flex:1"></div>
+<button style="height:32px;padding:0 14px;border:1px solid #39404A;border-radius:7px;background:transparent;color:#E9ECEF;font-size:12px">Cancel</button>
+<button style="height:32px;padding:0 16px;border:0;border-radius:7px;background:#F5B544;color:#1B1405;font-size:12px;font-weight:600;display:flex;align-items:center;gap:6px"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#1B1405" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8.5l3.5 3.5L13 4.5"></path></svg>Apply</button>
+</div>
+</div>
+</div>
+
+<!-- Preview on the Piano Roll itself -->
+<div style="height:250px;display:flex;flex-direction:column;border-radius:10px;overflow:hidden;background:#0E1013;border:1px solid #39404A;box-shadow:0 18px 50px rgba(0,0,0,.45);position:relative">
+<div style="height:22px;flex:none;display:flex;align-items:center;padding:0 8px 0 50px;background:#171A1E;border-bottom:1px solid #2A3037;font-family:'IBM Plex Mono',monospace;font-size:9.5px;color:#7E8792;gap:116px"><span>1</span><span>2</span><span>3</span><span>4</span></div>
+<div style="flex:1;display:flex">
+<div style="width:42px;flex:none;display:flex;flex-direction:column"><sc-for list="{{pkeys}}" as="k" hint-placeholder-count="12"><span style="{{k.style}}"></span></sc-for></div>
+<div style="flex:1;position:relative;background-image:repeating-linear-gradient(90deg,#39404A 0 1px,transparent 1px 119.5px),repeating-linear-gradient(90deg,#1B1F24 0 1px,transparent 1px 29.9px)">
+<sc-for list="{{rollBefore}}" as="n" hint-placeholder-count="12"><span style="{{n.style}}"></span></sc-for>
+<sc-for list="{{rollAfter}}" as="n" hint-placeholder-count="12"><span style="{{n.style}}"></span></sc-for>
+<div style="position:absolute;top:0;bottom:0;left:190px;width:2px;background:#3CC9B0;box-shadow:0 0 8px rgba(60,201,176,.6)"></div>
+</div>
+</div>
+<!-- floating preview bar -->
+<div style="position:absolute;left:58px;top:30px;display:flex;align-items:center;gap:8px;padding:5px 6px 5px 10px;border-radius:9px;background:rgba(23,26,30,.94);border:1px solid #3CC9B0;box-shadow:0 8px 22px rgba(0,0,0,.5)">
+<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#3CC9B0" stroke-width="1.5" aria-hidden="true"><path d="M1.5 8s2.5-4.5 6.5-4.5 6.5 4.5 6.5 4.5-2.5 4.5-6.5 4.5S1.5 8 1.5 8zM8 6a2 2 0 1 1 0 4 2 2 0 0 1 0-4z"></path></svg>
+<span style="font-size:11.5px">Preview · <b style="font-weight:600">Quantize</b></span>
+<span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:#7E8792">9 of 12 moved</span>
+<button style="height:24px;padding:0 8px;border:0;border-radius:6px;background:#3CC9B0;color:#0E1013;font-size:11px;font-weight:600;display:flex;align-items:center;gap:4px"><svg width="9" height="9" viewBox="0 0 10 10" aria-hidden="true"><rect x="1" y="1" width="3" height="8" fill="#0E1013"></rect><rect x="6" y="1" width="3" height="8" fill="#0E1013"></rect></svg>Listening</button>
+<button title="Compare with the original (hold)" style="height:24px;padding:0 8px;border:1px solid #39404A;border-radius:6px;background:#252A30;color:#E9ECEF;font-size:11px">A / B</button>
+</div>
+<div style="position:absolute;right:10px;bottom:8px;display:flex;gap:10px;font-size:10px;color:#A7AFB8"><span style="display:flex;align-items:center;gap:4px"><span style="width:14px;height:6px;border-radius:2px;background:#39404A"></span>original</span><span style="display:flex;align-items:center;gap:4px"><span style="width:14px;height:6px;border-radius:2px;background:#F5B544;box-shadow:0 0 0 1px #3CC9B0"></span>result</span></div>
+</div>
+</div>
+
+<!-- Transpose -->
+<div style="flex:1;display:flex;flex-direction:column;border-radius:10px;overflow:hidden;background:#171A1E;border:1px solid #39404A;box-shadow:0 18px 50px rgba(0,0,0,.5)">
+<div style="height:38px;display:flex;align-items:center;gap:8px;padding:0 6px 0 14px;background:#13161A;border-bottom:1px solid #2A3037">
+<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="#A7AFB8" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M5 13V3M2 6l3-3 3 3M11 3v10M8 10l3 3 3-3"></path></svg>
+<span style="font-weight:600;font-size:13px">Transpose</span>
+<div style="flex:1"></div>
+<button aria-label="Close" style="width:26px;height:26px;border:0;border-radius:6px;background:transparent;display:flex;align-items:center;justify-content:center"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="#A7AFB8" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"></path></svg></button>
+</div>
+<div style="padding:14px;display:flex;flex-direction:column;gap:12px">
+<sc-for list="{{steppers}}" as="s" hint-placeholder-count="2">
+<div style="display:flex;flex-direction:column;gap:5px">
+<span style="font-size:9.5px;letter-spacing:1px;color:#7E8792">{{s.label}}</span>
+<div style="display:flex;align-items:center;gap:6px">
+<button aria-label="Down" style="width:34px;height:34px;border:1px solid #39404A;border-radius:7px;background:#252A30;display:flex;align-items:center;justify-content:center"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="#E9ECEF" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3 8h10"></path></svg></button>
+<span style="flex:1;height:34px;border-radius:7px;background:#0F1215;border:1px solid #2A3037;display:flex;align-items:center;justify-content:center;font-family:'IBM Plex Mono',monospace;font-size:16px">{{s.value}}</span>
+<button aria-label="Up" style="width:34px;height:34px;border:1px solid #39404A;border-radius:7px;background:#252A30;display:flex;align-items:center;justify-content:center"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="#E9ECEF" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M8 3v10M3 8h10"></path></svg></button>
+</div>
+</div>
+</sc-for>
+<div style="display:flex;flex-wrap:wrap;gap:5px">
+<sc-for list="{{quick}}" as="q" hint-placeholder-count="5"><button style="height:26px;padding:0 9px;border:0;border-radius:13px;background:#252A30;color:#C9CFD6;font-family:'IBM Plex Mono',monospace;font-size:11px">{{q.n}}</button></sc-for>
+</div>
+<span style="font-size:10.5px;color:#7E8792;line-height:1.4">Shift+↑↓ — semitone, Ctrl+↑↓ — octave right in the roll.</span>
+<div style="display:flex;gap:8px;justify-content:flex-end">
+<button style="height:32px;padding:0 12px;border:1px solid #39404A;border-radius:7px;background:transparent;color:#E9ECEF;font-size:12px">Cancel</button>
+<button style="height:32px;padding:0 14px;border:0;border-radius:7px;background:#F5B544;color:#1B1405;font-size:12px;font-weight:600">Apply</button>
+</div>
+</div>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1240,"height":920}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const ic = {
+      quant: 'M2 3v10M6 3v10M10 3v10M14 3v10M3.5 6h3M8 10h4',
+      magnet: 'M3.5 2.5v5.5a4.5 4.5 0 0 0 9 0V2.5h-3v5.5a1.5 1.5 0 0 1-3 0V2.5zM3.5 5.5h3M9.5 5.5h3',
+    };
+    const mi = (name, path, key, hl, accent) => ({ item: true, sep: false, name, path, key: key || '', color: accent ? '#F5B544' : '#A7AFB8', style: 'display:flex;align-items:center;gap:9px;height:27px;padding:0 8px;border-radius:6px;font-size:12px;' + (hl ? 'background:#1F3550' : '') });
+    const sep = { item: false, sep: true };
+    const menu = [
+      mi('Riff machine…', 'M2 12l3-6 3 4 3-7 3 5', 'Alt+R', false, true),
+      mi('Chord progression…', 'M3 13V5M8 13V3M13 13V7M1.5 5h3M6.5 3h3M11.5 7h3', 'Alt+H', false, false),
+      sep,
+      mi('Quick legato', 'M2 9h5M7 9h5M12 9h2', 'Ctrl+Shift+L', false, false),
+      mi('Articulate…', 'M2 10h3M7 10h2M11 10h3M3 6v1M8 6v1M12 6v1', 'Alt+L', false, false),
+      sep,
+      mi('Quick quantize', 'M2 3v10M8 3v10M14 3v10', 'Ctrl+Q', false, false),
+      mi('Quick quantize starts', 'M2 3v10M8 3v10M14 3v10M3 8h3', 'Ctrl+Shift+Q', false, false),
+      mi('Quantize…', ic.quant, 'Alt+Q', true, true),
+      sep,
+      mi('Quick chop', 'M2 8h12M6 5v6M10 5v6', 'Ctrl+U', false, false),
+      mi('Chop…', 'M5 2a2 2 0 1 1 0 4 2 2 0 0 1 0-4zM5 10a2 2 0 1 1 0 4 2 2 0 0 1 0-4zM6.5 5.5L14 12M6.5 10.5L14 4', 'Alt+U', false, false),
+      mi('Glue…', 'M2 8h5M9 8h5M7 6v4M9 6v4', 'Alt+G', false, false),
+      sep,
+      mi('Arpeggiate…', 'M2 13l3-3 3-3 3-3 3-3', 'Alt+A', false, false),
+      mi('Strum…', 'M3 4h6M4 7h6M5 10h6M6 13h6', 'Alt+S', false, false),
+      mi('Flam…', 'M3 6h2M6 10h8', 'Alt+F', false, false),
+      mi('Claw machine…', 'M4 2v5a4 4 0 0 0 8 0V2M8 11v3', 'Alt+W', false, false),
+      sep,
+      mi('Limit…', 'M2 4h12M2 12h12M5 7h6', 'Alt+M', false, false),
+      mi('Flip…', 'M8 2v12M3 5l-1 3 1 3M13 5l1 3-1 3', 'Alt+I', false, false),
+      mi('Randomize…', 'M3 3h10v10H3zM6 6h.01M10 10h.01M10 6h.01M6 10h.01', 'Alt+N', false, false),
+      mi('Scale levels…', 'M3 14V8M6.5 14V4M10 14V9M13.5 14V6', 'Alt+V', false, false),
+      sep,
+      mi('LFO…', 'M1 8c1.7-5 3.3-5 5 0s3.3 5 5 0 2.3-3 4-3', 'Alt+O', false, false),
+      sep,
+      mi('Transpose…', 'M5 13V3M2 6l3-3 3 3M11 3v10M8 10l3 3 3-3', 'Alt+T', false, false),
+      mi('Scale…', 'M2 13h3v-3h3V7h3V4h3', 'Alt+K', false, true),
+      mi('Note properties…', 'M3 2h10v12H3zM6 5h4M6 8h4M6 11h2', 'Alt+Enter', false, false),
+      sep,
+      mi('Scripts  ▸', 'M5 4L2 8l3 4M11 4l3 4-3 4M9 3L7 13', '', false, false),
+    ];
+    // Preview: 12 notes, before (off-grid, dashed) and after (on grid)
+    const step = 15.25, rowH = 11;
+    const notes = [[0.3,2,2],[3.6,1,4],[4.2,2,1],[7.7,1,5],[8.1,2,2],[11.4,1,3],[12.3,2,6],[15.8,1,4],[16.4,2,2],[19.6,1,5],[24.2,4,3],[28.5,2,1]];
+    const before = notes.map(([s, l, r]) => ({ style: 'position:absolute;height:7px;border-radius:2px;border:1px dashed #7E8792;box-sizing:border-box;left:' + (s * step).toFixed(1) + 'px;width:' + (l * step - 2).toFixed(1) + 'px;top:' + (12 + r * rowH) + 'px' }));
+    const after = notes.map(([s, l, r]) => ({ style: 'position:absolute;height:7px;border-radius:2px;background:#F5B544;left:' + (Math.round(s) * step + 1).toFixed(1) + 'px;width:' + (l * step - 2).toFixed(1) + 'px;top:' + (12 + r * rowH) + 'px;opacity:.9' }));
+    const knob = (v) => {
+      const rad = (d) => d * Math.PI / 180, r = 13, c = 17;
+      const pt = (a, rr) => (c + rr * Math.sin(a)).toFixed(2) + ' ' + (c - rr * Math.cos(a)).toFixed(2);
+      const a0 = rad(-135), a1 = rad(-135 + v * 270);
+      return { arc: v <= 0 ? '' : 'M' + pt(a0, r) + ' A' + r + ' ' + r + ' 0 ' + (v * 270 > 180 ? 1 : 0) + ' 1 ' + pt(a1, r), tick: 'M' + pt(a1, 4) + ' L' + pt(a1, 10) };
+    };
+    const knobs = [
+      { label: 'STRENGTH', value: '100%', ...knob(1) },
+      { label: 'SWING', value: '0%', ...knob(0) },
+      { label: 'WINDOW', value: 'any', ...knob(0) },
+    ];
+    const ch = (on) => 'display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 10px;border-radius:13px;font-size:11.5px;' + (on ? 'background:#1F3550;color:#E9ECEF;border:1px solid #5AA9FF' : 'background:#20252B;color:#A7AFB8;border:1px solid #2A3037');
+    const dot = (on) => 'width:10px;height:10px;border-radius:50%;' + (on ? 'background:#5AA9FF' : 'border:1px solid #5A626C;box-sizing:border-box');
+    const opts = [['Starts', true], ['Ends', false], ['Keep lengths', true]].map(([name, on]) => ({ name, style: ch(on), dot: dot(on) }));
+    const steppers = [{ label: 'SEMITONES', value: '+3' }, { label: 'OCTAVES', value: '0' }];
+    const quick = ['−12', '−7', '−5', '+5', '+7', '+12'].map((n) => ({ n }));
+    // Preview slice of the roll: original notes greyed, result in amber with a teal edge.
+    const ps = 29.9, ph = 16;
+    const pkeys = Array.from({ length: 12 }, (_, i) => { const blk = [1,3,6,8,10].includes(11 - i); return { style: 'height:' + ph + 'px;box-sizing:border-box;background:' + (blk ? 'linear-gradient(90deg,#1A1D21 60%,#D9DDE2 60%)' : '#D9DDE2') + ';box-shadow:inset 0 -1px 0 rgba(26,29,33,.2)' }; });
+    const rollBefore = notes.map(([s, l, r]) => ({ style: 'position:absolute;height:' + (ph - 4) + 'px;border-radius:3px;background:#39404A;left:' + (s * ps).toFixed(1) + 'px;width:' + (l * ps - 2).toFixed(1) + 'px;top:' + (r * ph + 2 + 16) + 'px' }));
+    const rollAfter = notes.map(([s, l, r]) => ({ style: 'position:absolute;height:' + (ph - 4) + 'px;border-radius:3px;background:#F5B544;box-shadow:0 0 0 1px #3CC9B0;left:' + (Math.round(s) * ps + 1).toFixed(1) + 'px;width:' + (l * ps - 2).toFixed(1) + 'px;top:' + (r * ph + 2 + 16) + 'px;opacity:.95' }));
+    return { ic, menu, before, after, knobs, opts, steppers, quick, pkeys, rollBefore, rollAfter };
+  }
+}
+</script>
+</body>
+</html>

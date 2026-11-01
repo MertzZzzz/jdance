@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>R3 · Sampler — Sample</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#2B3038}
+button{font-family:inherit;cursor:pointer}
+</style>
+</helmet>
+<div style="width:840px;height:720px;box-sizing:border-box;background:#2B3038;padding:20px;font-family:'IBM Plex Sans',sans-serif;font-size:12px;color:#E9ECEF">
+<div style="width:800px;height:680px;display:flex;flex-direction:column;border-radius:10px;overflow:hidden;background:#171A1E;border:1px solid #39404A;box-shadow:0 18px 50px rgba(0,0,0,.5)">
+
+<!-- Title bar -->
+<div style="height:34px;flex:none;display:flex;align-items:center;gap:8px;padding:0 6px 0 12px;background:#13161A;border-bottom:1px solid #2A3037">
+<span style="width:10px;height:10px;border-radius:3px;background:#C9774F"></span>
+<span style="font-weight:600;font-size:13px">Kick</span>
+<span style="font-size:11px;color:#7E8792">Sampler · → 01 Kick</span>
+<div style="flex:1"></div>
+<button aria-label="Close" style="width:26px;height:26px;border:0;border-radius:6px;background:transparent;display:flex;align-items:center;justify-content:center"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="#A7AFB8" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"></path></svg></button>
+</div>
+
+<!-- Top strip: tabs left, channel controls right -->
+<div style="height:66px;flex:none;display:flex;align-items:center;gap:6px;padding:0 12px;border-bottom:1px solid #2A3037;background:#13161A">
+<sc-for list="{{tabs}}" as="t" hint-placeholder-count="4">
+<button aria-label="{{t.name}}" title="{{t.name}}" style="{{t.style}}"><svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="{{t.color}}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{t.path}}"></path></svg><span style="font-size:9.5px;color:{{t.color}}">{{t.name}}</span></button>
+</sc-for>
+<div style="flex:1"></div>
+<div style="display:flex;flex-direction:column;align-items:center;gap:3px;width:40px">
+<button aria-label="Channel on" title="ON — the channel plays" style="width:22px;height:22px;border-radius:50%;border:1px solid #39404A;background:#0F1215;display:flex;align-items:center;justify-content:center;margin:5px 0"><span style="width:10px;height:10px;border-radius:50%;background:#5FA86B;box-shadow:0 0 8px rgba(95,168,107,.7)"></span></button>
+<span style="font-size:8.5px;letter-spacing:1px;color:#7E8792">ON</span>
+</div>
+<sc-for list="{{strip}}" as="k" hint-placeholder-count="3">
+<div title="{{k.label}} {{k.value}}" style="display:flex;flex-direction:column;align-items:center;gap:2px;width:48px">
+<svg width="34" height="34" viewBox="0 0 34 34" aria-hidden="true"><circle cx="17" cy="17" r="13" fill="#0F1215" stroke="#39404A"></circle><path d="{{k.arc}}" stroke="{{k.color}}" stroke-width="3" fill="none" stroke-linecap="round"></path><path d="{{k.tick}}" stroke="#E9ECEF" stroke-width="1.8" stroke-linecap="round"></path></svg>
+<span style="font-size:8.5px;letter-spacing:1px;color:#7E8792">{{k.label}}</span>
+</div>
+</sc-for>
+<div title="Pitch bend range" style="display:flex;flex-direction:column;align-items:center;gap:2px;width:44px">
+<span style="height:34px;display:flex;align-items:center"><span style="font-family:'IBM Plex Mono',monospace;font-size:14px;padding:3px 8px;border-radius:6px;background:#0F1215;border:1px solid #2A3037">2</span></span>
+<span style="font-size:8.5px;letter-spacing:1px;color:#7E8792">RANGE</span>
+</div>
+<div style="width:1px;height:40px;background:#2A3037;margin:0 4px"></div>
+<div style="display:flex;flex-direction:column;align-items:center;gap:2px">
+<button title="Mixer track — click for the list, drag to change" style="height:34px;min-width:58px;padding:0 8px;border:1px solid #39404A;border-radius:7px;background:#0F1215;color:#E9ECEF;display:flex;align-items:center;gap:6px"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#A7AFB8" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 2v12M8 2v12M12 2v12M2.5 10h3M6.5 5h3M10.5 8h3"></path></svg><span style="font-family:'IBM Plex Mono',monospace;font-size:15px">01</span></button>
+<span style="font-size:8.5px;letter-spacing:1px;color:#7E8792">TRACK</span>
+</div>
+</div>
+
+<!-- Body: two columns -->
+<div style="flex:none;display:flex;gap:10px;padding:10px 12px 0">
+<!-- left column -->
+<div style="width:356px;flex:none;display:flex;flex-direction:column;gap:10px">
+<!-- File -->
+<div style="height:44px;border-radius:9px;background:#13161A;border:1px solid #22272D;display:flex;align-items:center;gap:8px;padding:0 6px 0 12px">
+<span style="font-size:10px;letter-spacing:1px;color:#7E8792">FILE</span>
+<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#F5B544" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="{{ic.wave}}"></path></svg>
+<span style="flex:1;min-width:0;font-family:'IBM Plex Mono',monospace;font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">samples/kick.wav</span>
+<sc-for list="{{fileBtns}}" as="b" hint-placeholder-count="3"><button aria-label="{{b.name}}" title="{{b.name}}" style="width:28px;height:28px;border:0;border-radius:6px;background:#252A30;display:flex;align-items:center;justify-content:center"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#E9ECEF" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{b.path}}"></path></svg></button></sc-for>
+</div>
+<!-- Content -->
+<div style="border-radius:9px;background:#13161A;border:1px solid #22272D;padding:10px 12px;display:flex;flex-direction:column;gap:9px">
+<span style="display:flex;align-items:center;gap:6px;font-size:10px;letter-spacing:1px;color:#7E8792"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="#7E8792" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M2 4h4l1.5 1.5H14V13H2z"></path></svg>CONTENT</span>
+<div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px">
+<span style="{{led.off}}"><span style="{{led.offDot}}"></span>Keep on disk</span>
+<span style="{{led.dis}}"><span style="{{led.disDot}}"></span>Resample</span>
+</div>
+<div style="display:flex;align-items:center;gap:10px">
+<span style="font-size:11.5px;color:#C9CFD6;white-space:nowrap">Declicking</span>
+<button style="flex:1;height:28px;padding:0 10px;border:1px solid #39404A;border-radius:7px;background:#252A30;color:#E9ECEF;font-size:11.5px;display:flex;align-items:center;justify-content:space-between">Transient (no bleeding)<svg width="9" height="9" viewBox="0 0 10 10" aria-hidden="true"><path d="M2 4l3 3 3-3" stroke="#A7AFB8" stroke-width="1.4" fill="none"></path></svg></button>
+</div>
+</div>
+<!-- Playback (jdance: in place of the reference's Variants) -->
+<div style="flex:1;border-radius:9px;background:#13161A;border:1px solid #22272D;padding:10px 12px;display:flex;flex-direction:column;gap:9px">
+<span style="display:flex;align-items:center;gap:6px;font-size:10px;letter-spacing:1px;color:#7E8792"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="#7E8792" stroke-width="1.5" aria-hidden="true"><path d="M8 2a6 6 0 1 1 0 12A6 6 0 0 1 8 2zM6.5 5.5v5l4-2.5z"></path></svg>PLAYBACK</span>
+<div style="display:flex;align-items:center;gap:12px">
+<div style="flex:1;display:flex;background:#0F1215;border:1px solid #2A3037;border-radius:7px;padding:2px;gap:1px">
+<button style="flex:1;height:26px;border:0;border-radius:5px;background:#1F3550;color:#E9ECEF;font-size:11.5px;display:flex;align-items:center;justify-content:center;gap:5px;box-shadow:inset 0 0 0 1px #5AA9FF"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="#E9ECEF" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M2 8h9M8 4.5L11.5 8 8 11.5M14 3v10"></path></svg>One-shot</button>
+<button style="flex:1;height:26px;border:0;border-radius:5px;background:transparent;color:#A7AFB8;font-size:11.5px;display:flex;align-items:center;justify-content:center;gap:5px"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="#A7AFB8" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M3 9V7a3 3 0 0 1 3-3h7M11 2l2 2-2 2M13 7v2a3 3 0 0 1-3 3H3M5 14l-2-2 2-2"></path></svg>Loop</button>
+</div>
+<div title="Gain 0.0 dB" style="display:flex;flex-direction:column;align-items:center;gap:1px">
+<svg width="30" height="30" viewBox="0 0 34 34" aria-hidden="true"><circle cx="17" cy="17" r="13" fill="#0F1215" stroke="#39404A"></circle><path d="{{gain.arc}}" stroke="#F5B544" stroke-width="3" fill="none" stroke-linecap="round"></path><path d="{{gain.tick}}" stroke="#E9ECEF" stroke-width="1.8" stroke-linecap="round"></path></svg>
+<span style="font-size:8.5px;letter-spacing:1px;color:#7E8792">GAIN</span>
+</div>
+</div>
+<span style="font-size:10.5px;color:#7E8792;line-height:1.4">Plays from start to end; note length is ignored unless the envelope is on. Root note C5 — Instrument tab.</span>
+</div>
+</div>
+
+<!-- right column -->
+<div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:10px">
+<!-- Time stretching -->
+<div style="border-radius:9px;background:#13161A;border:1px solid #22272D;padding:10px 12px;display:flex;flex-direction:column;gap:6px">
+<span style="display:flex;align-items:center;gap:6px;font-size:10px;letter-spacing:1px;color:#7E8792"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="#7E8792" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M1 8h4M11 8h4M3 6l-2 2 2 2M13 6l2 2-2 2M6 4v8M10 4v8"></path></svg>TIME STRETCHING</span>
+<div style="display:flex;align-items:center;gap:10px">
+<sc-for list="{{stretch}}" as="k" hint-placeholder-count="3">
+<div title="{{k.label}} {{k.value}}" style="display:flex;flex-direction:column;align-items:center;gap:2px;width:44px">
+<svg width="34" height="34" viewBox="0 0 34 34" aria-hidden="true"><circle cx="17" cy="17" r="13" fill="#0F1215" stroke="#39404A"></circle><path d="{{k.arc}}" stroke="{{k.color}}" stroke-width="3" fill="none" stroke-linecap="round"></path><path d="{{k.tick}}" stroke="#E9ECEF" stroke-width="1.8" stroke-linecap="round"></path></svg>
+<span style="font-size:8.5px;letter-spacing:1px;color:#7E8792">{{k.label}}</span>
+</div>
+</sc-for>
+<div style="flex:1;display:flex;align-items:center;gap:8px;padding-left:6px">
+<span style="font-size:11.5px;color:#C9CFD6">Mode</span>
+<button style="flex:1;height:28px;padding:0 10px;border:1px solid #39404A;border-radius:7px;background:#252A30;color:#E9ECEF;font-size:11.5px;display:flex;align-items:center;justify-content:space-between">Resample<svg width="9" height="9" viewBox="0 0 10 10" aria-hidden="true"><path d="M2 4l3 3 3-3" stroke="#A7AFB8" stroke-width="1.4" fill="none"></path></svg></button>
+</div>
+</div>
+</div>
+<!-- Precomputed effects -->
+<div style="flex:1;border-radius:9px;background:#13161A;border:1px solid #22272D;padding:10px 12px;display:flex;flex-direction:column;gap:9px">
+<span style="display:flex;align-items:center;gap:6px;font-size:10px;letter-spacing:1px;color:#7E8792"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="#7E8792" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 14l8-8M10 6l1.5-1.5M12 2v2M14 4h-2M13.5 7.5l-1-1M8.5 2.5l1 1"></path></svg>PRECOMPUTED EFFECTS</span>
+<div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px">
+<sc-for list="{{fx}}" as="f" hint-placeholder-count="6"><span style="{{f.style}}"><span style="{{f.dot}}"></span>{{f.name}}</span></sc-for>
+</div>
+<div style="height:1px;background:#22272D"></div>
+<div style="display:flex;justify-content:space-between">
+<sc-for list="{{region}}" as="k" hint-placeholder-count="6">
+<div title="{{k.label}} {{k.value}}" style="display:flex;flex-direction:column;align-items:center;gap:2px;width:52px">
+<svg width="32" height="32" viewBox="0 0 34 34" aria-hidden="true"><circle cx="17" cy="17" r="13" fill="#0F1215" stroke="{{k.ring}}"></circle><path d="{{k.arc}}" stroke="{{k.color}}" stroke-width="3" fill="none" stroke-linecap="round"></path><path d="{{k.tick}}" stroke="#E9ECEF" stroke-width="1.8" stroke-linecap="round"></path></svg>
+<span style="font-size:8px;letter-spacing:.6px;color:#7E8792;white-space:nowrap">{{k.label}}</span>
+<span style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;color:#A7AFB8">{{k.value}}</span>
+</div>
+</sc-for>
+</div>
+</div>
+</div>
+</div>
+
+<!-- Waveform, full width at the bottom -->
+<div style="flex:1;min-height:0;margin:10px 12px 12px;border-radius:9px;background:#0F1215;border:1px solid #2A3037;position:relative;overflow:hidden">
+<svg width="100%" height="100%" viewBox="0 0 850 200" preserveAspectRatio="none" role="img" aria-label="Waveform of kick.wav" style="position:absolute;inset:0">
+<defs>
+<linearGradient id="wvH" x1="0" y1="0" x2="850" y2="0" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#7DBBFF"></stop><stop offset=".855" stop-color="#5AA9FF"></stop><stop offset=".858" stop-color="#2E4A6B"></stop><stop offset="1" stop-color="#2E4A6B"></stop></linearGradient>
+<linearGradient id="wvV" x1="0" y1="0" x2="0" y2="200" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#fff" stop-opacity=".55"></stop><stop offset=".5" stop-color="#fff" stop-opacity=".08"></stop><stop offset="1" stop-color="#fff" stop-opacity=".55"></stop></linearGradient>
+<mask id="wvM"><rect width="850" height="200" fill="url(#wvV)"></rect></mask>
+</defs>
+<path d="M0 100H850" stroke="#22272D"></path>
+<path d="{{waveEnv}}" fill="url(#wvH)" opacity=".16"></path>
+<path d="{{waveFill}}" fill="url(#wvH)" mask="url(#wvM)"></path>
+<path d="{{waveLine}}" fill="none" stroke="url(#wvH)" stroke-width="1.6" stroke-linejoin="round"></path>
+</svg>
+<div style="position:absolute;left:0;top:0;bottom:0;width:2px;background:#F5B544"></div>
+<span style="position:absolute;left:5px;top:5px;font-size:9.5px;font-weight:600;color:#1B1405;background:#F5B544;padding:1px 5px;border-radius:3px">START</span>
+<div style="position:absolute;left:85.6%;top:0;bottom:0;width:2px;background:#F5B544"></div>
+<span style="position:absolute;right:15%;top:5px;font-size:9.5px;font-weight:600;color:#1B1405;background:#F5B544;padding:1px 5px;border-radius:3px">END</span>
+<div style="position:absolute;right:8px;bottom:6px;display:flex;align-items:center;gap:10px;font-family:'IBM Plex Mono',monospace;font-size:10px;color:#A7AFB8">
+<span>0.45 s · 44.1 kHz · 16-bit</span>
+<button aria-label="Open in Sample Editor" title="Open in Sample Editor" style="width:24px;height:22px;border:0;border-radius:5px;background:#252A30;display:flex;align-items:center;justify-content:center"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="#E9ECEF" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M9 2h5v5M14 2L8.5 7.5M12 10v4H2V4h4"></path></svg></button>
+</div>
+</div>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":840,"height":720}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const ic = { wave: 'M1 8h2l1.5-4 2 8 2-10 2 9 1.5-3H15' };
+    const knob = (v, bipolar, color) => {
+      const rad = (d) => d * Math.PI / 180, r = 13, c = 17;
+      const pt = (a, rr) => (c + rr * Math.sin(a)).toFixed(2) + ' ' + (c - rr * Math.cos(a)).toFixed(2);
+      const a0 = bipolar ? 0 : rad(-135), a1 = bipolar ? rad(v * 135) : rad(-135 + v * 270);
+      const sweep = a1 >= a0 ? 1 : 0, large = Math.abs(a1 - a0) > Math.PI ? 1 : 0;
+      return { color: color || '#F5B544', ring: '#39404A', arc: Math.abs(a1 - a0) < 0.01 ? '' : 'M' + pt(a0, r) + ' A' + r + ' ' + r + ' 0 ' + large + ' ' + sweep + ' ' + pt(a1, r), tick: 'M' + pt(a1, 4) + ' L' + pt(a1, 10) };
+    };
+    const tb = (on) => 'width:62px;height:50px;border:0;border-radius:8px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;' + (on ? 'background:#1F2A36;box-shadow:inset 0 -2px 0 #F5B544' : 'background:transparent');
+    const tabs = [
+      ['Channel','M8 5.5a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5zM8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4',false],
+      ['Sample',ic.wave,true],
+      ['Instrument','M2 2h12v12H2zM5.5 2v7M8 2v7M10.5 2v7M5.5 9v5M10.5 9v5',false],
+      ['Envelope','M1.5 13.5L4 3l3 5h4l3.5 5.5',false],
+    ].map(([name,path,on]) => ({ name, path, style: tb(on), color: on ? '#F5B544' : '#7E8792' }));
+    const strip = [
+      { label: 'PAN', value: 'C', ...knob(0, true, '#E9ECEF') },
+      { label: 'VOL', value: '−1.9 dB', ...knob(0.72, false, '#F5B544') },
+      { label: 'PITCH', value: '0 st', ...knob(0, true, '#E9ECEF') },
+    ];
+    const fileBtns = [
+      ['Load sample…','M2 4h4l1.5 1.5H14V13H2z'],
+      ['Show in Browser','M7 2.5a4.5 4.5 0 1 1 0 9 4.5 4.5 0 1 1 0-9zM10.5 10.5L14 14'],
+      ['Clear sample','M4 4l8 8M12 4l-8 8'],
+    ].map(([name, path]) => ({ name, path }));
+    const base = 'display:flex;align-items:center;gap:8px;height:24px;font-size:11.5px;';
+    const dot = (on) => 'width:12px;height:12px;border-radius:50%;flex:none;' + (on ? 'background:#5AA9FF;box-shadow:0 0 0 2px #1F3550' : 'background:#0F1215;border:1px solid #39404A;box-sizing:border-box');
+    const led = { off: base + 'color:#C9CFD6', offDot: dot(false), dis: base + 'color:#5A626C', disDot: dot(false) + ';opacity:.5' };
+    const gain = knob(0, true, '#F5B544');
+    const stretch = [
+      { label: 'PITCH', value: '0 ct', ...knob(0, true, '#E9ECEF') },
+      { label: 'MUL', value: '×1.00', ...knob(0.5, false, '#E9ECEF') },
+      { label: 'TIME', value: 'auto', ...knob(0, false, '#E9ECEF') },
+    ];
+    const fx = [['Remove DC offset',false],['Reverse polarity',false],['Normalize',true],['Fade stereo',false],['Reverse',false],['Swap stereo',false]]
+      .map(([name, on]) => ({ name, style: base + (on ? 'color:#E9ECEF' : 'color:#C9CFD6'), dot: dot(on) }));
+    const region = [
+      { label: 'SMP START', value: '0%', ...knob(0, false, '#F5B544') },
+      { label: 'LENGTH', value: '86%', ...knob(0.86, false, '#F5B544'), ring: '#F5B544' },
+      { label: 'IN', value: '0%', ...knob(0, false, '#E9ECEF') },
+      { label: 'OUT', value: '6%', ...knob(0.12, false, '#E9ECEF') },
+      { label: 'CROSSFADE', value: '0%', ...knob(0, false, '#E9ECEF') },
+      { label: 'TRIM', value: 'off', ...knob(0, false, '#5A626C') },
+    ];
+    // Kick: pitch-swept sine, fast attack, exponential decay.
+    const W = 850, C = 100, A = 90, dur = 0.45, steps = 850;
+    let phase = 0, prevT = 0;
+    const line = [], envTop = [], envBot = [];
+    for (let i = 0; i <= steps; i++) {
+      const x = i * W / steps, t = i / steps * dur;
+      const f = 48 + 170 * Math.exp(-t * 28);
+      phase += 2 * Math.PI * f * (t - prevT); prevT = t;
+      const env = (1 - Math.exp(-t * 900)) * Math.exp(-t * 6.2);
+      const click = t < 0.004 ? 0.25 * Math.sin(t * 9000) : 0;
+      const s = env * Math.sin(phase) + click;
+      line.push(x.toFixed(1) + ' ' + (C - s * A).toFixed(1));
+      envTop.push(x.toFixed(1) + ' ' + (C - env * A).toFixed(1));
+      envBot.unshift(x.toFixed(1) + ' ' + (C + env * A).toFixed(1));
+    }
+    const waveLine = 'M' + line.join(' L');
+    const waveFill = 'M0 ' + C + ' L' + line.join(' L') + ' L' + W + ' ' + C + ' Z';
+    const waveEnv = 'M' + envTop.join(' L') + ' L' + envBot.join(' L') + ' Z';
+    return { ic, tabs, strip, fileBtns, led, gain, stretch, fx, region, waveLine, waveFill, waveEnv };
+  }
+}
+</script>
+</body>
+</html>

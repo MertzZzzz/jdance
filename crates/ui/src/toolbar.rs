@@ -78,11 +78,12 @@ pub(crate) fn snap_name(ticks: u32, sig: TimeSignature) -> &'static str {
 /// a new signature when one is chosen.
 pub(crate) fn signature_field(ui: &mut egui::Ui, sig: TimeSignature) -> Option<TimeSignature> {
     let mut chosen = None;
+    // Inside the position display (UI-RD-011): no frame, mono 18.
     let button = ui
         .add(
-            egui::Button::new(egui::RichText::new(sig.to_string()).font(theme::mono(14.0)))
-                .fill(theme::FIELD)
-                .min_size(egui::vec2(44.0, 24.0)),
+            egui::Button::new(egui::RichText::new(sig.to_string()).font(theme::mono(18.0)))
+                .frame(false)
+                .min_size(egui::vec2(40.0, 22.0)),
         )
         .on_hover_text("Time signature of the project");
     egui::Popup::from_toggle_button_response(&button)
@@ -178,33 +179,75 @@ impl TapTempo {
             .collapsible(false)
             .show(ctx, |ui| {
                 ui.vertical_centered(|ui| {
-                    let tap = ui.add_sized(
-                        [180.0, 100.0],
-                        egui::Button::new(egui::RichText::new("Tap").size(20.0)),
+                    // UI-RD §7 (R5 · Small): a big tap pad, the tempo in
+                    // amber, Reset outlined and Apply amber.
+                    let (r, tap) =
+                        ui.allocate_exact_size(egui::vec2(220.0, 110.0), egui::Sense::click());
+                    let hot = tap.hovered() || tap.is_pointer_button_down_on();
+                    ui.painter().rect(
+                        r,
+                        10.0,
+                        if hot { theme::RAISED } else { theme::CARD },
+                        egui::Stroke::new(
+                            1.0,
+                            if hot {
+                                theme::AMBER
+                            } else {
+                                theme::LINE_STRONG
+                            },
+                        ),
+                        egui::StrokeKind::Inside,
                     );
-                    // The button takes keyboard focus so Enter taps (Space
+                    crate::icons::paint(
+                        ui,
+                        crate::icons::Glyph::Tap,
+                        egui::Rect::from_center_size(
+                            r.center() - egui::vec2(0.0, 14.0),
+                            egui::vec2(28.0, 28.0),
+                        ),
+                        theme::AMBER,
+                    );
+                    ui.painter().text(
+                        r.center() + egui::vec2(0.0, 22.0),
+                        egui::Align2::CENTER_CENTER,
+                        "TAP · Enter",
+                        egui::FontId::proportional(11.0),
+                        theme::MUTED,
+                    );
+                    tap.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Tap"));
+                    // The pad takes keyboard focus so Enter taps (Space
                     // is the transport everywhere, KEY-002).
                     if tap.clicked() {
+                        tap.request_focus();
+                        self.tap(now);
+                    }
+                    if tap.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                         self.tap(now);
                     }
                     let text = self
                         .bpm()
-                        .map_or_else(|| "— BPM".to_owned(), |b| format!("{b:.1} BPM"));
-                    ui.label(egui::RichText::new(text).font(theme::mono(28.0)));
+                        .map_or_else(|| "—".to_owned(), |b| format!("{b:.1}"));
+                    ui.label(
+                        egui::RichText::new(text)
+                            .font(theme::mono(30.0))
+                            .color(theme::AMBER),
+                    );
+                    ui.label(crate::widgets::caption_text("BPM"));
                     ui.weak(format!(
                         "from the last {} taps · resets after {TAP_RESET_SECONDS:.0} s idle",
                         self.count()
                     ));
+                    ui.add_space(4.0);
                     ui.horizontal(|ui| {
-                        if ui.button("Reset").clicked() {
+                        if crate::widgets::outline_button(ui, "Reset").clicked() {
                             self.reset();
                         }
-                        if ui
-                            .add_enabled(
-                                self.bpm().is_some(),
-                                egui::Button::new("Apply to project"),
-                            )
-                            .clicked()
+                        if crate::widgets::primary_button(
+                            ui,
+                            "Apply to project",
+                            self.bpm().is_some(),
+                        )
+                        .clicked()
                         {
                             apply = self.bpm();
                         }

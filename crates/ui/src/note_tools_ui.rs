@@ -182,7 +182,7 @@ impl ToolDialog {
                             out.close = true;
                         }
                     }
-                    if ui.button("Cancel").clicked() {
+                    if crate::widgets::outline_button(ui, "Cancel").clicked() {
                         out.close = true;
                     }
                     if ui
@@ -839,6 +839,83 @@ pub(crate) fn menu_tools(grid: u32) -> Vec<Option<Tool>> {
         Some(Tool::Randomize(nt::Randomize::default())),
         Some(Tool::ScaleLevels(nt::ScaleLevels::default())),
     ]
+}
+
+/// The glyph of a tool in the Tools menu (UI-RD §5).
+pub(crate) fn glyph(tool: &Tool) -> crate::icons::Glyph {
+    use crate::icons::Glyph as G;
+    match tool {
+        Tool::QuickLegato | Tool::Articulate(_) | Tool::Glue(_) => G::Slide,
+        Tool::QuickQuantize | Tool::QuickQuantizeStarts | Tool::Quantize(_) => G::Quantize,
+        Tool::QuickChop | Tool::Chop(_) => G::Slice,
+        Tool::Flip(_) => G::Transpose,
+        Tool::Strum(_) | Tool::Flam(_) => G::Notes,
+        Tool::Limit(_) | Tool::ScaleLevels(_) => G::Scale,
+        Tool::Arpeggiate(_) | Tool::ClawMachine(_) => G::Pattern,
+        Tool::ChordProgression(_) => G::Stamp,
+        Tool::Randomize(_) => G::Speed,
+        Tool::RiffMachine(_) => G::Sample,
+    }
+}
+
+/// Keys of the Tools (UI-RD §10.6): (Ctrl, Shift, Alt, key).
+pub(crate) fn keys(tool: &Tool) -> Option<(bool, bool, bool, egui::Key)> {
+    use egui::Key as K;
+    Some(match tool {
+        Tool::QuickQuantize => (true, false, false, K::Q),
+        Tool::QuickQuantizeStarts => (true, true, false, K::Q),
+        Tool::Quantize(_) => (false, false, true, K::Q),
+        Tool::QuickLegato => (true, true, false, K::L),
+        Tool::QuickChop => (true, false, false, K::U),
+        Tool::RiffMachine(_) => (false, false, true, K::R),
+        Tool::ChordProgression(_) => (false, false, true, K::H),
+        Tool::Articulate(_) => (false, false, true, K::L),
+        Tool::Chop(_) => (false, false, true, K::U),
+        Tool::Glue(_) => (false, false, true, K::G),
+        Tool::Arpeggiate(_) => (false, false, true, K::A),
+        Tool::Strum(_) => (false, false, true, K::S),
+        Tool::Flam(_) => (false, false, true, K::F),
+        Tool::ClawMachine(_) => (false, false, true, K::W),
+        Tool::Limit(_) => (false, false, true, K::M),
+        Tool::Flip(_) => (false, false, true, K::I),
+        Tool::Randomize(_) => (false, false, true, K::N),
+        Tool::ScaleLevels(_) => (false, false, true, K::V),
+    })
+}
+
+/// "Ctrl+Shift+Q" and the like.
+pub(crate) fn key_text((ctrl, shift, alt, key): (bool, bool, bool, egui::Key)) -> String {
+    let mut s = String::new();
+    if ctrl {
+        s.push_str("Ctrl+");
+    }
+    if shift {
+        s.push_str("Shift+");
+    }
+    if alt {
+        s.push_str("Alt+");
+    }
+    s.push_str(key.name());
+    s
+}
+
+/// Whether the keys were pressed this frame (and takes them).
+pub(crate) fn take_keys(
+    ctx: &egui::Context,
+    (ctrl, shift, alt, key): (bool, bool, bool, egui::Key),
+) -> bool {
+    let m = egui::Modifiers {
+        alt,
+        ctrl: false,
+        shift,
+        mac_cmd: false,
+        command: ctrl,
+    };
+    ctx.input_mut(|i| {
+        let mods = i.modifiers;
+        let exact = mods.alt == m.alt && mods.shift == m.shift && mods.command == m.command;
+        exact && i.consume_key(m, key)
+    })
 }
 
 /// Quick tools apply at once (a dialog opens only to confirm dropped

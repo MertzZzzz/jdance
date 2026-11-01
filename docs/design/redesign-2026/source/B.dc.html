@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>B · Console Cards</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#0A0C0F}
+a{color:#7FB8FF}a:hover{color:#A9CEFF}
+button{font-family:inherit;cursor:pointer}
+</style>
+</helmet>
+<div style="width:1440px;height:900px;box-sizing:border-box;background:#0A0C0F;color:#E9ECEF;font-family:'IBM Plex Sans',sans-serif;font-size:12.5px;display:flex;overflow:hidden">
+
+<!-- Left rail -->
+<div style="width:56px;flex:none;display:flex;flex-direction:column;align-items:center;gap:6px;padding:10px 0;background:#0E1013;border-right:1px solid #1E2329">
+<div style="width:30px;height:30px;border-radius:8px;background:#F5B544;display:flex;align-items:center;justify-content:center;margin-bottom:10px">
+<svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M3 11V3l8 4z" fill="#1B1405"></path></svg>
+</div>
+<sc-for list="{{rail}}" as="r" hint-placeholder-count="5">
+<button aria-label="{{r.name}}" title="{{r.name}} ({{r.key}})" style="{{r.style}}">
+<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="{{r.color}}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{r.path}}"></path></svg>
+<span style="font-size:9px;color:{{r.color}}">{{r.short}}</span>
+</button>
+</sc-for>
+<div style="flex:1"></div>
+<button aria-label="Settings" style="width:40px;height:40px;border:0;border-radius:8px;background:transparent;display:flex;align-items:center;justify-content:center">
+<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="#A7AFB8" stroke-width="1.5" aria-hidden="true"><circle cx="9" cy="9" r="2.5"></circle><path d="M9 1.5v2.5M9 14v2.5M1.5 9H4M14 9h2.5M3.7 3.7l1.8 1.8M12.5 12.5l1.8 1.8M3.7 14.3l1.8-1.8M12.5 5.5l1.8-1.8"></path></svg>
+</button>
+</div>
+
+<div style="flex:1;min-width:0;display:flex;flex-direction:column">
+<!-- Top bar -->
+<div style="height:52px;flex:none;display:flex;align-items:center;gap:12px;padding:0 12px">
+<div style="display:flex;gap:2px">
+<button style="background:none;border:0;color:#A7AFB8;padding:6px 8px;border-radius:5px;font-size:12.5px">File</button>
+<button style="background:none;border:0;color:#A7AFB8;padding:6px 8px;border-radius:5px;font-size:12.5px">Edit</button>
+<button style="background:none;border:0;color:#A7AFB8;padding:6px 8px;border-radius:5px;font-size:12.5px">View</button>
+<button style="background:none;border:0;color:#A7AFB8;padding:6px 8px;border-radius:5px;font-size:12.5px">Options</button>
+</div>
+<span style="color:#E9ECEF;font-weight:500">demo.jdance</span>
+<span style="width:6px;height:6px;border-radius:50%;background:#FFC27A"></span>
+<div style="flex:1"></div>
+<!-- centered transport + LCD -->
+<div style="display:flex;align-items:center;gap:8px;height:40px;padding:0 6px;background:#13161A;border:1px solid #232830;border-radius:12px">
+<button aria-label="Play" style="width:34px;height:30px;border:0;border-radius:8px;background:#F5B544;display:flex;align-items:center;justify-content:center"><svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 1v10L11 6z" fill="#1B1405"></path></svg></button>
+<button aria-label="Stop" style="width:34px;height:30px;border:0;border-radius:8px;background:#20252B;display:flex;align-items:center;justify-content:center"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><rect width="10" height="10" rx="1.5" fill="#E9ECEF"></rect></svg></button>
+<button aria-label="Record" style="width:34px;height:30px;border:0;border-radius:8px;background:#20252B;display:flex;align-items:center;justify-content:center"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><circle cx="5" cy="5" r="4.5" fill="#FF8A7A"></circle></svg></button>
+<div style="width:1px;height:22px;background:#2A3037"></div>
+<div style="display:flex;background:#0A0C0F;border-radius:8px;padding:2px">
+<button style="height:26px;padding:0 10px;border:0;border-radius:6px;background:#2A3037;color:#E9ECEF;font-size:11.5px">PAT</button>
+<button style="height:26px;padding:0 10px;border:0;border-radius:6px;background:transparent;color:#7E8792;font-size:11.5px">SONG</button>
+</div>
+<span style="font-family:'IBM Plex Mono',monospace;font-size:20px;color:#F5B544;padding:0 8px;min-width:120px;text-align:center">003:2:048</span>
+<div style="width:1px;height:22px;background:#2A3037"></div>
+<span style="font-family:'IBM Plex Mono',monospace;font-size:15px;padding:0 4px">124.000</span>
+<span style="font-size:10px;color:#7E8792;letter-spacing:1px">BPM</span>
+<button style="height:26px;padding:0 8px;border:0;border-radius:6px;background:#20252B;color:#A7AFB8;font-size:11px">TAP</button>
+<span style="font-family:'IBM Plex Mono',monospace;font-size:14px;color:#A7AFB8;padding:0 6px">4/4</span>
+<button aria-label="Metronome" style="width:30px;height:30px;border:0;border-radius:8px;background:#1F3550;display:flex;align-items:center;justify-content:center"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="#5AA9FF" stroke-width="1.5" aria-hidden="true"><path d="M5 14h6l-2-12H7z"></path><path d="M8 10l4-6"></path></svg></button>
+</div>
+<div style="flex:1"></div>
+<!-- output meter + dsp -->
+<div style="display:flex;align-items:center;gap:10px">
+<div style="display:flex;flex-direction:column;gap:2px;width:90px">
+<div style="height:4px;border-radius:2px;background:#20252B"><div style="width:62%;height:4px;border-radius:2px;background:linear-gradient(90deg,#8FD19E 70%,#FFC27A)"></div></div>
+<div style="height:4px;border-radius:2px;background:#20252B"><div style="width:58%;height:4px;border-radius:2px;background:linear-gradient(90deg,#8FD19E 70%,#FFC27A)"></div></div>
+</div>
+<span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:#A7AFB8">DSP 18%</span>
+<button style="height:28px;padding:0 10px;border:1px solid #2A3037;border-radius:8px;background:transparent;color:#A7AFB8;font-size:11.5px">Panic</button>
+</div>
+</div>
+
+<!-- Cards -->
+<div style="flex:1;min-height:0;display:flex;gap:8px;padding:0 8px 8px">
+<!-- Browser card -->
+<div style="width:228px;flex:none;background:#13161A;border:1px solid #1E2329;border-radius:10px;display:flex;flex-direction:column;overflow:hidden">
+<div style="height:36px;display:flex;align-items:center;padding:0 12px;gap:8px;border-bottom:1px solid #1E2329">
+<span style="font-weight:600;font-size:12.5px">Browser</span>
+<div style="flex:1"></div>
+<span style="font-size:10.5px;color:#7E8792">Project · Library</span>
+</div>
+<div style="padding:8px;display:flex;flex-direction:column;gap:2px">
+<label style="display:flex;align-items:center;gap:6px;height:28px;padding:0 8px;background:#0A0C0F;border-radius:7px;margin-bottom:6px">
+<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="#7E8792" stroke-width="1.4" aria-hidden="true"><circle cx="5" cy="5" r="3.5"></circle><path d="M8 8l3 3"></path></svg>
+<input aria-label="Search" placeholder="Search" style="background:transparent;border:0;outline:0;color:#E9ECEF;font-family:inherit;font-size:12px;width:100%">
+</label>
+<sc-for list="{{tree}}" as="t" hint-placeholder-count="10">
+<div style="{{t.style}}"><span style="color:#7E8792;width:10px">{{t.arrow}}</span><span style="flex:1">{{t.name}}</span><span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:#7E8792">{{t.count}}</span></div>
+</sc-for>
+</div>
+</div>
+
+<!-- Right column -->
+<div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:8px">
+<div style="flex:1;min-height:0;display:flex;gap:8px">
+<!-- Rack card -->
+<div style="width:560px;flex:none;background:#13161A;border:1px solid #1E2329;border-radius:10px;display:flex;flex-direction:column;overflow:hidden">
+<div style="height:36px;flex:none;display:flex;align-items:center;gap:8px;padding:0 12px;border-bottom:1px solid #1E2329">
+<span style="font-weight:600;font-size:12.5px">Channel Rack</span>
+<button style="height:24px;padding:0 8px;border:0;border-radius:6px;background:#20252B;color:#E9ECEF;font-size:11.5px;display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:2px;background:#C9774F"></span>Beat ▾</button>
+<span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:#7E8792">16 st · 1 bar</span>
+<div style="flex:1"></div>
+<button aria-label="Add channel" style="height:24px;padding:0 8px;border:0;border-radius:6px;background:#20252B;color:#E9ECEF;font-size:11.5px">+ Channel</button>
+</div>
+<div style="padding:8px 10px;display:flex;flex-direction:column;gap:4px">
+<sc-for list="{{channels}}" as="c" hint-placeholder-count="5">
+<div style="{{c.row}}">
+<span style="{{c.led}}"></span>
+<span style="{{c.chip}}">{{c.name}}</span>
+<span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:#7E8792;width:20px">{{c.track}}</span>
+<div style="display:flex;gap:2px">
+<sc-for list="{{c.steps}}" as="s" hint-placeholder-count="16">
+<span style="{{s.style}}"></span>
+</sc-for>
+</div>
+</div>
+</sc-for>
+</div>
+<div style="margin-top:auto;padding:6px 12px;border-top:1px solid #1E2329;font-size:10.5px;color:#7E8792">Hover a row for pan · volume · mixer track; click name to open the channel</div>
+</div>
+
+<!-- Playlist card -->
+<div style="flex:1;min-width:0;background:#13161A;border:1px solid #1E2329;border-radius:10px;display:flex;flex-direction:column;overflow:hidden">
+<div style="height:36px;flex:none;display:flex;align-items:center;gap:8px;padding:0 12px;border-bottom:1px solid #1E2329">
+<span style="font-weight:600;font-size:12.5px">Playlist</span>
+<span style="color:#7E8792">Arrangement</span>
+<div style="flex:1"></div>
+<div style="display:flex;gap:2px;background:#0A0C0F;border-radius:7px;padding:2px">
+<sc-for list="{{tools}}" as="t" hint-placeholder-count="5">
+<button aria-label="{{t.name}}" style="{{t.style}}"><svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="{{t.color}}" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="{{t.path}}"></path></svg></button>
+</sc-for>
+</div>
+<span style="height:24px;padding:0 8px;display:flex;align-items:center;background:#20252B;border-radius:6px;font-size:11px">Snap · Step</span>
+</div>
+<div style="flex:1;min-height:0;display:flex">
+<div style="width:118px;flex:none;border-right:1px solid #1E2329">
+<div style="height:24px;border-bottom:1px solid #1E2329"></div>
+<sc-for list="{{tracks}}" as="t" hint-placeholder-count="5">
+<div style="height:40px;display:flex;align-items:center;gap:7px;padding:0 8px 0 0;border-bottom:1px solid #1A1E23"><span style="{{t.stripe}}"></span><span style="flex:1;font-size:11.5px">{{t.name}}</span><span style="{{t.led}}"></span></div>
+</sc-for>
+</div>
+<div style="flex:1;min-width:0;position:relative;overflow:hidden;background-image:repeating-linear-gradient(90deg,#2A3037 0 1px,transparent 1px 48px),repeating-linear-gradient(90deg,#181C21 0 1px,transparent 1px 12px)">
+<div style="height:24px;background:#13161A;border-bottom:1px solid #1E2329;position:relative">
+<sc-for list="{{bars}}" as="b" hint-placeholder-count="12"><span style="{{b.style}}">{{b.n}}</span></sc-for>
+</div>
+<sc-for list="{{clips}}" as="k" hint-placeholder-count="8">
+<div style="{{k.style}}"><span style="font-size:10px;font-weight:600;color:#0E1013;padding:1px 5px;white-space:nowrap">{{k.name}}</span></div>
+</sc-for>
+<div style="position:absolute;top:0;bottom:0;left:250px;width:2px;background:#F2F4F6"></div>
+</div>
+</div>
+</div>
+</div>
+
+<!-- Mixer card -->
+<div style="height:290px;flex:none;background:#13161A;border:1px solid #1E2329;border-radius:10px;display:flex;flex-direction:column;overflow:hidden">
+<div style="height:36px;flex:none;display:flex;align-items:center;gap:8px;padding:0 12px;border-bottom:1px solid #1E2329">
+<span style="font-weight:600;font-size:12.5px">Mixer</span>
+<div style="display:flex;background:#0A0C0F;border-radius:7px;padding:2px">
+<button style="height:22px;padding:0 8px;border:0;border-radius:5px;background:#2A3037;color:#E9ECEF;font-size:11px">Compact</button>
+<button style="height:22px;padding:0 8px;border:0;border-radius:5px;background:transparent;color:#7E8792;font-size:11px">Wide</button>
+<button style="height:22px;padding:0 8px;border:0;border-radius:5px;background:transparent;color:#7E8792;font-size:11px">Wide + FX</button>
+</div>
+<div style="flex:1"></div>
+<span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:#7E8792">PDC 0 smp</span>
+<button style="height:24px;padding:0 8px;border:0;border-radius:6px;background:#20252B;color:#E9ECEF;font-size:11.5px">+ Track</button>
+</div>
+<div style="flex:1;min-height:0;display:flex">
+<div style="flex:1;display:flex;gap:4px;padding:8px 10px;overflow:hidden">
+<sc-for list="{{strips}}" as="s" hint-placeholder-count="8">
+<div style="{{s.style}}">
+<div style="{{s.cap}}"></div>
+<div style="display:flex;justify-content:space-between;width:100%;padding:4px 6px 0;box-sizing:border-box"><span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:#A7AFB8">{{s.n}}</span><span style="{{s.led}}"></span></div>
+<span style="font-size:11px;font-weight:500;padding:2px 0 6px">{{s.name}}</span>
+<svg width="26" height="26" viewBox="0 0 26 26" aria-hidden="true"><circle cx="13" cy="13" r="10" fill="#0A0C0F" stroke="#39404A"></circle><path d="M13 3v4" stroke="#E9ECEF" stroke-width="2" stroke-linecap="round"></path></svg>
+<div style="flex:1;display:flex;gap:6px;align-items:stretch;padding:8px 0 4px">
+<div style="width:4px;border-radius:2px;background:#0A0C0F;position:relative"><div style="{{s.fader}}"></div></div>
+<div style="display:flex;gap:1px"><div style="width:4px;background:#0A0C0F;position:relative;border-radius:1px"><div style="{{s.meterL}}"></div></div><div style="width:4px;background:#0A0C0F;position:relative;border-radius:1px"><div style="{{s.meterR}}"></div></div></div>
+</div>
+<span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:#A7AFB8;padding-bottom:6px">{{s.db}}</span>
+</div>
+</sc-for>
+</div>
+<!-- inspector -->
+<div style="width:250px;flex:none;border-left:1px solid #1E2329;padding:10px 12px;display:flex;flex-direction:column;gap:6px">
+<div style="display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:2px;background:#C9774F"></span><span style="font-weight:600">1 · Kick</span><span style="color:#7E8792;font-size:11px;margin-left:auto">3 / 8 FX</span></div>
+<sc-for list="{{fx}}" as="f" hint-placeholder-count="4">
+<div style="display:flex;align-items:center;gap:8px;height:28px;padding:0 8px;border-radius:6px;background:#1A1E23"><span style="{{f.led}}"></span><span style="flex:1;font-size:12px">{{f.name}}</span><span style="font-size:10px;color:#7E8792">{{f.kind}}</span></div>
+</sc-for>
+<button style="height:28px;border:1px dashed #39404A;border-radius:6px;background:transparent;color:#A7AFB8;font-size:11.5px">+ Effect</button>
+<div style="margin-top:auto;display:flex;gap:6px;font-size:10.5px;color:#7E8792">Sends<span style="color:#E9ECEF;margin-left:auto">→ 3 Reverb · post · −12 dB</span></div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const pal = ['#C9774F','#4F8FC9','#5FA86B','#B565A7','#C9A94F','#4FB3AE','#C96F6F','#8F8FD6'];
+    const railBtn = (on) => 'width:42px;height:44px;border:0;border-radius:9px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;' + (on ? 'background:#1F3550' : 'background:transparent');
+    const rail = [
+      ['Browser','F8','Brw','M2 4h5l1.5 1.5H16v9H2z',true],
+      ['Channel Rack','F6','Rack','M2 3h14v3H2zM2 7.5h14v3H2zM2 12h14v3H2z',true],
+      ['Piano Roll','F7','Piano','M2 2h14v14H2zM6 2v9M10 2v9M14 2v9M6 11v5M10 11v5',false],
+      ['Playlist','F5','List','M2 4h7M11 4h5M2 9h4M8 9h8M2 14h9M13 14h3',true],
+      ['Mixer','F9','Mix','M4 2v14M9 2v14M14 2v14M2 11h4M7 6h4M12 9h4',true],
+    ].map(([name,key,short,path,on]) => ({ name, key, short, path, color: on ? '#E9ECEF' : '#7E8792', style: railBtn(on) }));
+    const tr = (name, depth, arrow, count, sel) => ({ name, arrow, count, style: 'display:flex;align-items:center;gap:6px;height:26px;padding:0 6px 0 ' + (6 + depth * 14) + 'px;border-radius:6px;font-size:12px;' + (sel ? 'background:#1F3550' : 'color:#C9CFD6') });
+    const tree = [
+      tr('Patterns',0,'▾','2'), tr('Beat',1,'','',true), tr('Break',1,'',''),
+      tr('Instruments',0,'▸','3'), tr('Audio assets',0,'▸','3'), tr('Effects',0,'▸','4'),
+      tr('History',0,'▸','0'), tr('Plugins',0,'▸','0'), tr('Project folder',0,'▸',''),
+    ];
+    const pats = { Kick:[0,4,8,12], Snare:[4,12], Hat:[2,6,10,14], Clap:[12,15], Bass:[0,3,6,10,11,14] };
+    const defs = [['Kick','01',0,false,false],['Snare','02',1,false,true],['Hat','02',2,false,false],['Clap','03',3,true,false],['Bass','04',4,false,false]];
+    const channels = defs.map(([name, track, ci, muted, sel]) => ({
+      name, track,
+      row: 'display:flex;align-items:center;gap:8px;height:30px;padding:0 6px;border-radius:7px;' + (sel ? 'background:#1A2635' : ''),
+      led: 'width:8px;height:8px;border-radius:50%;flex:none;' + (muted ? 'background:#3A4047' : 'background:#5FA86B'),
+      chip: 'width:92px;height:24px;display:flex;align-items:center;padding-left:8px;border-radius:6px;font-size:12px;background:#20252B;box-shadow:inset 3px 0 0 ' + pal[ci] + (muted ? ';color:#7E8792' : ''),
+      steps: Array.from({ length: 16 }, (_, i) => {
+        const on = pats[name].includes(i);
+        const g = Math.floor(i / 4) % 2;
+        return { style: 'width:22px;height:24px;border-radius:4px;' + (on ? 'background:#F5B544' : (g ? 'background:#262B32' : 'background:#1E2228')) + (muted ? ';opacity:.4' : '') + (i % 4 === 3 && i < 15 ? ';margin-right:4px' : '') + (i === 6 ? ';box-shadow:inset 0 0 0 1px #E9ECEF' : '') };
+      }),
+    }));
+    const tb = (on) => 'width:24px;height:22px;border:0;border-radius:5px;display:flex;align-items:center;justify-content:center;' + (on ? 'background:#1F3550' : 'background:transparent');
+    const tools = [['Draw','M2 12l1-3 6-6 2 2-6 6z',true],['Paint','M2 3h8v3H2zM6 6v2M5 8h2v4H5z',false],['Delete','M3 10l5-7 3 3-5 6H4z',false],['Slice','M4 2l6 10M10 2L4 12',false],['Select','M2 2h10v10H2z',false]].map(([name,path,on]) => ({ name, path, color: on ? '#5AA9FF' : '#A7AFB8', style: tb(on) }));
+    const tracks = ['Drums','Fill','Bass','Break','Track 5'].map((name, i) => ({ name, stripe: 'width:3px;height:40px;background:' + (i < 4 ? pal[[0,4,1,5][i]] : '#39404A'), led: 'width:7px;height:7px;border-radius:50%;' + (i === 3 ? 'background:#3A4047' : 'background:#5FA86B') }));
+    const bars = Array.from({ length: 12 }, (_, i) => ({ n: String(i + 1), style: 'position:absolute;top:5px;left:' + (i * 48 + 4) + 'px;font-family:IBM Plex Mono,monospace;font-size:10px;color:#7E8792' }));
+    const clip = (t, b, len, ci, name, muted) => ({ name, style: 'position:absolute;top:' + (24 + t * 40 + 3) + 'px;left:' + (b * 48 + 1) + 'px;width:' + (len * 48 - 2) + 'px;height:34px;border-radius:5px;background:' + pal[ci] + ';' + (muted ? 'opacity:.35' : 'opacity:.88') });
+    const clips = [clip(0,0,4,0,'Beat'),clip(0,4,4,0,'Beat'),clip(0,8,4,0,'Beat'),clip(1,3,1,4,'Fill'),clip(1,7,1,4,'Fill'),clip(2,4,8,1,'Bass line'),clip(3,8,4,5,'Break',true)];
+    const strip = (n, name, ci, lvl, db, sel, muted) => ({
+      n, name, db,
+      style: 'width:76px;flex:none;display:flex;flex-direction:column;align-items:center;border-radius:8px;overflow:hidden;background:' + (sel ? '#1A2635' : '#181B20') + ';' + (sel ? 'box-shadow:inset 0 0 0 1px #5AA9FF' : ''),
+      cap: 'height:3px;width:100%;background:' + (ci < 0 ? '#E9ECEF' : pal[ci]),
+      led: 'width:7px;height:7px;border-radius:50%;margin-top:3px;' + (muted ? 'background:#3A4047' : 'background:#5FA86B'),
+      fader: 'position:absolute;left:-7px;width:18px;height:10px;border-radius:3px;background:#39404A;box-shadow:inset 0 -1px 0 ' + (sel ? '#5AA9FF' : '#E9ECEF') + ';bottom:' + (30 + lvl * 0.4) + '%',
+      meterL: 'position:absolute;left:0;right:0;bottom:0;height:' + lvl + '%;background:linear-gradient(to top,#8FD19E 70%,#FFC27A)',
+      meterR: 'position:absolute;left:0;right:0;bottom:0;height:' + Math.max(0, lvl - 6) + '%;background:linear-gradient(to top,#8FD19E 70%,#FFC27A)',
+    });
+    const strips = [strip('M','Master',-1,64,'−0.3'),strip('1','Kick',0,58,'0.0',true),strip('2','Perc',2,40,'−3.5'),strip('3','Reverb',3,22,'−6.0'),strip('4','Bass',1,48,'−1.2'),strip('5','Insert 5',7,0,'0.0',false,true),strip('6','Insert 6',5,0,'0.0'),strip('7','Insert 7',6,0,'0.0')];
+    const fx = [['Parametric EQ','built-in',true],['Compressor','sc ← 4',true],['Tempo Delay','built-in',false]].map(([name,kind,on]) => ({ name, kind, led: 'width:7px;height:7px;border-radius:50%;' + (on ? 'background:#5FA86B' : 'background:#3A4047') }));
+    return { rail, tree, channels, tools, tracks, bars, clips, strips, fx };
+  }
+}
+</script>
+</body>
+</html>

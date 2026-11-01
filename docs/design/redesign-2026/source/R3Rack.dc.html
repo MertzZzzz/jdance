@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>R3 · Channel Rack</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#2B3038}
+button{font-family:inherit;cursor:pointer}
+</style>
+</helmet>
+<div style="width:1200px;height:620px;box-sizing:border-box;background:#2B3038;padding:20px;font-family:'IBM Plex Sans',sans-serif;font-size:12px;color:#E9ECEF;position:relative">
+<div style="width:1160px;height:580px;display:flex;flex-direction:column;border-radius:10px;overflow:hidden;background:#171A1E;border:1px solid #39404A;box-shadow:0 18px 50px rgba(0,0,0,.5)">
+
+<!-- Header -->
+<div style="height:38px;flex:none;display:flex;align-items:center;gap:6px;padding:0 8px;border-bottom:1px solid #2A3037;background:#13161A">
+<button aria-label="Rack menu" title="Rack menu" style="width:26px;height:26px;border:0;border-radius:6px;background:transparent;display:flex;align-items:center;justify-content:center"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#A7AFB8" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="{{ic.menu}}"></path></svg></button>
+<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="#A7AFB8" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="{{ic.rack}}"></path></svg>
+<span style="font-weight:600;font-size:12.5px">Channel Rack</span>
+<span style="color:#7E8792">›</span>
+<button style="height:26px;padding:0 8px;border:0;border-radius:6px;background:#252A30;color:#E9ECEF;font-size:12px;display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:2px;background:#C9774F"></span>Beat<svg width="9" height="9" viewBox="0 0 10 10" aria-hidden="true"><path d="M2 4l3 3 3-3" stroke="#A7AFB8" stroke-width="1.4" fill="none"></path></svg></button>
+<div title="Pattern length — drag or type" style="display:flex;align-items:center;gap:5px;height:26px;padding:0 8px;border-radius:6px;background:#0F1215;border:1px solid #2A3037"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="#7E8792" stroke-width="1.5" aria-hidden="true"><path d="{{ic.steps}}"></path></svg><span style="font-family:'IBM Plex Mono',monospace;font-size:11.5px">16</span><span style="font-size:10.5px;color:#7E8792">steps · 1 bar</span></div>
+<div title="Swing" style="display:flex;align-items:center;gap:6px;height:26px;padding:0 8px;border-radius:6px;background:#0F1215;border:1px solid #2A3037">
+<svg width="18" height="18" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7.5" fill="#171A1E" stroke="#39404A"></circle><path d="M4.7 15.3A7.5 7.5 0 0 1 4.2 6" stroke="#E9ECEF" stroke-width="2" fill="none" stroke-linecap="round"></path></svg>
+<span style="font-size:10.5px;color:#7E8792">SWING</span><span style="font-family:'IBM Plex Mono',monospace;font-size:11px">20%</span>
+</div>
+<span style="display:flex;align-items:center;gap:5px;height:22px;padding:0 8px;border-radius:11px;background:#1F3550;color:#BBD9FF;font-size:11px;margin-left:4px"><svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="#BBD9FF" stroke-width="1.6" aria-hidden="true"><path d="{{ic.select}}"></path></svg>1 selected</span>
+<div style="flex:1"></div>
+<div style="display:flex;background:#0F1215;border:1px solid #2A3037;border-radius:7px;padding:2px;gap:1px">
+<sc-for list="{{filters}}" as="f" hint-placeholder-count="3"><button title="Show: {{f.name}}" style="{{f.style}}"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="{{f.color}}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{f.path}}"></path></svg>{{f.name}}</button></sc-for>
+</div>
+<div style="display:flex;background:#0F1215;border:1px solid #2A3037;border-radius:7px;padding:2px;gap:1px">
+<button aria-label="Steps view" title="Steps" style="width:28px;height:22px;border:0;border-radius:5px;background:#252A30;display:flex;align-items:center;justify-content:center"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#E9ECEF" stroke-width="1.5" aria-hidden="true"><path d="{{ic.steps}}"></path></svg></button>
+<button aria-label="Notes view" title="Notes — mini piano roll in every row" style="width:28px;height:22px;border:0;border-radius:5px;background:transparent;display:flex;align-items:center;justify-content:center"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#7E8792" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="{{ic.notes}}"></path></svg></button>
+</div>
+<button title="Add channel" style="height:26px;padding:0 9px;border:0;border-radius:6px;background:#F5B544;color:#1B1405;font-size:11.5px;font-weight:600;display:flex;align-items:center;gap:5px"><svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="#1B1405" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="{{ic.plus}}"></path></svg>Channel</button>
+<button aria-label="Remove unused audio" title="Remove unused audio" style="width:26px;height:26px;border:0;border-radius:6px;background:transparent;display:flex;align-items:center;justify-content:center"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#7E8792" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ic.broom}}"></path></svg></button>
+<div style="width:1px;height:18px;background:#2A3037"></div>
+<button aria-label="Dock" title="Dock back into main window" style="width:26px;height:26px;border:0;border-radius:6px;background:transparent;display:flex;align-items:center;justify-content:center"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#A7AFB8" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ic.dock}}"></path></svg></button>
+<button aria-label="Close" title="Close (F6)" style="width:26px;height:26px;border:0;border-radius:6px;background:transparent;display:flex;align-items:center;justify-content:center"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#A7AFB8" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="{{ic.close}}"></path></svg></button>
+</div>
+
+<!-- Column labels -->
+<div style="display:flex;align-items:center;height:26px;padding:0 12px;font-size:9px;letter-spacing:1px;color:#7E8792">
+<span style="width:10px"></span><span style="width:24px">ON</span><span style="width:30px">PAN</span><span style="width:30px">VOL</span><span style="width:30px">PITCH</span><span style="width:40px">TRACK</span><span style="width:188px">CHANNEL</span><span style="flex:1">STEPS · height = velocity · wheel to change</span><span style="font-family:'IBM Plex Mono',monospace;letter-spacing:0;font-size:10px">1 · · · 2 · · · 3 · · · 4 · · ·</span>
+</div>
+
+<!-- Rows -->
+<div style="flex:1;min-height:0;padding:0 12px;display:flex;flex-direction:column;gap:4px">
+<sc-for list="{{channels}}" as="c" hint-placeholder-count="6">
+<div style="{{c.row}}">
+<span style="{{c.sel}}"></span>
+<span style="width:24px;display:flex;justify-content:center"><span style="{{c.led}}"></span></span>
+<span style="width:30px;display:flex;justify-content:center"><svg width="22" height="22" viewBox="0 0 22 22" aria-hidden="true"><circle cx="11" cy="11" r="8.5" fill="#0F1215" stroke="#39404A"></circle><path d="{{c.panArc}}" stroke="#E9ECEF" stroke-width="2.4" fill="none" stroke-linecap="round"></path><path d="{{c.panTick}}" stroke="#E9ECEF" stroke-width="1.5" stroke-linecap="round"></path></svg></span>
+<span style="width:30px;display:flex;justify-content:center"><svg width="22" height="22" viewBox="0 0 22 22" aria-hidden="true"><circle cx="11" cy="11" r="8.5" fill="#0F1215" stroke="#39404A"></circle><path d="{{c.volArc}}" stroke="#F5B544" stroke-width="2.4" fill="none" stroke-linecap="round"></path><path d="{{c.volTick}}" stroke="#E9ECEF" stroke-width="1.5" stroke-linecap="round"></path></svg></span>
+<span style="width:30px;display:flex;justify-content:center"><svg width="22" height="22" viewBox="0 0 22 22" aria-hidden="true"><circle cx="11" cy="11" r="8.5" fill="#0F1215" stroke="#39404A"></circle><path d="M11 2.5v3.5" stroke="#E9ECEF" stroke-width="1.5" stroke-linecap="round"></path></svg></span>
+<span style="width:40px"><span style="display:inline-flex;align-items:center;justify-content:center;gap:2px;width:34px;height:22px;background:#0F1215;border:1px solid #2A3037;border-radius:5px;font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:#A7AFB8">{{c.track}}</span></span>
+<button style="{{c.nameBtn}}">
+<span style="{{c.stripe}}"></span>
+<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="{{c.iconColor}}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{c.icon}}"></path></svg>
+<span style="flex:1;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{c.name}}</span>
+<span style="{{c.badge}}">{{c.state}}</span>
+</button>
+<button aria-label="Open Piano Roll" title="Open Piano Roll (F7)" style="width:24px;height:26px;border:0;border-radius:5px;background:#20252B;margin-right:8px;display:flex;align-items:center;justify-content:center"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="#A7AFB8" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="{{ic.pianoSmall}}"></path></svg></button>
+<sc-if value="{{c.hasSteps}}" hint-placeholder-val="{{ true }}">
+<div style="display:flex;gap:3px">
+<sc-for list="{{c.steps}}" as="s" hint-placeholder-count="16"><span style="{{s.style}}"><span style="{{s.fill}}"></span></span></sc-for>
+</div>
+</sc-if>
+<sc-if value="{{c.hasNotes}}" hint-placeholder-val="{{ false }}">
+<div title="Notes — click to open the Piano Roll" style="width:428px;height:28px;border-radius:5px;background:#0F1215;border:1px solid #2A3037;position:relative;overflow:hidden;background-image:repeating-linear-gradient(90deg,#2A3037 0 1px,transparent 1px 107px)">
+<sc-for list="{{c.notes}}" as="n" hint-placeholder-count="7"><span style="{{n.style}}"></span></sc-for>
+</div>
+</sc-if>
+</div>
+</sc-for>
+<!-- drop zone -->
+<div style="margin-top:6px;height:52px;border:1.5px dashed #39404A;border-radius:8px;display:flex;align-items:center;justify-content:flex-start;gap:8px;padding:0 12px;color:#A7AFB8;font-size:11.5px">
+<span style="order:3;margin-left:auto;display:flex;align-items:center;gap:6px;color:#7E8792"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#A7AFB8" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ic.drop}}"></path></svg>Drop WAV / MP3 / MIDI here</span>
+
+<button style="height:26px;padding:0 9px;border:0;border-radius:6px;background:#252A30;color:#E9ECEF;font-size:11px;display:flex;align-items:center;gap:5px"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="#E9ECEF" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="{{ic.wave}}"></path></svg>Sampler</button>
+<button style="height:26px;padding:0 9px;border:0;border-radius:6px;background:#252A30;color:#E9ECEF;font-size:11px;display:flex;align-items:center;gap:5px"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="#E9ECEF" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ic.files}}"></path></svg>Sampler from file…</button>
+<button style="height:26px;padding:0 9px;border:0;border-radius:6px;background:#252A30;color:#E9ECEF;font-size:11px;display:flex;align-items:center;gap:5px"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="#E9ECEF" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ic.plugin}}"></path></svg>VST3 instrument…</button>
+</div>
+</div>
+</div>
+
+<!-- Context menu -->
+<div style="position:absolute;left:300px;top:150px;width:236px;padding:5px;background:#1E2227;border:1px solid #39404A;border-radius:9px;box-shadow:0 12px 32px rgba(0,0,0,.55);display:flex;flex-direction:column;gap:1px">
+<sc-for list="{{menu}}" as="m" hint-placeholder-count="12">
+<sc-if value="{{m.sep}}" hint-placeholder-val="{{ false }}"><div style="height:1px;background:#2A3037;margin:4px 6px"></div></sc-if>
+<sc-if value="{{m.item}}" hint-placeholder-val="{{ true }}">
+<div style="{{m.style}}"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="{{m.color}}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{m.path}}"></path></svg><span style="flex:1">{{m.name}}</span><span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:#7E8792">{{m.key}}</span></div>
+</sc-if>
+</sc-for>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1200,"height":620}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const ic = {
+      menu: 'M6 3.5l4.5 4.5L6 12.5',
+      rack: 'M2 3h12M2 6.5h12M2 10h12M2 13.5h12',
+      steps: 'M2 5h3v6H2zM6.5 5h3v6h-3zM11 5h3v6h-3z',
+      notes: 'M2 11h4M7 7h4M10 4h4M4 13.5h5',
+      plus: 'M8 3v10M3 8h10',
+      broom: 'M10 2L7 8M4 8h6l1 6H3zM6 11v3M8.5 11v3',
+      dock: 'M6 2H2v12h12v-4M14 2L8 8M8 4v4h4',
+      close: 'M4 4l8 8M12 4l-8 8',
+      select: 'M2 2h3M7 2h2M11 2h3v3M14 7v2M14 11v3h-3M9 14H7M5 14H2v-3M2 9V7M2 5V2',
+      pianoSmall: 'M2 3h12v10H2zM6 3v6M10 3v6',
+      wave: 'M1 8h2l1.5-4 2 8 2-10 2 9 1.5-3H15',
+      plugin: 'M6 2v3M10 2v3M4 5h8v2.5a4 4 0 0 1-8 0zM8 11.5V14',
+      files: 'M4 2h5l3 3v9H4zM9 2v3h3',
+      drop: 'M8 2v8M5 7l3 3 3-3M3 11v3h10v-3',
+      all: 'M2 3h12M2 8h12M2 13h12',
+      audio: 'M1.5 12c3 0 3.5-8 6.5-8s3.5 6 6.5 6',
+      warn: 'M8 2l6.5 11.5h-13zM8 6.5v3.5M8 12h.01',
+    };
+    const pal = ['#C9774F','#4F8FC9','#5FA86B','#B565A7','#C9A94F','#4FB3AE','#C96F6F','#8F8FD6'];
+    const fb = (on) => 'height:22px;padding:0 8px;border:0;border-radius:5px;font-size:10.5px;display:flex;align-items:center;gap:4px;' + (on ? 'background:#252A30;color:#E9ECEF' : 'background:transparent;color:#7E8792');
+    const filters = [['All',ic.all,true],['Instruments',ic.plugin,false],['Audio',ic.audio,false]].map(([name,path,on]) => ({ name, path, style: fb(on), color: on ? '#E9ECEF' : '#7E8792' }));
+    const knob = (v, bipolar) => {
+      const rad = (d) => d * Math.PI / 180, r = 8.5, c = 11;
+      const pt = (a, rr) => (c + rr * Math.sin(a)).toFixed(2) + ' ' + (c - rr * Math.cos(a)).toFixed(2);
+      const a0 = bipolar ? 0 : rad(-135), a1 = bipolar ? rad(v * 135) : rad(-135 + v * 270);
+      const sweep = a1 >= a0 ? 1 : 0, large = Math.abs(a1 - a0) > Math.PI ? 1 : 0;
+      return { arc: Math.abs(a1 - a0) < 0.01 ? '' : 'M' + pt(a0, r) + ' A' + r + ' ' + r + ' 0 ' + large + ' ' + sweep + ' ' + pt(a1, r), tick: 'M' + pt(a1, 2.5) + ' L' + pt(a1, 6.5) };
+    };
+    const pats = { Kick:[[0,1],[4,.8],[8,1],[12,.8]], Snare:[[4,1],[12,1]], Hat:[[2,.6],[6,.5],[10,.6],[14,.5]], Clap:[[12,.9],[15,.4]], 'Perc loop':[[0,.7],[3,.5],[7,.6],[11,.7]] };
+    const defs = [
+      // name, track, color, kind, muted, selected, state, badgeKind, pan, vol
+      ['Kick','01',0,'smp',false,true,'Sampler','',0,0.8],
+      ['Snare','02',1,'smp',false,false,'Sampler','',0.05,0.75],
+      ['Hat','02',2,'smp',true,false,'muted','muted',-0.2,0.6],
+      ['Clap','03',3,'smp',false,false,'missing','missing',0.1,0.7],
+      ['Perc loop','03',5,'smp',false,false,'empty','empty',0,0.7],
+      ['Bass','04',4,'vst',false,false,'VST3','',0,0.8],
+      ['Lead','05',7,'vst',false,false,'not found','missing',0.3,0.7],
+    ];
+    const playStep = 6;
+    const channels = defs.map(([name, track, ci, kind, muted, sel, state, bk, pan, vol]) => {
+      const p = knob(pan / 1, true), v = knob(vol / 1.0, false);
+      const missing = bk === 'missing', empty = bk === 'empty';
+      const hasNotes = kind === 'vst';
+      const on = pats[name] || [];
+      const steps = Array.from({ length: 16 }, (_, i) => {
+        const hit = on.find((s) => s[0] === i);
+        const g = Math.floor(i / 4) % 2;
+        return {
+          style: 'width:23px;height:28px;border-radius:4px;position:relative;overflow:hidden;background:' + (g ? '#2C3239' : '#252A30') + (muted ? ';opacity:.45' : '') + (i === playStep ? ';box-shadow:inset 0 0 0 1px #E9ECEF' : '') + (i % 4 === 3 && i < 15 ? ';margin-right:5px' : ''),
+          fill: hit ? 'position:absolute;left:0;right:0;bottom:0;height:' + Math.round(Math.max(.3, hit[1]) * 100) + '%;background:#F5B544;box-shadow:inset 0 2px 0 #FFD58A' : 'display:none',
+        };
+      });
+      const melody = name === 'Bass' ? [[0,2,.2],[3,1,.2],[6,2,.5],[8,1,.85],[10,1,.6],[11,2,.25],[14,1,.85]] : [[0,4,.6],[4,2,.8],[8,4,.4],[12,4,.7]];
+      const notes = melody.map(([s, l, y]) => ({ style: 'position:absolute;height:4px;border-radius:2px;background:' + (missing ? '#5A626C' : '#F5B544') + ';left:' + (s * 26.75 + 1) + 'px;width:' + (l * 26.75 - 2) + 'px;bottom:' + Math.round(3 + y * 19) + 'px' }));
+      const badgeColor = bk === 'missing' ? 'background:rgba(255,156,143,.14);color:#FF9C8F' : bk === 'empty' ? 'background:#20252B;color:#7E8792' : bk === 'muted' ? 'background:#20252B;color:#7E8792' : 'background:transparent;color:#7E8792';
+      return {
+        name, track, state, hasNotes, hasSteps: !hasNotes, steps, notes,
+        row: 'display:flex;align-items:center;height:36px;padding-right:6px;border-radius:7px;' + (sel ? 'background:rgba(31,53,80,.5)' : ''),
+        sel: 'width:4px;height:26px;border-radius:2px;margin-right:6px;background:' + (sel ? '#5AA9FF' : '#252A30'),
+        led: 'width:10px;height:10px;border-radius:50%;' + (muted ? 'background:#3A4047' : 'background:#5FA86B;box-shadow:0 0 6px rgba(95,168,107,.6)'),
+        panArc: p.arc, panTick: p.tick, volArc: v.arc, volTick: v.tick,
+        nameBtn: 'width:180px;height:28px;border:0;border-radius:6px;background:#252A30;color:' + (empty || muted ? '#A7AFB8' : '#E9ECEF') + ';display:flex;align-items:center;gap:7px;padding:0 6px 0 0;overflow:hidden;font-size:12px;margin-right:4px',
+        stripe: 'width:4px;align-self:stretch;background:' + (missing ? 'repeating-linear-gradient(45deg,' + pal[ci] + ' 0 3px,#171A1E 3px 6px)' : pal[ci]),
+        icon: kind === 'vst' ? ic.plugin : (missing ? ic.warn : ic.wave),
+        iconColor: missing ? '#FF9C8F' : '#A7AFB8',
+        badge: 'font-size:9.5px;padding:1px 5px;border-radius:4px;' + badgeColor,
+      };
+    });
+    const mi = (name, path, key, danger, hl) => ({ item: true, sep: false, name, path, key: key || '', color: danger ? '#FF9C8F' : '#A7AFB8', style: 'display:flex;align-items:center;gap:9px;height:28px;padding:0 8px;border-radius:6px;font-size:12px;' + (danger ? 'color:#FF9C8F;' : '') + (hl ? 'background:#1F3550' : '') });
+    const sep = { item: false, sep: true };
+    const menu = [
+      mi('Open Piano Roll', ic.pianoSmall, 'F7', false, true),
+      mi('Channel settings…', 'M8 5.5a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5zM8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4', 'Enter'),
+      mi('Load sample…', ic.files),
+      mi('Clear sample', 'M3 4h10M6 4V2.5h4V4M4.5 4l.7 9.5h5.6l.7-9.5'),
+      sep,
+      mi('Rename / color…', 'M2 14l1-3 7-7 2 2-7 7zM9 5l2 2', 'F2'),
+      mi('Clone', 'M5 5h8v8H5zM3 11V3h8', 'Alt+C'),
+      mi('Route to free mixer track', 'M2 8h10M9 4.5L12.5 8 9 11.5M14 3v10', 'Ctrl+L'),
+      mi('Route to mixer track  ▸', 'M4 2v12M8 2v12M12 2v12M2.5 10h3M6.5 5h3M10.5 8h3'),
+      mi('Move up / down', 'M5 6l3-3 3 3M5 10l3 3 3-3', 'Alt+↑↓'),
+      sep,
+      mi('Delete', 'M3 4h10M6 4V2.5h4V4M4.5 4l.7 9.5h5.6l.7-9.5', 'Alt+Del', true),
+    ];
+    return { ic, filters, channels, menu };
+  }
+}
+</script>
+</body>
+</html>

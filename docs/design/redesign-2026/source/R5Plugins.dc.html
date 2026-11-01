@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>R5 · Plugins</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#2B3038}
+button{font-family:inherit;cursor:pointer}
+input{font-family:inherit}
+</style>
+</helmet>
+<div style="width:1240px;height:620px;box-sizing:border-box;background:#2B3038;padding:20px;font-family:'IBM Plex Sans',sans-serif;font-size:12px;color:#E9ECEF;display:flex;gap:20px;align-items:flex-start">
+
+<!-- Plugins manager -->
+<div style="width:760px;height:580px;flex:none;display:flex;flex-direction:column;border-radius:10px;overflow:hidden;background:#171A1E;border:1px solid #39404A;box-shadow:0 18px 50px rgba(0,0,0,.5)">
+<div style="height:38px;flex:none;display:flex;align-items:center;gap:8px;padding:0 6px 0 14px;background:#13161A;border-bottom:1px solid #2A3037">
+<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="#A7AFB8" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="{{ic.plugin}}"></path></svg>
+<span style="font-weight:600;font-size:13px">Plugins</span>
+<span style="font-size:11px;color:#7E8792">VST3</span>
+<div style="flex:1"></div>
+<button aria-label="Close" style="width:26px;height:26px;border:0;border-radius:6px;background:transparent;display:flex;align-items:center;justify-content:center"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="#A7AFB8" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"></path></svg></button>
+</div>
+<div style="flex:1;min-height:0;padding:14px;display:flex;flex-direction:column;gap:12px">
+<!-- search paths -->
+<div style="border-radius:9px;background:#13161A;border:1px solid #22272D;padding:10px 12px;display:flex;flex-direction:column;gap:6px">
+<div style="display:flex;align-items:center;gap:6px"><span style="font-size:10px;letter-spacing:1px;color:#7E8792">SEARCH PATHS</span><div style="flex:1"></div><button style="height:24px;padding:0 8px;border:0;border-radius:6px;background:#252A30;color:#E9ECEF;font-size:11px;display:flex;align-items:center;gap:4px"><svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="#E9ECEF" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M8 3v10M3 8h10"></path></svg>Folder…</button></div>
+<sc-for list="{{paths}}" as="p" hint-placeholder-count="3">
+<div style="display:flex;align-items:center;gap:8px;height:28px;padding:0 4px 0 6px;border-radius:6px;background:#0F1215">
+<span style="{{p.toggle}}"><span style="{{p.knob}}"></span></span>
+<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#A7AFB8" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M2 4h4l1.5 1.5H14V13H2z"></path></svg>
+<span style="{{p.text}}">{{p.path}}</span>
+<span style="font-size:10px;color:#7E8792">{{p.kind}}</span>
+<button aria-label="Scan this folder" title="Scan this folder" style="width:24px;height:22px;border:0;border-radius:5px;background:transparent;display:flex;align-items:center;justify-content:center"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="#A7AFB8" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.5v3h-3"></path></svg></button>
+<sc-if value="{{p.user}}" hint-placeholder-val="{{ false }}"><button aria-label="Remove" title="Remove" style="width:24px;height:22px;border:0;border-radius:5px;background:transparent;display:flex;align-items:center;justify-content:center"><svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="#A7AFB8" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"></path></svg></button></sc-if>
+</div>
+</sc-for>
+</div>
+<!-- scan bar -->
+<div style="display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:9px;background:rgba(245,181,68,.08);border:1px solid rgba(245,181,68,.35)">
+<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#F5B544" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.5v3h-3"></path></svg>
+<div style="flex:1;display:flex;flex-direction:column;gap:5px">
+<div style="display:flex;font-size:11.5px"><span>Scanning <span style="font-family:'IBM Plex Mono',monospace;color:#F5B544">Surge XT.vst3</span></span><span style="margin-left:auto;font-family:'IBM Plex Mono',monospace;color:#A7AFB8">14 / 23</span></div>
+<div style="height:5px;border-radius:3px;background:#0F1215"><div style="width:61%;height:5px;border-radius:3px;background:#F5B544"></div></div>
+</div>
+<button style="height:28px;padding:0 10px;border:1px solid #39404A;border-radius:7px;background:transparent;color:#E9ECEF;font-size:11.5px">Cancel</button>
+</div>
+<!-- list -->
+<div style="flex:1;min-height:0;display:flex;flex-direction:column;border-radius:9px;border:1px solid #22272D;overflow:hidden">
+<div style="height:32px;flex:none;display:flex;align-items:center;gap:2px;padding:0 6px;background:#13161A;border-bottom:1px solid #22272D">
+<button style="height:24px;padding:0 10px;border:0;border-radius:5px;background:#252A30;color:#E9ECEF;font-size:11px">Found <span style="font-family:'IBM Plex Mono',monospace;color:#A7AFB8">21</span></button>
+<button style="height:24px;padding:0 10px;border:0;border-radius:5px;background:transparent;color:#FF9C8F;font-size:11px;display:flex;align-items:center;gap:4px"><svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="#FF9C8F" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M8 2l6.5 11.5h-13zM8 6.5v3.5M8 12h.01"></path></svg>Failed <span style="font-family:'IBM Plex Mono',monospace">2</span></button>
+<div style="flex:1"></div>
+<span style="font-size:10px;color:#7E8792">failed modules are blocklisted · Full rescan tries them again</span>
+</div>
+<div style="flex:1;overflow:hidden;padding:4px 6px">
+<sc-for list="{{found}}" as="f" hint-placeholder-count="6">
+<div style="display:flex;align-items:center;gap:10px;height:30px;padding:0 6px;border-radius:6px;border-bottom:1px solid #1B1F24">
+<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="{{f.color}}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{f.icon}}"></path></svg>
+<span style="width:170px;font-weight:500">{{f.name}}</span>
+<span style="width:120px;color:#A7AFB8">{{f.vendor}}</span>
+<span style="font-size:10.5px;padding:1px 6px;border-radius:4px;background:#20252B;color:#A7AFB8">{{f.kind}}</span>
+<div style="flex:1"></div>
+<span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:#7E8792">{{f.ver}}</span>
+</div>
+</sc-for>
+</div>
+</div>
+<div style="display:flex;gap:8px;justify-content:flex-end">
+<button title="Scan every plugin again, the failed ones included" style="height:32px;padding:0 12px;border:1px solid #39404A;border-radius:7px;background:transparent;color:#E9ECEF;font-size:12px;display:flex;align-items:center;gap:6px"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#E9ECEF" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.5v3h-3M8 5.5v3l2 1"></path></svg>Full rescan</button>
+<button title="Scan new and changed plugins" style="height:32px;padding:0 14px;border:0;border-radius:7px;background:#F5B544;color:#1B1405;font-size:12px;font-weight:600;display:flex;align-items:center;gap:6px"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#1B1405" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.5v3h-3"></path></svg>Rescan</button>
+</div>
+</div>
+</div>
+
+<!-- Plugin picker (F8) -->
+<div style="width:420px;height:520px;flex:none;display:flex;flex-direction:column;border-radius:10px;overflow:hidden;background:#1E2227;border:1px solid #39404A;box-shadow:0 18px 50px rgba(0,0,0,.55)">
+<div style="padding:10px;display:flex;flex-direction:column;gap:8px;border-bottom:1px solid #2A3037">
+<label style="display:flex;align-items:center;gap:8px;height:34px;padding:0 10px;border-radius:8px;background:#0F1215;border:1px solid #5AA9FF">
+<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#A7AFB8" stroke-width="1.6" aria-hidden="true"><path d="M7 2.5a4.5 4.5 0 1 1 0 9 4.5 4.5 0 1 1 0-9zM10.5 10.5L14 14"></path></svg>
+<input aria-label="Search plugins" value="com" style="flex:1;background:transparent;border:0;outline:0;color:#E9ECEF;font-size:13px">
+<span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:#7E8792;padding:1px 5px;border:1px solid #39404A;border-radius:4px">F8</span>
+</label>
+<div style="display:flex;gap:4px">
+<sc-for list="{{chips}}" as="c" hint-placeholder-count="4"><button style="{{c.style}}"><svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="{{c.color}}" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{c.path}}"></path></svg>{{c.name}}</button></sc-for>
+</div>
+</div>
+<div style="flex:1;overflow:hidden;padding:6px">
+<sc-for list="{{pick}}" as="p" hint-placeholder-count="9">
+<sc-if value="{{p.head}}" hint-placeholder-val="{{ false }}"><div style="font-size:9.5px;letter-spacing:1px;color:#7E8792;padding:8px 8px 4px">{{p.name}}</div></sc-if>
+<sc-if value="{{p.item}}" hint-placeholder-val="{{ true }}">
+<div style="{{p.style}}">
+<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="{{p.color}}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{p.icon}}"></path></svg>
+<span style="flex:1">{{p.pre}}<span style="color:#F5B544;font-weight:600">{{p.hit}}</span>{{p.post}}</span>
+<span style="font-size:10.5px;color:#7E8792">{{p.vendor}}</span>
+<svg width="13" height="13" viewBox="0 0 16 16" fill="{{p.star}}" stroke="{{p.starStroke}}" stroke-width="1.3" stroke-linejoin="round" aria-label="Favorite" role="img"><path d="M8 2l1.8 3.8 4.2.5-3.1 2.9.8 4.1L8 11.3 4.3 13.3l.8-4.1L2 6.3l4.2-.5z"></path></svg>
+</div>
+</sc-if>
+</sc-for>
+</div>
+<div style="height:30px;display:flex;align-items:center;gap:14px;padding:0 12px;border-top:1px solid #2A3037;font-size:10.5px;color:#7E8792"><span>↑↓ choose</span><span>Enter add</span><span>Ctrl+D favorite</span><span style="margin-left:auto">Esc</span></div>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1240,"height":620}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const ic = { plugin: 'M6 2v3M10 2v3M4 5h8v2.5a4 4 0 0 1-8 0zM8 11.5V14' };
+    const inst = 'M2 2h12v12H2zM5.5 2v7M8 2v7M10.5 2v7M5.5 9v5M10.5 9v5';
+    const fx = 'M1.5 10c2 0 2-5 4-5s2 7 4 7 2-4 5-4';
+    const tg = (on) => 'width:28px;height:16px;border-radius:8px;position:relative;flex:none;display:inline-block;' + (on ? 'background:#5FA86B' : 'background:#252A30;border:1px solid #39404A;box-sizing:border-box');
+    const kn = (on) => 'position:absolute;top:2px;width:12px;height:12px;border-radius:50%;' + (on ? 'right:2px;background:#0E1013' : 'left:2px;background:#7E8792;top:1px');
+    const paths = [['C:\\Program Files\\Common Files\\VST3','standard',true,false],['C:\\Users\\me\\VST3','user',true,true],['D:\\Old plugins','user',false,true]]
+      .map(([path, kind, on, user]) => ({ path, kind, user, toggle: tg(on), knob: kn(on), text: 'flex:1;font-family:IBM Plex Mono,monospace;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;' + (on ? 'color:#E9ECEF' : 'color:#5A626C;text-decoration:line-through') }));
+    const found = [['Surge XT','Surge Synth Team','Instrument','1.3.4',inst],['Vital','Matt Tytel','Instrument','1.5.5',inst],['TDR Nova','Tokyo Dawn Labs','Effect · EQ','2.1.6',fx],['OTT','Xfer Records','Effect · Dyn','1.37',fx],['Valhalla Supermassive','Valhalla DSP','Effect · Reverb','4.0.0',fx],['Dexed','Digital Suburban','Instrument','0.9.6',inst]]
+      .map(([name, vendor, kind, ver, icon]) => ({ name, vendor, kind, ver, icon, color: icon === inst ? '#F5B544' : '#3CC9B0' }));
+    const cb = (on) => 'height:24px;padding:0 9px;border:0;border-radius:12px;font-size:11px;display:flex;align-items:center;gap:5px;' + (on ? 'background:#1F3550;color:#E9ECEF;box-shadow:inset 0 0 0 1px #5AA9FF' : 'background:#252A30;color:#A7AFB8');
+    const chips = [['All','M2 3h12M2 8h12M2 13h12',true],['Instruments',inst,false],['Effects',fx,false],['Favorites','M8 2l1.8 3.8 4.2.5-3.1 2.9.8 4.1L8 11.3 4.3 13.3l.8-4.1L2 6.3l4.2-.5z',false]]
+      .map(([name, path, on]) => ({ name, path, style: cb(on), color: on ? '#E9ECEF' : '#A7AFB8' }));
+    const head = (name) => ({ head: true, item: false, name });
+    const it = (name, hitAt, vendor, isInst, fav, sel) => {
+      const i = name.toLowerCase().indexOf('com');
+      return { head: false, item: true, pre: name.slice(0, i), hit: name.slice(i, i + 3), post: name.slice(i + 3), vendor, icon: isInst ? inst : fx, color: isInst ? '#F5B544' : '#3CC9B0', star: fav ? '#F5B544' : 'none', starStroke: fav ? '#F5B544' : '#5A626C', style: 'display:flex;align-items:center;gap:10px;height:32px;padding:0 8px;border-radius:7px;' + (sel ? 'background:#1F3550' : '') };
+    };
+    const pick = [head('FAVORITE EFFECTS'), it('Compressor', 0, 'jdance built-in', false, true, true), head('EFFECTS'), it('Multiband Compressor', 0, 'jdance', false, false), it('TDR Kotelnikov · Compressor', 0, 'Tokyo Dawn Labs', false, false), it('Comb Filter', 0, 'Surge Synth Team', false, false), head('RECENT'), it('Compact Reverb', 0, 'Valhalla DSP', false, false)];
+    return { ic, paths, found, chips, pick };
+  }
+}
+</script>
+</body>
+</html>

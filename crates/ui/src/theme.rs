@@ -33,6 +33,36 @@ pub(crate) const WARN: Color32 = Color32::from_rgb(0xFF, 0xC2, 0x7A);
 pub(crate) const ERROR: Color32 = Color32::from_rgb(0xFF, 0x9C, 0x8F);
 pub(crate) const RED: Color32 = Color32::from_rgb(0xFF, 0x8A, 0x7A);
 
+// UI-RD §1: the 2026 redesign tokens.
+/// Secondary labels: section captions, units, hints.
+pub(crate) const DIM: Color32 = Color32::from_rgb(0x7E, 0x87, 0x92);
+/// Section cards (UI-RD §1.3).
+pub(crate) const CARD: Color32 = Color32::from_rgb(0x13, 0x16, 0x1A);
+pub(crate) const CARD_LINE: Color32 = Color32::from_rgb(0x22, 0x27, 0x2D);
+/// The position display and other "LCD" fields.
+pub(crate) const LCD: Color32 = Color32::from_rgb(0x0A, 0x0C, 0x0E);
+pub(crate) const LCD_LINE: Color32 = Color32::from_rgb(0x1E, 0x23, 0x29);
+/// Key badges (UI-RD §1.5).
+pub(crate) const KBD_BG: Color32 = Color32::from_rgb(0x17, 0x1A, 0x1E);
+pub(crate) const KBD_LINE: Color32 = Color32::from_rgb(0x2F, 0x35, 0x3D);
+/// Lamps.
+pub(crate) const LED_ON: Color32 = GREEN;
+pub(crate) const LED_OFF: Color32 = Color32::from_rgb(0x3A, 0x40, 0x47);
+/// The playhead: a solid 2 px line.
+pub(crate) const PLAYHEAD: Color32 = Color32::from_rgb(0xF2, 0xF4, 0xF6);
+/// Scale highlight in the Piano Roll (UI-RD §1.1): indigo rows.
+pub(crate) const SCALE_ROW: Color32 = Color32::from_rgb(0x1A, 0x1D, 0x2C);
+pub(crate) const SCALE_TONIC: Color32 = Color32::from_rgb(0x24, 0x2A, 0x48);
+pub(crate) const SCALE_ACCENT: Color32 = Color32::from_rgb(0x9A, 0xA5, 0xFF);
+/// Outline of a note outside the scale.
+pub(crate) const OUT_OF_SCALE: Color32 = ERROR;
+/// Preview and "listen to the result".
+pub(crate) const PREVIEW: Color32 = TEAL;
+/// Slide notes and the Slide button.
+pub(crate) const SLIDE: Color32 = Color32::from_rgb(0xB4, 0x8C, 0xF0);
+/// Scale controls: dots on the keys, the scale label, the Scale window.
+pub(crate) const SCALE_UI: Color32 = Color32::from_rgb(0x6F, 0xCF, 0x97);
+
 const MONO: &str = "plex-mono";
 const STRONG: &str = "plex-semibold";
 
@@ -98,18 +128,22 @@ pub(crate) fn install(ctx: &egui::Context) {
         s.window_margin = Margin::same(12);
         s.menu_margin = Margin::same(6);
         s.slider_rail_height = 6.0;
+        s.menu_spacing = 2.0;
+        s.icon_width = 14.0;
+        s.icon_width_inner = 8.0;
+        // UI-RD §1.2: element text Sans 12, panel titles SemiBold 12.5.
         use egui::TextStyle as T;
         style
             .text_styles
-            .insert(T::Body, FontId::proportional(13.0));
+            .insert(T::Body, FontId::proportional(12.5));
         style
             .text_styles
-            .insert(T::Button, FontId::proportional(12.5));
+            .insert(T::Button, FontId::proportional(12.0));
         style
             .text_styles
-            .insert(T::Small, FontId::proportional(11.0));
-        style.text_styles.insert(T::Monospace, mono(12.0));
-        style.text_styles.insert(T::Heading, strong(16.0));
+            .insert(T::Small, FontId::proportional(10.5));
+        style.text_styles.insert(T::Monospace, mono(11.5));
+        style.text_styles.insert(T::Heading, strong(14.0));
     });
 }
 
@@ -119,7 +153,19 @@ fn visuals() -> Visuals {
     v.window_fill = PANEL;
     v.window_stroke = Stroke::new(1.0, LINE);
     v.window_corner_radius = CornerRadius::same(10);
-    v.menu_corner_radius = CornerRadius::same(8);
+    v.menu_corner_radius = CornerRadius::same(9);
+    v.window_shadow = egui::epaint::Shadow {
+        offset: [0, 10],
+        blur: 28,
+        spread: 0,
+        color: Color32::from_black_alpha(140),
+    };
+    v.popup_shadow = egui::epaint::Shadow {
+        offset: [0, 6],
+        blur: 16,
+        spread: 0,
+        color: Color32::from_black_alpha(120),
+    };
     v.extreme_bg_color = FIELD;
     v.faint_bg_color = Color32::from_rgb(0x16, 0x19, 0x1D);
     v.code_bg_color = FIELD;
@@ -153,68 +199,12 @@ fn visuals() -> Visuals {
     w.active.fg_stroke = Stroke::new(1.0, TEXT);
     w.active.corner_radius = r;
     w.open = w.active;
+    w.open.bg_fill = RAISED;
+    w.open.weak_bg_fill = RAISED;
     v
 }
 
 /// Color of a track or lane in the default palette.
 pub(crate) fn rgb(c: [u8; 3]) -> Color32 {
     Color32::from_rgb(c[0], c[1], c[2])
-}
-
-/// Transport glyphs, drawn as shapes (the fonts have no media symbols).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Icon {
-    Play,
-    Stop,
-    Record,
-}
-
-/// A square button with a drawn icon; `on` fills it with the accent.
-pub(crate) fn icon_button(ui: &mut egui::Ui, icon: Icon, on: bool, label: &str) -> egui::Response {
-    let size = vec2(34.0, 28.0);
-    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
-    // Transport buttons never keep the keyboard focus (spec 0.3.0 §4).
-    if resp.clicked() || resp.has_focus() {
-        resp.surrender_focus();
-    }
-    let visuals = ui.style().interact(&resp);
-    let accent = if icon == Icon::Record { RED } else { AMBER };
-    let fill = if on { accent } else { visuals.bg_fill };
-    let stroke = if on {
-        Stroke::new(1.0, accent)
-    } else {
-        visuals.bg_stroke
-    };
-    let painter = ui.painter();
-    painter.rect(
-        rect,
-        CornerRadius::same(6),
-        fill,
-        stroke,
-        egui::StrokeKind::Inside,
-    );
-    let color = if on { ON_AMBER } else { TEXT };
-    let c = rect.center();
-    match icon {
-        Icon::Play => {
-            let pts = vec![
-                c + vec2(-4.0, -6.0),
-                c + vec2(6.0, 0.0),
-                c + vec2(-4.0, 6.0),
-            ];
-            painter.add(egui::Shape::convex_polygon(pts, color, Stroke::NONE));
-        }
-        Icon::Stop => {
-            painter.rect_filled(
-                egui::Rect::from_center_size(c, vec2(10.0, 10.0)),
-                CornerRadius::same(1),
-                color,
-            );
-        }
-        Icon::Record => {
-            painter.circle_filled(c, 5.5, if on { ON_AMBER } else { RED });
-        }
-    }
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
-    resp
 }

@@ -28,14 +28,14 @@ use jdance_domain::{
 };
 
 const KEYS: u8 = 128;
-const KEYBOARD_W: f32 = 52.0;
+const KEYBOARD_W: f32 = 56.0;
 const RULER_H: f32 = 20.0;
 const LANE_H: f32 = 96.0;
 const EDGE_GRAB: f32 = 6.0;
 const NEW_VELOCITY: f32 = 0.8;
 const SELECTED: Color32 = Color32::from_rgb(0x7D, 0xBB, 0xFF);
 /// Slide notes (spec 0.3.5 §7.2).
-const SLIDE: Color32 = Color32::from_rgb(0xB4, 0x8C, 0xF0);
+const SLIDE: Color32 = theme::SLIDE;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Tool {
@@ -267,6 +267,57 @@ pub(crate) enum MidiRequest {
     Pick,
     /// Dropped from the Browser or the system at `tick`.
     Drop { path: std::path::PathBuf, tick: u32 },
+}
+
+/// "C minor" and the like (UI-RD §5).
+fn scale_label(sc: Scale) -> String {
+    format!(
+        "{} {}",
+        key_name(sc.tonic)
+            .trim_end_matches(char::is_numeric)
+            .trim_end_matches('-'),
+        sc.mode.name()
+    )
+}
+
+/// The Slide toggle: `SLIDE` purple when on.
+fn slide_button(ui: &mut egui::Ui, on: bool) -> egui::Response {
+    let font = egui::FontId::proportional(11.5);
+    let galley = ui
+        .painter()
+        .layout_no_wrap("Slide".into(), font, theme::TEXT);
+    let w = 9.0 + 14.0 + 6.0 + galley.size().x + 9.0;
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, 26.0), Sense::click());
+    let (fill, stroke, fg) = if on {
+        (
+            theme::SLIDE.gamma_multiply(0.22),
+            Stroke::new(1.0, theme::SLIDE),
+            theme::SLIDE,
+        )
+    } else if resp.hovered() {
+        (theme::RAISED, Stroke::NONE, theme::TEXT)
+    } else {
+        (
+            Color32::TRANSPARENT,
+            Stroke::new(1.0, theme::LINE),
+            theme::MUTED,
+        )
+    };
+    let p = ui.painter();
+    p.rect(rect, 6.0, fill, stroke, egui::StrokeKind::Inside);
+    crate::icons::paint_with(
+        p,
+        crate::icons::Glyph::Slide,
+        Rect::from_center_size(pos2(rect.left() + 16.0, rect.center().y), vec2(14.0, 14.0)),
+        fg,
+    );
+    p.galley_with_override_text_color(
+        pos2(rect.left() + 29.0, rect.center().y - galley.size().y / 2.0),
+        galley,
+        fg,
+    );
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, on, "Slide"));
+    resp
 }
 
 fn is_black(key: u8) -> bool {
@@ -582,30 +633,60 @@ impl PianoRoll {
         notes: &[Note],
         out: &mut PianoOutput,
     ) {
+        // UI-RD §5: Tools ▾, Snap, the tools, Stamp ▾, Slide,
+        // Piano Roll › channel ▾, pattern ▾; MIDI import and close right.
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Piano Roll").font(theme::strong(14.0)));
-            egui::ComboBox::from_id_salt("piano_pattern")
-                .selected_text(&pattern.name)
-                .show_ui(ui, |ui| {
-                    for p in &project.patterns {
-                        if ui.selectable_label(p.id == pattern.id, &p.name).clicked() {
-                            out.select_pattern = Some(p.id);
-                        }
+            ui.set_min_height(36.0);
+            ui.spacing_mut().item_spacing.x = 6.0;
+            use crate::icons::Glyph as G;
+            use crate::widgets::{Hint, Look, button, drop_button};
+            let tools_button = button(ui, Some(G::Tools), "Tools ▾", false, Look::Raised, "Note tools: they work on the selection, or on every note");
+            let snap_button = drop_button(
+                ui,
+                Some((G::Snap, theme::AMBER)),
+                snap_name(self.snap, self.sig),
+                "Snap of the Piano Roll",
+            );
+            egui::Popup::menu(&snap_button).show(|ui| {
+                for v in SNAPS {
+                    if ui
+                        .selectable_label(v.ticks(self.sig) == self.snap, v.name())
+                        .clicked()
+                    {
+                        out.snap = Some(v);
+                        ui.close();
                     }
-                })
-                .response
-                .on_hover_text("Pattern");
-            let bars = pattern.length_steps.div_ceil(self.sig.steps_per_bar());
-            if pattern.length_steps >= MAX_PATTERN_STEPS {
-                // PAT-004: the pattern stops growing here.
-                ui.label(RichText::new(format!("{bars} bars · limit")).color(theme::WARN))
-                    .on_hover_text(
-                        "Patterns are at most 256 steps; notes past the end are not added",
-                    );
-            } else {
-                ui.label(RichText::new(format!("{bars} bar(s)")).color(theme::MUTED))
-                    .on_hover_text("Grows when a note is placed past the end");
+                }
+            });
+            crate::widgets::segmented(ui, |ui| {
+                for t in Tool::ALL {
+                    if icons::tool_button(ui, t.glyph(), self.tool == t, t.hint()).clicked() {
+                        self.tool = t;
+                    }
+                }
+            });
+            // Stamp: amber with its name when one is chosen.
+            let stamp_text = self
+                .stamp
+                .map_or_else(|| "Stamp ▾".to_owned(), |s| format!("{} ▾", s.name()));
+            let stamp = button(
+                ui,
+                Some(G::Stamp),
+                &stamp_text,
+                self.stamp.is_some(),
+                Look::Amber,
+                "Draw and Paint place a chord, a scale or a drum figure",
+            );
+            egui::Popup::menu(&stamp).show(|ui| self.stamp_menu(ui));
+            let slide = slide_button(ui, self.slide_mode).hint(
+                "Slide: new notes are slide notes; they do not sound, the notes under them glide to their key",
+            );
+            if slide.clicked() {
+                self.slide_mode = !self.slide_mode;
             }
+            crate::widgets::divider(ui, 22.0);
+            ui.label(RichText::new("Piano Roll").font(theme::strong(12.5)));
+            ui.label(RichText::new("›").color(theme::DIM));
             let label = |c: &jdance_domain::Channel| {
                 let kind = match &c.source {
                     ChannelSource::Sampler { .. } => "Sampler",
@@ -614,68 +695,83 @@ impl PianoRoll {
                 };
                 format!("{} · {kind}", c.name)
             };
-            let current = project.channel(self.channel).map(label).unwrap_or_default();
-            egui::ComboBox::from_id_salt("piano_channel")
-                .selected_text(current)
-                .show_ui(ui, |ui| {
-                    // Audio channels have no notes (ACH-003).
-                    for c in project.channels.iter().filter(|c| !c.is_audio()) {
-                        if ui
-                            .selectable_label(c.id == self.channel, label(c))
-                            .clicked()
-                        {
-                            self.channel = c.id;
-                            self.selection.clear();
-                        }
-                    }
+            let (current, ch_color) = project
+                .channel(self.channel)
+                .map(|c| {
+                    let i = project.channel_index(c.id).unwrap_or(0);
+                    (c.name.clone(), theme::rgb(jdance_domain::color_or_default(c.color, i)))
                 })
-                .response
-                .on_hover_text("Channel");
-            ui.separator();
-            for t in Tool::ALL {
-                if icons::tool_button(ui, t.glyph(), self.tool == t, t.hint()).clicked() {
-                    self.tool = t;
+                .unwrap_or_default();
+            let ch_button = drop_button(ui, Some((G::Channel, ch_color)), &current, "Channel");
+            egui::Popup::menu(&ch_button).show(|ui| {
+                // Audio channels have no notes (ACH-003).
+                for c in project.channels.iter().filter(|c| !c.is_audio()) {
+                    if ui
+                        .selectable_label(c.id == self.channel, label(c))
+                        .clicked()
+                    {
+                        self.channel = c.id;
+                        self.selection.clear();
+                        ui.close();
+                    }
                 }
+            });
+            if let Some(sc) = self.scale.filter(|_| true) {
+                // The scale label (UI-RD §5, SCALE_UI).
+                ui.label(
+                    RichText::new(scale_label(sc))
+                        .size(11.0)
+                        .color(theme::SCALE_UI),
+                )
+                .on_hover_text("Scale highlight · Tools › Scale…");
             }
-            let stamp_text = self
-                .stamp
-                .map_or_else(|| "Stamp".to_owned(), |s| format!("Stamp: {}", s.name()));
-            let stamp_text = if self.stamp.is_some() {
-                RichText::new(stamp_text).color(theme::AMBER)
-            } else {
-                RichText::new(stamp_text)
-            };
-            ui.menu_button(stamp_text, |ui| self.stamp_menu(ui))
-                .response
-                .on_hover_text("Draw and Paint place a chord, a scale or a drum figure");
-            let slide_color = if self.slide_mode { SLIDE } else { theme::TEXT };
-            ui.toggle_value(
-                &mut self.slide_mode,
-                RichText::new("Slide").color(slide_color),
-            )
-            .on_hover_text(
-                "New notes are slide notes: they do not sound, the notes under them glide to their key (sampler channels)",
-            );
-            ui.separator();
-            ui.label(RichText::new("SNAP").size(11.0).color(theme::MUTED));
-            egui::ComboBox::from_id_salt("piano_snap")
-                .selected_text(snap_name(self.snap, self.sig))
-                .show_ui(ui, |ui| {
-                    for v in SNAPS {
-                        if ui
-                            .selectable_label(v.ticks(self.sig) == self.snap, v.name())
-                            .clicked()
-                        {
-                            out.snap = Some(v);
+            let bars = pattern.length_steps.div_ceil(self.sig.steps_per_bar());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                if crate::icons::icon_button(ui, G::Close, false, "Close the Piano Roll (Esc)").clicked() {
+                    out.close = true;
+                }
+                if crate::icons::icon_button(
+                    ui,
+                    G::Notes,
+                    false,
+                    &format!(
+                        "Import MIDI: the notes of a MIDI file at the caret ({}); or drop a .mid file here",
+                        crate::bindings::IMPORT_MIDI.label()
+                    ),
+                )
+                .clicked()
+                {
+                    out.midi = Some(MidiRequest::Pick);
+                }
+                ui.spacing_mut().slider_width = 80.0;
+                ui.add(egui::Slider::new(&mut self.zoom, 8.0..=96.0).show_value(false))
+                    .on_hover_text("Zoom");
+                let pat_color = pattern.color.map_or(theme::MUTED, theme::rgb);
+                let pat = drop_button(ui, Some((G::Pattern, pat_color)), &pattern.name, "Pattern");
+                egui::Popup::menu(&pat).show(|ui| {
+                    for p in &project.patterns {
+                        if ui.selectable_label(p.id == pattern.id, &p.name).clicked() {
+                            out.select_pattern = Some(p.id);
+                            ui.close();
                         }
                     }
                 });
-            ui.add(
-                egui::Slider::new(&mut self.zoom, 8.0..=96.0)
-                    .show_value(false)
-                    .text("Zoom"),
-            );
-            ui.separator();
+                if pattern.length_steps >= MAX_PATTERN_STEPS {
+                    // PAT-004: the pattern stops growing here.
+                    ui.label(RichText::new(format!("{bars} bars · limit")).size(11.0).color(theme::WARN))
+                        .on_hover_text(
+                            "Patterns are at most 256 steps; notes past the end are not added",
+                        );
+                } else {
+                    ui.label(
+                        RichText::new(format!("{bars} bar(s)"))
+                            .font(theme::mono(10.0))
+                            .color(theme::DIM),
+                    )
+                    .on_hover_text("Grows when a note is placed past the end");
+                }
+            });
             let selected = indices(notes, &self.selection);
             let target: Vec<Note> = if selected.is_empty() {
                 notes.to_vec()
@@ -691,11 +787,11 @@ impl PianoRoll {
             let highlight = self.scale.is_some();
             let mut tool = None;
             let mut script = None;
-            ui.menu_button("Tools", |ui| {
-                let mut open = |ui: &mut egui::Ui, label: &str, d: Dialog, enabled: bool| {
-                    if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+            egui::Popup::menu(&tools_button).show(|ui| {
+                ui.set_min_width(260.0);
+                let mut open = |ui: &mut egui::Ui, glyph: G, label: &str, keys: &str, d: Dialog, enabled: bool| {
+                    if crate::widgets::menu_item_on(ui, Some(glyph), label, keys, enabled).clicked() {
                         chosen = Some(d);
-                        ui.close();
                     }
                 };
                 for t in crate::note_tools_ui::menu_tools(self.last_grid) {
@@ -720,17 +816,15 @@ impl PianoRoll {
                     } else {
                         "Opens with a preview; Apply is one undo step".to_owned()
                     };
-                    if ui
-                        .add_enabled(enabled, egui::Button::new(label))
+                    let keys = crate::note_tools_ui::keys(&t).map(crate::note_tools_ui::key_text).unwrap_or_default();
+                    if crate::widgets::menu_item_on(ui, Some(crate::note_tools_ui::glyph(&t)), &label, &keys, enabled)
                         .on_hover_text(tip)
                         .clicked()
                     {
                         tool = Some(t);
-                        ui.close();
                     }
                 }
-                if ui
-                    .button("LFO…")
+                if crate::widgets::menu_item(ui, Some(G::Lfo), "LFO…", "Alt+O")
                     .on_hover_text("Writes an LFO curve into an automation source")
                     .clicked()
                 {
@@ -743,17 +837,21 @@ impl PianoRoll {
                 ui.separator();
                 open(
                     ui,
+                    G::Transpose,
                     "Transpose…",
+                    "Alt+T",
                     Dialog::Transpose {
                         semitones: 0,
                         octaves: 0,
                     },
                     any,
                 );
-                open(ui, "Scale…", Dialog::Scale { scale, highlight }, true);
+                open(ui, G::Scale, "Scale…", "Alt+K", Dialog::Scale { scale, highlight }, true);
                 open(
                     ui,
+                    G::Settings,
                     "Note properties…",
+                    "Alt+Enter",
                     Dialog::Properties(Props::of(&target)),
                     any,
                 );
@@ -762,9 +860,7 @@ impl PianoRoll {
                 ui.menu_button("Scripts", |ui| {
                     script = crate::scripts::menu(ui, &self.scripts, has_last);
                 });
-            })
-            .response
-            .on_hover_text("Note tools: they work on the selection, or on every note");
+            });
             if let Some(d) = chosen {
                 self.dialog = Some(d);
             }
@@ -773,19 +869,6 @@ impl PianoRoll {
             }
             if script.is_some() {
                 out.script = script;
-            }
-            if ui
-                .button("Import MIDI…")
-                .on_hover_text(format!(
-                    "The notes of a MIDI file at the caret ({}); or drop a .mid file here",
-                    crate::bindings::IMPORT_MIDI.label()
-                ))
-                .clicked()
-            {
-                out.midi = Some(MidiRequest::Pick);
-            }
-            if ui.button("Close").clicked() {
-                out.close = true;
             }
         });
     }
@@ -912,12 +995,23 @@ impl PianoRoll {
             for k in first_key..=last_key {
                 let y = y_of(k);
                 let row = Rect::from_min_size(pos2(grid.left(), y), vec2(grid_w, key_h));
+                // UI-RD §1.1: indigo scale rows, the tonic brighter with
+                // a 3 px accent on the left.
+                let tonic = self.scale.is_some_and(|s| k % 12 == s.tonic % 12);
                 let base = match self.scale {
-                    Some(s) if s.contains(k) => Color32::from_rgb(0x18, 0x24, 0x1F),
+                    Some(_) if tonic => theme::SCALE_TONIC,
+                    Some(s) if s.contains(k) => theme::SCALE_ROW,
                     _ if is_black(k) => Color32::from_rgb(0x12, 0x14, 0x18),
                     _ => Color32::from_rgb(0x16, 0x19, 0x1D),
                 };
                 painter.rect_filled(row, CornerRadius::ZERO, base);
+                if tonic {
+                    painter.rect_filled(
+                        Rect::from_min_size(row.min, vec2(3.0, key_h)),
+                        CornerRadius::ZERO,
+                        theme::SCALE_ACCENT,
+                    );
+                }
                 let line = if k % 12 == 0 {
                     theme::LINE_STRONG
                 } else {
@@ -987,12 +1081,12 @@ impl PianoRoll {
                     painter.rect_filled(
                         r,
                         CornerRadius::same(3),
-                        theme::TEAL.gamma_multiply(0.35 + 0.5 * n.velocity),
+                        theme::PREVIEW.gamma_multiply(0.35 + 0.5 * n.velocity),
                     );
                     painter.rect_stroke(
                         r,
                         CornerRadius::same(3),
-                        Stroke::new(1.0, theme::TEAL),
+                        Stroke::new(1.0, theme::PREVIEW),
                         StrokeKind::Inside,
                     );
                 }
@@ -1027,6 +1121,17 @@ impl PianoRoll {
                 };
                 painter.rect_filled(r, CornerRadius::same(3), fill);
                 painter.rect_stroke(r, CornerRadius::same(3), stroke, StrokeKind::Inside);
+                // UI-RD §10.8: a note outside the highlighted scale.
+                if let Some(sc) = self.scale
+                    && !sc.contains(n.key)
+                {
+                    painter.rect_stroke(
+                        r,
+                        CornerRadius::same(3),
+                        Stroke::new(2.0, theme::OUT_OF_SCALE),
+                        StrokeKind::Outside,
+                    );
+                }
                 if n.slide {
                     // Towards its key from the note it glides (§7.2).
                     let from = notes
@@ -1117,34 +1222,117 @@ impl PianoRoll {
                 );
             }
 
-            // Keyboard, pinned to the left edge of the view.
+            // Keyboard, pinned to the left edge of the view (UI-RD §5):
+            // every key named, soft gradients, a firm line only at C.
             for k in first_key..=last_key {
                 let y = y_of(k);
                 let r = Rect::from_min_size(pos2(kb_left, y), vec2(KEYBOARD_W, key_h));
                 let held = self.sounding == Some(k);
-                let (c, t) = if held {
-                    (theme::AMBER, theme::ON_AMBER)
-                } else if is_black(k) {
-                    (Color32::from_rgb(0x1A, 0x1D, 0x21), theme::MUTED)
+                let black = is_black(k);
+                let (top, bottom, t) = if held {
+                    (theme::AMBER, Color32::from_rgb(0xE8, 0xA7, 0x3A), theme::ON_AMBER)
+                } else if black {
+                    (
+                        Color32::from_rgb(0x26, 0x2A, 0x30),
+                        Color32::from_rgb(0x16, 0x19, 0x1D),
+                        theme::MUTED,
+                    )
                 } else {
                     (
-                        Color32::from_rgb(0xD9, 0xDD, 0xE2),
-                        Color32::from_rgb(0x1A, 0x1D, 0x21),
+                        Color32::from_rgb(0xE6, 0xE9, 0xED),
+                        Color32::from_rgb(0xC4, 0xC9, 0xCF),
+                        Color32::from_rgb(0x3A, 0x40, 0x47),
                     )
                 };
-                painter.rect_filled(r, CornerRadius::ZERO, c);
-                painter.line_segment(
-                    [r.left_bottom(), r.right_bottom()],
-                    Stroke::new(1.0, theme::LINE),
-                );
-                if k % 12 == 0 || held {
+                let mut mesh = egui::Mesh::default();
+                let kr = if black && !held {
+                    Rect::from_min_max(r.min, pos2(r.right() - 16.0, r.bottom()))
+                } else {
+                    r
+                };
+                if black && !held {
+                    // The white key under a black one shows to its right.
+                    painter.rect_filled(r, CornerRadius::ZERO, Color32::from_rgb(0xC9, 0xCE, 0xD4));
+                }
+                mesh.add_colored_rect(kr, top);
+                let n = mesh.vertices.len();
+                // Gradient: left light, right darker.
+                mesh.vertices[n - 3].color = bottom;
+                mesh.vertices[n - 1].color = bottom;
+                painter.add(mesh);
+                let sep = if k % 12 == 0 {
+                    Stroke::new(1.0, Color32::from_rgb(0x5A, 0x62, 0x6C))
+                } else {
+                    Stroke::new(1.0, Color32::from_black_alpha(40))
+                };
+                painter.line_segment([r.left_bottom(), r.right_bottom()], sep);
+                if key_h >= 9.0 || k % 12 == 0 || held {
+                    let font = if k % 12 == 0 { theme::strong(9.0) } else { theme::mono(8.5) };
                     painter.text(
                         pos2(r.right() - 4.0, r.center().y),
                         egui::Align2::RIGHT_CENTER,
                         key_name(k),
-                        FontId::proportional(9.5),
-                        t,
+                        font,
+                        if black && !held { theme::MUTED } else { t },
                     );
+                }
+                // Scale keys: a green dot (SCALE_UI).
+                if let Some(sc) = self.scale
+                    && sc.contains(k)
+                    && !held
+                {
+                    painter.circle_filled(pos2(r.left() + 6.0, r.center().y), 2.2, theme::SCALE_UI);
+                }
+            }
+            // The selection summary in the bottom-right corner (UI-RD §5).
+            if self.selection.len() > 1 || (self.selection.len() == 1 && self.drag.is_none()) {
+                let sel = &self.selection;
+                let start = sel.iter().map(|n| n.start).min().unwrap_or(0);
+                let same = |f: &dyn Fn(&Note) -> u32| {
+                    let v = f(&sel[0]);
+                    sel.iter().all(|n| f(n) == v).then_some(v)
+                };
+                let length = same(&|n| n.length)
+                    .map_or_else(|| "mixed".to_owned(), |l| length_text(l, self.sig.beat_ticks()));
+                let pitch = same(&|n| u32::from(n.key))
+                    .map_or_else(|| "mixed".to_owned(), |k| key_name(k as u8));
+                let vel = same(&|n| (n.velocity * 127.0).round() as u32)
+                    .map_or_else(|| "mixed".to_owned(), |v| v.to_string());
+                let rows = [
+                    ("Start", crate::toolbar::bars_text(u64::from(start), self.sig)),
+                    ("Length", length),
+                    ("Pitch", pitch),
+                    ("Velocity", vel),
+                ];
+                let card = Rect::from_min_size(
+                    pos2(clip.right() - 232.0, clip.bottom() - 112.0),
+                    vec2(220.0, 100.0),
+                );
+                painter.rect(
+                    card,
+                    9.0,
+                    Color32::from_rgba_unmultiplied(0x13, 0x16, 0x1A, 240),
+                    Stroke::new(1.0, theme::LINE_STRONG),
+                    egui::StrokeKind::Inside,
+                );
+                crate::icons::paint_with(
+                    &painter,
+                    crate::icons::Glyph::Select,
+                    Rect::from_min_size(card.min + vec2(12.0, 10.0), vec2(12.0, 12.0)),
+                    theme::BLUE,
+                );
+                let n = sel.len();
+                painter.text(
+                    card.min + vec2(30.0, 9.0),
+                    egui::Align2::LEFT_TOP,
+                    if n == 1 { "1 note selected".to_owned() } else { format!("{n} notes selected") },
+                    theme::strong(11.5),
+                    theme::TEXT,
+                );
+                for (i, (k, v)) in rows.iter().enumerate() {
+                    let y = card.top() + 32.0 + i as f32 * 16.0;
+                    painter.text(pos2(card.left() + 12.0, y), egui::Align2::LEFT_TOP, *k, FontId::proportional(10.5), theme::MUTED);
+                    painter.text(pos2(card.left() + 110.0, y), egui::Align2::LEFT_TOP, v, theme::mono(10.5), theme::TEXT);
                 }
             }
             painter.rect_filled(
@@ -1185,21 +1373,12 @@ impl PianoRoll {
             if let Some(c) = shown {
                 let x = grid.left() + c as f32 * px_tick;
                 if x >= kb_left + KEYBOARD_W {
-                    painter.add(egui::Shape::convex_polygon(
-                        vec![
-                            pos2(x - 6.0, ruler_top + RULER_H - 9.0),
-                            pos2(x + 6.0, ruler_top + RULER_H - 9.0),
-                            pos2(x, ruler_top + RULER_H),
-                        ],
-                        theme::AMBER,
-                        Stroke::NONE,
-                    ));
-                    painter.add(egui::Shape::dashed_line(
-                        &[pos2(x, ruler_top + RULER_H), pos2(x, grid.bottom())],
-                        Stroke::new(1.0, theme::AMBER.gamma_multiply(0.7)),
-                        4.0,
-                        4.0,
-                    ));
+                    crate::widgets::caret(
+                        &painter,
+                        x,
+                        Rect::from_min_max(pos2(x - 6.0, ruler_top), pos2(x + 6.0, ruler_top + RULER_H)),
+                        Rect::from_min_max(pos2(x, ruler_top + RULER_H), pos2(x, grid.bottom())),
+                    );
                 }
             }
 
@@ -1835,24 +2014,45 @@ impl PianoRoll {
         out: &mut PianoOutput,
     ) {
         ui.horizontal(|ui| {
-            egui::ComboBox::from_id_salt("lane_prop")
-                .selected_text("Velocity")
-                .show_ui(ui, |ui| {
-                    let _ = ui.selectable_label(true, "Velocity");
-                });
+            ui.add_space(4.0);
+            let (r, _) = ui.allocate_exact_size(vec2(13.0, 13.0), Sense::hover());
+            crate::icons::paint(ui, crate::icons::Glyph::Delay, r, theme::MUTED);
+            crate::widgets::caption(ui, "Velocity");
             ui.label(
-                RichText::new(
-                    "Pan, pitch and other note properties appear here once the engine supports them",
-                )
-                .size(11.0)
-                .color(theme::MUTED),
+                RichText::new("Pan, pitch and other note properties come with engine support")
+                    .size(10.5)
+                    .color(theme::DIM),
             );
-            ui.separator();
-            ui.label(RichText::new("Several notes:").size(11.0).color(theme::MUTED));
-            ui.selectable_value(&mut self.relative, true, "Relative")
-                .on_hover_text("Dragging one selected note scales all selected velocities");
-            ui.selectable_value(&mut self.relative, false, "Same value")
-                .on_hover_text("Dragging sets every selected note to the same velocity");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                crate::widgets::segmented(ui, |ui| {
+                    use crate::widgets::{Look, button};
+                    if button(
+                        ui,
+                        None,
+                        "Same value",
+                        !self.relative,
+                        Look::Raised,
+                        "Dragging sets every selected note to the same velocity",
+                    )
+                    .clicked()
+                    {
+                        self.relative = false;
+                    }
+                    if button(
+                        ui,
+                        None,
+                        "Relative",
+                        self.relative,
+                        Look::Raised,
+                        "Dragging one selected note scales all selected velocities",
+                    )
+                    .clicked()
+                    {
+                        self.relative = true;
+                    }
+                });
+                ui.label(RichText::new("Several notes").size(10.5).color(theme::DIM));
+            });
         });
         let (lane, lane_resp) = ui.allocate_exact_size(
             vec2(ui.available_width(), LANE_H - 30.0),
@@ -1871,25 +2071,65 @@ impl PianoRoll {
         let h_max = lane.height() - 10.0;
         let x0 = lane.left() + KEYBOARD_W - h_offset;
         let bar_x = |n: &Note| x0 + n.start as f32 * px_tick;
+        // UI-RD §5: 25 / 50 / 75 / 100 % lines labelled 32 / 64 / 96 / 127.
+        for (f, label) in [(0.25, "32"), (0.5, "64"), (0.75, "96"), (1.0, "127")] {
+            let y = lane.bottom() - 4.0 - h_max * f;
+            let a = pos2(lane.left() + KEYBOARD_W, y);
+            let b = pos2(lane.right() - 26.0, y);
+            if f < 1.0 {
+                painter.add(egui::Shape::dashed_line(
+                    &[a, b],
+                    Stroke::new(1.0, Color32::from_rgb(0x26, 0x2B, 0x32)),
+                    4.0,
+                    4.0,
+                ));
+            } else {
+                painter.line_segment([a, b], Stroke::new(1.0, theme::LINE));
+            }
+            painter.text(
+                pos2(lane.right() - 4.0, y),
+                egui::Align2::RIGHT_CENTER,
+                label,
+                theme::mono(8.5),
+                theme::DIM,
+            );
+        }
+        painter.text(
+            pos2(lane.left() + KEYBOARD_W / 2.0, lane.center().y),
+            egui::Align2::CENTER_CENTER,
+            "VEL",
+            FontId::proportional(9.0),
+            theme::DIM,
+        );
         for n in notes {
-            let x = bar_x(n);
-            if x < lane.left() + KEYBOARD_W - 2.0 || x > lane.right() {
+            let x = bar_x(n) + 2.5;
+            if x < lane.left() + KEYBOARD_W || x > lane.right() - 26.0 {
                 continue;
             }
             let h = h_max * n.velocity;
-            let c = if self.selection.contains(n) {
+            let selected = self.selection.contains(n);
+            let c = if selected {
                 SELECTED
+            } else if n.slide {
+                theme::SLIDE
             } else {
                 theme::AMBER
             };
-            painter.rect_filled(
-                Rect::from_min_max(
-                    pos2(x, lane.bottom() - 4.0 - h),
-                    pos2(x + 5.0, lane.bottom() - 4.0),
-                ),
-                CornerRadius::same(2),
-                c,
+            let top = lane.bottom() - 4.0 - h;
+            painter.line_segment(
+                [pos2(x, top), pos2(x, lane.bottom() - 4.0)],
+                Stroke::new(3.0, c.gamma_multiply(0.75)),
             );
+            painter.circle_filled(pos2(x, top), 4.5, c);
+            if selected {
+                painter.text(
+                    pos2(x + 7.0, top),
+                    egui::Align2::LEFT_CENTER,
+                    format!("{:.0}", n.velocity * 127.0),
+                    theme::mono(9.0),
+                    theme::TEXT,
+                );
+            }
         }
         let value_at = |p: Pos2| ((lane.bottom() - 4.0 - p.y) / h_max).clamp(0.0, 1.0);
         let near = |n: &Note, p: Pos2| (bar_x(n) + 2.5 - p.x).abs() < 6.0;
@@ -1975,6 +2215,60 @@ impl PianoRoll {
         }
         if self.typing {
             self.play_typing(ui, host);
+        }
+        // UI-RD §10.6: keys of the Tools menu.
+        if !self.typing {
+            let any = !notes.is_empty();
+            for t in crate::note_tools_ui::menu_tools(self.last_grid)
+                .into_iter()
+                .flatten()
+            {
+                let enabled = any
+                    || t.is_generator()
+                    || matches!(t, jdance_commands::note_tools::Tool::Randomize(_));
+                if let Some(k) = crate::note_tools_ui::keys(&t)
+                    && crate::note_tools_ui::take_keys(&ctx, k)
+                    && enabled
+                {
+                    self.start_tool(&ctx, t, pattern, notes, out);
+                    return;
+                }
+            }
+            let alt = |key| crate::note_tools_ui::take_keys(&ctx, (false, false, true, key));
+            if alt(Key::O) {
+                out.lfo = Some(jdance_commands::note_tools::Range {
+                    start: 0,
+                    end: pattern.length_ticks() as u32,
+                });
+                return;
+            }
+            if alt(Key::T) && any {
+                self.dialog = Some(Dialog::Transpose {
+                    semitones: 0,
+                    octaves: 0,
+                });
+                return;
+            }
+            if alt(Key::K) {
+                let scale = self.scale.unwrap_or(Scale {
+                    tonic: 0,
+                    mode: ScaleMode::Major,
+                });
+                self.dialog = Some(Dialog::Scale {
+                    scale,
+                    highlight: self.scale.is_some(),
+                });
+                return;
+            }
+            if alt(Key::Enter) && any {
+                let target: Vec<Note> = if self.selection.is_empty() {
+                    notes.to_vec()
+                } else {
+                    self.selection.clone()
+                };
+                self.dialog = Some(Dialog::Properties(Props::of(&target)));
+                return;
+            }
         }
         let sel = indices(notes, &self.selection);
         // The system turns Ctrl+C / X / V into clipboard events; the keys

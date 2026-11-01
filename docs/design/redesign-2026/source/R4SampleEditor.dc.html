@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>R4 · Sample Editor</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#2B3038}
+button{font-family:inherit;cursor:pointer}
+</style>
+</helmet>
+<div style="width:1080px;height:600px;box-sizing:border-box;background:#2B3038;padding:20px;font-family:'IBM Plex Sans',sans-serif;font-size:12px;color:#E9ECEF">
+<div style="width:1040px;height:560px;display:flex;flex-direction:column;border-radius:10px;overflow:hidden;background:#171A1E;border:1px solid #39404A;box-shadow:0 18px 50px rgba(0,0,0,.5)">
+
+<!-- Title bar -->
+<div style="height:34px;flex:none;display:flex;align-items:center;gap:8px;padding:0 6px 0 12px;background:#13161A;border-bottom:1px solid #2A3037">
+<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#A7AFB8" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="{{ic.wave}}"></path></svg>
+<span style="font-weight:600;font-size:13px">Sample Editor</span>
+<span style="color:#7E8792">›</span>
+<span style="font-family:'IBM Plex Mono',monospace;font-size:12px">vocal_chop.wav</span>
+<span style="height:20px;padding:0 7px;border-radius:10px;background:#1E2A22;color:#8FD19E;font-size:10.5px;display:flex;align-items:center;gap:4px"><svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="#8FD19E" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M2 4h6M10 4h4M2 8h3M7 8h7M2 12h8"></path></svg>audio clip · Vox</span>
+<div style="flex:1"></div>
+<button aria-label="Dock" title="Dock back" style="width:26px;height:26px;border:0;border-radius:6px;background:transparent;display:flex;align-items:center;justify-content:center"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#A7AFB8" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ic.dock}}"></path></svg></button>
+<button aria-label="Close" style="width:26px;height:26px;border:0;border-radius:6px;background:transparent;display:flex;align-items:center;justify-content:center"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="#A7AFB8" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"></path></svg></button>
+</div>
+
+<!-- Toolbar -->
+<div style="height:46px;flex:none;display:flex;align-items:center;gap:8px;padding:0 10px;border-bottom:1px solid #2A3037">
+<div style="display:flex;background:#0F1215;border:1px solid #2A3037;border-radius:8px;padding:2px;gap:2px">
+<button aria-label="Play" title="Play the selection, the clip range or the whole file" style="width:32px;height:28px;border:0;border-radius:6px;background:#F5B544;display:flex;align-items:center;justify-content:center"><svg width="11" height="11" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 1v10L11 6z" fill="#1B1405"></path></svg></button>
+<button aria-label="Stop" style="width:32px;height:28px;border:0;border-radius:6px;background:transparent;display:flex;align-items:center;justify-content:center"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><rect width="10" height="10" rx="1.5" fill="#E9ECEF"></rect></svg></button>
+</div>
+<div style="display:flex;align-items:center;gap:6px;height:30px;padding:0 10px;border-radius:7px;background:#0F1215;border:1px solid #2A3037;font-family:'IBM Plex Mono',monospace;font-size:11px;color:#A7AFB8">
+<span>2.418 s</span><span style="color:#39404A">·</span><span>48 kHz</span><span style="color:#39404A">·</span><span>stereo</span><span style="color:#39404A">·</span><span>24-bit</span>
+</div>
+<span style="display:flex;align-items:center;gap:6px;height:26px;padding:0 4px 0 10px;border-radius:13px;background:#1F3550;color:#BBD9FF;font-family:'IBM Plex Mono',monospace;font-size:11px"><svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="#BBD9FF" stroke-width="1.6" aria-hidden="true"><path d="{{ic.select}}"></path></svg>0.612 – 1.380 s<button aria-label="Clear selection" style="width:20px;height:20px;border:0;border-radius:50%;background:rgba(255,255,255,.08);display:flex;align-items:center;justify-content:center"><svg width="9" height="9" viewBox="0 0 16 16" fill="none" stroke="#BBD9FF" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"></path></svg></button></span>
+<div style="flex:1"></div>
+<button title="Trims this clip only; other clips and the file stay" style="height:30px;padding:0 10px;border:1px solid #39404A;border-radius:7px;background:#252A30;color:#E9ECEF;font-size:11.5px;display:flex;align-items:center;gap:6px"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#E9ECEF" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M2 3v10M14 3v10M2 8h12M5 5.5L2 8l3 2.5M11 5.5L14 8l-3 2.5"></path></svg>Use as clip range</button>
+<button title="New audio clip of this range at the playhead" style="height:30px;padding:0 10px;border:1px solid #39404A;border-radius:7px;background:#252A30;color:#E9ECEF;font-size:11.5px;display:flex;align-items:center;gap:6px"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#E9ECEF" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M2 4h6M10 4h4M2 8h3M7 8h7M2 12h8M12 10v4M10 12h4"></path></svg>Place in Playlist</button>
+<div style="display:flex;border:1px solid #39404A;border-radius:7px;overflow:hidden">
+<button title="Load the range into a sampler channel" style="height:28px;padding:0 10px;border:0;background:#F5B544;color:#1B1405;font-size:11.5px;font-weight:600;display:flex;align-items:center;gap:6px"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#1B1405" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M2 3h12M2 6.5h12M2 10h7M12 9v5M9.5 11.5H14"></path></svg>Load into Sampler</button>
+<button aria-label="Target channel" title="Target: new sampler channel" style="height:28px;padding:0 8px;border:0;border-left:1px solid #C8913A;background:#E8A73A;color:#1B1405;font-size:11px;display:flex;align-items:center;gap:4px">New<svg width="9" height="9" viewBox="0 0 10 10" aria-hidden="true"><path d="M2 4l3 3 3-3" stroke="#1B1405" stroke-width="1.4" fill="none"></path></svg></button>
+</div>
+</div>
+
+<!-- Overview / scroll-zoom bar -->
+<div style="height:26px;flex:none;padding:5px 10px 0;display:flex;align-items:center;gap:8px">
+<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#7E8792" stroke-width="1.5" aria-hidden="true"><path d="{{ic.zoom}}"></path></svg>
+<div style="flex:1;height:18px;border-radius:5px;background:#0F1215;border:1px solid #2A3037;position:relative;overflow:hidden">
+<svg width="100%" height="18" viewBox="0 0 900 18" preserveAspectRatio="none" aria-hidden="true" style="position:absolute;inset:0"><path d="{{mini}}" fill="#39404A"></path></svg>
+<div title="Drag to scroll, drag an edge to zoom" style="position:absolute;left:4%;width:62%;top:0;bottom:0;border:1.5px solid #A7AFB8;border-radius:4px;background:rgba(233,236,239,.06)"></div>
+</div>
+<span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:#7E8792;width:34px">×1.6</span>
+</div>
+
+<!-- Ruler -->
+<div style="height:22px;flex:none;margin:6px 10px 0 48px;position:relative;border-bottom:1px solid #2A3037">
+<sc-for list="{{ticks}}" as="t" hint-placeholder-count="12"><span style="{{t.style}}">{{t.n}}</span></sc-for>
+</div>
+
+<!-- Waveform L/R -->
+<div style="flex:1;min-height:0;display:flex;margin:0 10px">
+<div style="width:38px;flex:none;display:flex;flex-direction:column;font-family:'IBM Plex Mono',monospace;font-size:10px;color:#7E8792">
+<span style="flex:1;display:flex;align-items:center">L</span><span style="flex:1;display:flex;align-items:center">R</span>
+</div>
+<div style="flex:1;position:relative;border-radius:6px;background:#0F1215;overflow:hidden">
+<div style="position:absolute;left:0;right:0;top:50%;height:1px;background:#2A3037"></div>
+<!-- clip range dim outside -->
+<div style="position:absolute;left:0;width:9%;top:0;bottom:0;background:rgba(14,16,19,.7)"></div>
+<div style="position:absolute;left:86%;right:0;top:0;bottom:0;background:rgba(14,16,19,.7)"></div>
+<!-- selection -->
+<div style="position:absolute;left:25.3%;width:31.7%;top:0;bottom:0;background:rgba(90,169,255,.16);border-left:1px solid #5AA9FF;border-right:1px solid #5AA9FF"></div>
+<svg width="100%" height="100%" viewBox="0 0 900 300" preserveAspectRatio="none" role="img" aria-label="Stereo waveform" style="position:absolute;inset:0">
+<defs><linearGradient id="se" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7DBBFF"></stop><stop offset=".5" stop-color="#3D7CC4"></stop><stop offset="1" stop-color="#7DBBFF"></stop></linearGradient></defs>
+<path d="{{waveL}}" fill="url(#se)"></path>
+<path d="{{waveR}}" fill="url(#se)"></path>
+</svg>
+<!-- IN / OUT markers -->
+<div style="position:absolute;left:9%;top:0;bottom:0;width:2px;background:#8FD19E"></div>
+<span style="position:absolute;left:9%;top:6px;margin-left:4px;font-size:9.5px;font-weight:600;color:#0E1013;background:#8FD19E;padding:1px 5px;border-radius:3px">IN</span>
+<div style="position:absolute;left:86%;top:0;bottom:0;width:2px;background:#8FD19E"></div>
+<span style="position:absolute;left:86%;top:6px;margin-left:-30px;font-size:9.5px;font-weight:600;color:#0E1013;background:#8FD19E;padding:1px 5px;border-radius:3px">OUT</span>
+<!-- preview head -->
+<div style="position:absolute;left:41%;top:0;bottom:0;width:2px;background:#F2F4F6"></div>
+</div>
+</div>
+
+<!-- Footer -->
+<div style="height:30px;flex:none;display:flex;align-items:center;gap:16px;padding:0 12px;margin-top:8px;border-top:1px solid #2A3037;font-size:10.5px;color:#7E8792">
+<span style="display:flex;align-items:center;gap:5px;font-family:'IBM Plex Mono',monospace;color:#A7AFB8">clip 0.218 – 2.080 s · 89 360 frames</span>
+<div style="flex:1"></div>
+<span>Drag — select</span><span>Drag IN / OUT — clip range</span><span>Ctrl+wheel — zoom</span><span>Nothing here changes the file on disk</span>
+</div>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1080,"height":600}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const ic = {
+      wave: 'M1 8h2l1.5-4 2 8 2-10 2 9 1.5-3H15',
+      dock: 'M6 2H2v12h12v-4M14 2L8 8M8 4v4h4',
+      select: 'M2 2h3M7 2h2M11 2h3v3M14 7v2M14 11v3h-3M9 14H7M5 14H2v-3M2 9V7M2 5V2',
+      zoom: 'M7 2.5a4.5 4.5 0 1 1 0 9 4.5 4.5 0 1 1 0-9zM10.5 10.5L14 14M5 7h4M7 5v4',
+    };
+    // Vocal-like phrase: syllable envelopes with noisy detail, min/max peaks.
+    const rnd = (i) => { const x = Math.sin(i * 12.9898) * 43758.5453; return x - Math.floor(x); };
+    const syll = [[0.10,0.22,0.9],[0.25,0.38,0.75],[0.42,0.55,1.0],[0.58,0.66,0.55],[0.70,0.84,0.85]];
+    const env = (t) => syll.reduce((m, [a, b, g]) => {
+      if (t < a || t > b) return m;
+      const u = (t - a) / (b - a);
+      return Math.max(m, g * Math.sin(Math.PI * Math.min(1, u * 1.4)) * (1 - 0.3 * u));
+    }, 0.015);
+    const lane = (cy, h, seed) => {
+      const top = [], bot = [];
+      for (let i = 0; i <= 450; i++) {
+        const x = i * 2, t = i / 450;
+        const e = env(t) * (0.55 + 0.45 * rnd(i + seed));
+        top.push(x + ' ' + (cy - e * h).toFixed(1));
+        bot.unshift(x + ' ' + (cy + e * h * (0.85 + 0.15 * rnd(i * 3 + seed))).toFixed(1));
+      }
+      return 'M' + top.join(' L') + ' L' + bot.join(' L') + ' Z';
+    };
+    const waveL = lane(75, 66, 1), waveR = lane(225, 66, 7);
+    const mtop = [], mbot = [];
+    for (let i = 0; i <= 300; i++) { const x = i * 3, e = env(i / 300); mtop.push(x + ' ' + (9 - e * 8).toFixed(1)); mbot.unshift(x + ' ' + (9 + e * 8).toFixed(1)); }
+    const mini = 'M' + mtop.join(' L') + ' L' + mbot.join(' L') + ' Z';
+    const ticks = Array.from({ length: 13 }, (_, i) => ({ n: (i * 0.2).toFixed(1) + 's', style: 'position:absolute;bottom:3px;left:' + (i * 100 / 12.4).toFixed(2) + '%;font-family:IBM Plex Mono,monospace;font-size:9.5px;color:#7E8792;border-left:1px solid #39404A;padding-left:3px' }));
+    return { ic, waveL, waveR, mini, ticks };
+  }
+}
+</script>
+</body>
+</html>

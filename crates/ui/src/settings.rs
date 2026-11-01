@@ -237,10 +237,7 @@ impl SettingsWindow {
         ui.horizontal(|ui| {
             let key = self.key();
             let can_apply = key.is_some() && matches!(self.caps, Some(Ok(_)));
-            if ui
-                .add_enabled(can_apply, egui::Button::new("Apply"))
-                .clicked()
-            {
+            if crate::widgets::primary_button(ui, "Apply", can_apply).clicked() {
                 let settings = DeviceSettings {
                     sample_rate: self.sample_rate,
                     buffer: self.buffer,

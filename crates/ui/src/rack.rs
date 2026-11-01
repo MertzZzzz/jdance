@@ -18,6 +18,7 @@
 //! Drawing collects edits into [`RackOutput`]; the caller applies them after
 //! the frame so the document is never borrowed mutably while drawn.
 
+use crate::widgets::Hint;
 use crate::widgets::{knob, lamp};
 use crate::{Host, SampleStatus, theme};
 use egui::{CornerRadius, Rect, RichText, Sense, Stroke, StrokeKind, pos2, vec2};
@@ -30,14 +31,25 @@ use jdance_plugin_api::PluginDescriptor;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-const STEP_W: f32 = 26.0;
+const STEP_W: f32 = 23.0;
 const STEP_H: f32 = 28.0;
-const NAME_W: f32 = 150.0;
+const NAME_W: f32 = 180.0;
+/// Extra room between groups of four steps (UI-RD §3).
+const GROUP_GAP: f32 = 5.0;
+/// Row height (UI-RD §3).
+const ROW_H: f32 = 36.0;
+
+/// Width of `n` steps with their gaps.
+fn steps_width(n: u32) -> f32 {
+    n as f32 * (STEP_W + 3.0) - 3.0 + (n.saturating_sub(1) / 4) as f32 * GROUP_GAP
+}
 /// Velocity change per wheel notch.
 const WHEEL_VELOCITY: f32 = 0.05;
 
 #[derive(Debug, Default)]
 pub(crate) struct RackOutput {
+    /// The header's Undock / Close (UI-RD §10.1).
+    pub header: crate::widgets::HeaderOut,
     pub edits: Vec<(Edit, bool)>,
     pub end_gesture: bool,
     /// New channels to create: name and optional sample.
@@ -113,6 +125,8 @@ struct Paint {
 /// Rack state kept between frames.
 #[derive(Debug, Default)]
 pub(crate) struct RackView {
+    /// Undock / Close in the header; the app sets them each frame.
+    pub window_buttons: crate::widgets::WindowButtons,
     pub selection: BTreeSet<ChannelId>,
     /// Last clicked channel, the anchor of Shift ranges.
     anchor: Option<ChannelId>,
@@ -184,23 +198,22 @@ impl RackView {
             .auto_shrink([false, true])
             .show(ui, |ui| {
                 crate::widgets::middle_pan(ui);
+                ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     let label = |ui: &mut egui::Ui, w: f32, t: &str| {
-                        ui.add_sized(
-                            [w, 14.0],
-                            egui::Label::new(RichText::new(t).size(10.5).color(theme::MUTED)),
-                        );
+                        ui.add_sized([w, 14.0], egui::Label::new(crate::widgets::caption_text(t)));
                     };
-                    label(ui, 20.0, "ON");
-                    label(ui, 30.0, "PAN");
-                    label(ui, 30.0, "VOL");
-                    label(ui, 40.0, "MIXER");
-                    label(ui, NAME_W, "CHANNEL");
-                    ui.label(
-                        RichText::new("STEPS · velocity is the fill height; wheel to change")
-                            .size(10.5)
-                            .color(theme::MUTED),
+                    ui.add_space(8.0);
+                    label(ui, 20.0, "On");
+                    label(ui, 22.0, "Pan");
+                    label(ui, 22.0, "Vol");
+                    label(ui, 44.0, "Mixer");
+                    ui.add_space(4.0);
+                    ui.add_sized(
+                        [NAME_W + 30.0, 14.0],
+                        egui::Label::new(crate::widgets::caption_text("Channel")).halign(egui::Align::Min),
                     );
+                    ui.label(crate::widgets::caption_text("Steps · height = velocity · wheel to change"));
                 });
                 let now = ui.input(|i| i.time);
                 if self.reveal.is_some_and(|(_, until)| now > until) {
@@ -213,23 +226,22 @@ impl RackView {
                     let selected = self.selection.contains(&ch.id);
                     let revealed = self.reveal.is_some_and(|(id, _)| id == ch.id);
                     let color = theme::rgb(color_or_default(ch.color, index));
+                    // UI-RD §3: a 36 px row; selection is a 4 px blue
+                    // strip on the left and a faint ground.
                     let frame = egui::Frame::new()
-                        .inner_margin(egui::Margin::symmetric(6, 3))
+                        .inner_margin(egui::Margin { left: 8, right: 6, top: 4, bottom: 4 })
                         .corner_radius(6)
                         .fill(if revealed {
                             theme::BLUE.gamma_multiply(0.35)
                         } else if selected {
-                            egui::Color32::from_rgb(0x1A, 0x27, 0x38)
+                            egui::Color32::from_rgb(0x1A, 0x26, 0x35)
                         } else {
                             egui::Color32::TRANSPARENT
-                        })
-                        .stroke(if selected {
-                            Stroke::new(1.0, egui::Color32::from_rgb(0x2F, 0x5C, 0x8F))
-                        } else {
-                            Stroke::NONE
                         });
                     let row = frame.show(ui, |ui| {
+                        ui.set_min_height(ROW_H - 8.0);
                         ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 6.0;
                             if lamp(ui, !ch.muted)
                                 .on_hover_text(if ch.muted {
                                     "Muted: click to unmute"
@@ -242,7 +254,7 @@ impl RackView {
                                     .push((Edit::SetChannelMuted(ch.id, !ch.muted), false));
                             }
                             let mut pan = ch.pan;
-                            let r = knob(ui, &mut pan, -1.0..=1.0, 0.0, theme::TEXT, 30.0)
+                            let r = knob(ui, &mut pan, -1.0..=1.0, 0.0, theme::TEXT, 22.0)
                                 .on_hover_text(format!(
                                     "Pan {} (drag; double-click centers)",
                                     pan_text(ch.pan)
@@ -255,7 +267,7 @@ impl RackView {
                             // Audio channels start at unity (ACH-001).
                             let default = if ch.is_audio() { 1.0 } else { 0.8 };
                             let r =
-                                knob(ui, &mut vol, 0.0..=MAX_VOLUME, default, theme::AMBER, 30.0)
+                                knob(ui, &mut vol, 0.0..=MAX_VOLUME, default, theme::AMBER, 22.0)
                                     .on_hover_text(format!(
                                         "Volume {:.0}% (drag; double-click resets)",
                                         ch.volume * 100.0
@@ -266,6 +278,21 @@ impl RackView {
                             out.end_gesture |= r.drag_stopped();
                             self.track_box(ui, project, ch.id, ch.track, &mut out);
                             self.name_button(ui, project, index, color, host, dir, &mut out);
+                            // The channel's Piano Roll (UI-RD §3).
+                            ui.add_enabled_ui(!ch.is_audio(), |ui| {
+                                if crate::icons::icon_button_sized(
+                                    ui,
+                                    crate::icons::Glyph::PianoRoll,
+                                    false,
+                                    "Open the Piano Roll of this channel",
+                                    vec2(24.0, 24.0),
+                                    13.0,
+                                )
+                                .clicked()
+                                {
+                                    out.open_piano = Some(ch.id);
+                                }
+                            });
                             let notes = pattern.row(ch.id).is_some_and(|r| !r.notes.is_empty());
                             if ch.is_audio() {
                                 audio_strip(ui, project, ch, color, host, dir, &mut out);
@@ -285,6 +312,13 @@ impl RackView {
                         });
                     });
                     let rect = row.response.rect;
+                    if selected {
+                        ui.painter().rect_filled(
+                            Rect::from_min_size(rect.min, vec2(4.0, rect.height())),
+                            CornerRadius::same(2),
+                            theme::BLUE,
+                        );
+                    }
                     if revealed && std::mem::take(&mut self.scroll_pending) {
                         ui.scroll_to_rect(rect, Some(egui::Align::Center));
                     }
@@ -348,14 +382,39 @@ impl RackView {
                         dropped_on_row = true;
                     }
                 }
-                ui.add_space(6.0);
-                ui.label(
-                RichText::new(
-                    "Drop WAV or MP3 files here to add channels, or onto a channel to replace its sample; a MIDI file onto a channel puts its notes there",
-                )
-                .size(11.0)
-                .color(theme::MUTED),
-            );
+                ui.add_space(8.0);
+                // The drop zone (UI-RD §3): add buttons on the left, the
+                // drag hint on the right, dimmed.
+                let zone = egui::Frame::new()
+                    .inner_margin(egui::Margin::same(10))
+                    .corner_radius(8)
+                    .show(ui, |ui| {
+                        ui.set_width((ui.available_width() - 12.0).max(300.0));
+                        ui.horizontal(|ui| {
+                            use crate::icons::Glyph as G;
+                            use crate::widgets::{Look, button};
+                            if button(ui, Some(G::Sample), "Sampler", false, Look::Raised, "A new empty sampler channel").clicked() {
+                                out.new_channels
+                                    .push((format!("Channel {}", project.channels.len() + 1), None));
+                            }
+                            if button(ui, Some(G::Files), "Sampler from file…", false, Look::Raised, "A new sampler channel with a sample").clicked() {
+                                out.pick = Some(crate::library::PickFor::NewChannel);
+                            }
+                            if button(ui, Some(G::Plugins), "VST3 instrument…", false, Look::Raised, "A new channel with a VST3 instrument").clicked() {
+                                out.pick_instrument = true;
+                            }
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.label(
+                                    RichText::new("Drop WAV / MP3 / MIDI here, or onto a channel to replace its sample")
+                                        .size(11.0)
+                                        .color(theme::DIM),
+                                );
+                                let (r, _) = ui.allocate_exact_size(vec2(13.0, 13.0), Sense::hover());
+                                crate::icons::paint(ui, crate::icons::Glyph::Export, r, theme::DIM);
+                            });
+                        });
+                    });
+                dashed_rect(ui.painter(), zone.response.rect, theme::LINE_STRONG);
             });
 
         // Browser items dropped on empty rack space become new channels.
@@ -420,70 +479,117 @@ impl RackView {
         pattern: &Pattern,
         out: &mut RackOutput,
     ) {
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Channel Rack").font(theme::strong(14.0)));
-            ui.label(RichText::new(&pattern.name).color(theme::MUTED));
-            let per_bar = project.time_signature.steps_per_bar();
-            let bars = if pattern.length_steps.is_multiple_of(per_bar) {
-                format!("{}", pattern.length_steps / per_bar)
-            } else {
-                format!(
-                    "{:.2}",
-                    f64::from(pattern.length_steps) / f64::from(per_bar)
-                )
-            };
-            ui.label(
-                RichText::new(format!("{} steps · {bars} bar(s)", pattern.length_steps))
-                    .color(theme::MUTED),
-            );
-            if !self.selection.is_empty() {
+        use crate::icons::Glyph as G;
+        let per_bar = project.time_signature.steps_per_bar();
+        let bars = if pattern.length_steps.is_multiple_of(per_bar) {
+            format!("{}", pattern.length_steps / per_bar)
+        } else {
+            format!(
+                "{:.2}",
+                f64::from(pattern.length_steps) / f64::from(per_bar)
+            )
+        };
+        let bar_word = if bars == "1" { "bar" } else { "bars" };
+        let selected = self.selection.len();
+        let unused = project
+            .channels
+            .iter()
+            .filter(|c| c.is_audio() && project.channel_clips(c.id).next().is_none())
+            .count();
+        // UI-RD §3: Channel Rack › pattern, length, selection, filter,
+        // + Channel, clean up, Undock / Close.
+        out.header = crate::widgets::panel_header(
+            ui,
+            G::Rack,
+            "Channel Rack",
+            &[&pattern.name],
+            self.window_buttons,
+            |ui| {
                 ui.label(
-                    RichText::new(format!("{} selected", self.selection.len())).color(theme::BLUE),
+                    RichText::new(format!("{} st · {bars} {bar_word}", pattern.length_steps))
+                        .font(theme::mono(10.0))
+                        .color(theme::DIM),
                 );
-            }
-            egui::ComboBox::from_id_salt("rack_filter")
-                .width(96.0)
-                .selected_text(self.filter.name())
-                .show_ui(ui, |ui| {
-                    for f in [RackFilter::All, RackFilter::Instruments, RackFilter::Audio] {
-                        ui.selectable_value(&mut self.filter, f, f.name());
-                    }
-                })
-                .response
-                .on_hover_text("Show all channels, instruments only or audio channels only");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let unused = project
-                    .channels
-                    .iter()
-                    .filter(|c| c.is_audio() && project.channel_clips(c.id).next().is_none())
-                    .count();
-                if ui
-                    .add_enabled(unused > 0, egui::Button::new("Remove unused audio"))
-                    .on_hover_text(format!(
-                        "Remove the {unused} audio channel(s) without clips in the Playlist; \
-                         the files stay in the project"
-                    ))
-                    .clicked()
-                {
-                    out.remove_unused = true;
+                if selected > 0 {
+                    ui.label(
+                        RichText::new(format!("{selected} selected"))
+                            .size(11.0)
+                            .color(theme::BLUE),
+                    );
                 }
-                ui.menu_button("+ Channel", |ui| {
-                    if ui.button("Sampler channel").clicked() {
-                        out.new_channels
-                            .push((format!("Channel {}", project.channels.len() + 1), None));
-                        ui.close();
-                    }
-                    if ui.button("Sampler from a sample…").clicked() {
-                        out.pick = Some(crate::library::PickFor::NewChannel);
-                        ui.close();
-                    }
-                    if ui.button("Instrument (VST3)…").clicked() {
-                        out.pick_instrument = true;
-                        ui.close();
+                let filter = crate::widgets::chip(
+                    ui,
+                    Some(G::Filter),
+                    self.filter.name(),
+                    self.filter != RackFilter::All,
+                )
+                .hint("Show all channels, instruments only or audio channels only");
+                egui::Popup::menu(&filter).show(|ui| {
+                    for (f, g) in [
+                        (RackFilter::All, G::Rack),
+                        (RackFilter::Instruments, G::PianoRoll),
+                        (RackFilter::Audio, G::Sample),
+                    ] {
+                        if crate::widgets::menu_item(ui, Some(g), f.name(), "").clicked() {
+                            self.filter = f;
+                        }
                     }
                 });
-            });
-        });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    if ui
+                        .add_enabled_ui(unused > 0, |ui| {
+                            crate::icons::icon_button_sized(
+                                ui,
+                                G::CleanUp,
+                                false,
+                                &format!(
+                                    "Remove unused audio: the {unused} audio channel(s) without \
+                                     clips in the Playlist; the files stay in the project"
+                                ),
+                                egui::vec2(26.0, 24.0),
+                                14.0,
+                            )
+                        })
+                        .inner
+                        .clicked()
+                    {
+                        out.remove_unused = true;
+                    }
+                    let add = crate::widgets::button(
+                        ui,
+                        Some(G::New),
+                        "Channel",
+                        false,
+                        crate::widgets::Look::Raised,
+                        "Add a channel",
+                    );
+                    egui::Popup::menu(&add).show(|ui| {
+                        if crate::widgets::menu_item(ui, Some(G::Sample), "Sampler channel", "")
+                            .clicked()
+                        {
+                            out.new_channels
+                                .push((format!("Channel {}", project.channels.len() + 1), None));
+                        }
+                        if crate::widgets::menu_item(
+                            ui,
+                            Some(G::Files),
+                            "Sampler from a sample…",
+                            "",
+                        )
+                        .clicked()
+                        {
+                            out.pick = Some(crate::library::PickFor::NewChannel);
+                        }
+                        if crate::widgets::menu_item(ui, Some(G::Plugins), "Instrument (VST3)…", "")
+                            .clicked()
+                        {
+                            out.pick_instrument = true;
+                        }
+                    });
+                });
+            },
+        );
     }
 
     fn track_box(
@@ -550,46 +656,57 @@ impl RackView {
         } else {
             theme::RAISED
         };
-        painter.rect_filled(rect, CornerRadius::same(5), fill);
+        painter.rect_filled(rect, CornerRadius::same(6), fill);
+        // UI-RD §3: colour strip, type glyph, name, state badge.
         painter.rect_filled(
-            Rect::from_min_size(rect.min, vec2(4.0, rect.height())),
+            Rect::from_min_size(rect.min + vec2(0.0, 0.0), vec2(3.0, rect.height())),
             CornerRadius {
-                nw: 5,
-                sw: 5,
+                nw: 6,
+                sw: 6,
                 ne: 0,
                 se: 0,
             },
             color,
         );
-        let kind_color = match status {
-            Some(Some(SampleStatus::Failed(_))) => theme::ERROR,
-            Some(None) => theme::WARN,
-            Some(Some(SampleStatus::Loading)) => theme::MUTED,
-            _ => theme::MUTED,
+        let (kind_color, kind_text, glyph) = match status {
+            Some(Some(SampleStatus::Failed(_))) => {
+                (theme::ERROR, "missing", crate::icons::Glyph::Warning)
+            }
+            Some(None) if ch.sample().is_none() => {
+                (theme::DIM, "empty", crate::icons::Glyph::Sample)
+            }
+            Some(None) => (theme::WARN, "not found", crate::icons::Glyph::Warning),
+            _ if ch.muted => (theme::DIM, "muted", kind_glyph(kind)),
+            _ => (theme::DIM, kind, kind_glyph(kind)),
         };
-        let kind_text = match status {
-            Some(None) if ch.sample().is_none() => "Empty",
-            Some(Some(SampleStatus::Failed(_))) => "Missing",
-            _ => kind,
-        };
-        // The kind on the right, the name in the room left of it.
+        crate::icons::paint_with(
+            painter,
+            glyph,
+            Rect::from_center_size(pos2(rect.left() + 16.0, rect.center().y), vec2(13.0, 13.0)),
+            if kind_color == theme::ERROR || kind_color == theme::WARN {
+                kind_color
+            } else {
+                theme::MUTED
+            },
+        );
+        // The kind or state on the right, the name in the room left of it.
         let kind_rect = crate::widgets::fit_text(
             painter,
-            pos2(rect.right() - 6.0, rect.center().y),
+            pos2(rect.right() - 8.0, rect.center().y),
             egui::Align2::RIGHT_CENTER,
             kind_text,
-            egui::FontId::proportional(10.5),
+            egui::FontId::proportional(10.0),
             kind_color,
             rect.width() / 2.0,
         );
-        let left = rect.left() + 10.0;
+        let left = rect.left() + 28.0;
         crate::widgets::fit_text(
             painter,
             pos2(left, rect.center().y),
             egui::Align2::LEFT_CENTER,
             &ch.name,
-            egui::FontId::proportional(13.0),
-            theme::TEXT,
+            egui::FontId::proportional(12.5),
+            if ch.muted { theme::MUTED } else { theme::TEXT },
             kind_rect.left() - 6.0 - left,
         );
         let audio_file = ch.audio_asset().and_then(|a| project.asset(a));
@@ -661,98 +778,79 @@ impl RackView {
             vec![ch.id]
         };
         resp.context_menu(|ui| {
+            use crate::icons::Glyph as G;
+            use crate::widgets::{menu_item, menu_item_on};
             if ch.is_audio() {
-                if ui.button("Select clips in the Playlist").clicked() {
+                if menu_item(ui, Some(G::Select), "Select clips in the Playlist", "").clicked() {
                     out.select_clips = Some(ch.id);
-                    ui.close();
                 }
-                if ui.button("Sample Editor").clicked() {
+                if menu_item(ui, Some(G::Sample), "Sample Editor", "").clicked() {
                     out.open_clip_editor = Some(ch.id);
-                    ui.close();
                 }
-                if ui
-                    .button("Send to sampler")
+                if menu_item(ui, Some(G::Send), "Send to sampler", "")
                     .on_hover_text("A new sampler channel with this file; the clips stay")
                     .clicked()
                 {
                     out.to_sampler = Some(ch.id);
-                    ui.close();
                 }
-            } else if ui.button("Open Piano Roll").clicked() {
+            } else if menu_item(ui, Some(G::PianoRoll), "Open Piano Roll", "F7").clicked() {
                 out.open_piano = Some(ch.id);
-                ui.close();
             }
-            if ui.button("Channel settings…").clicked() {
+            if menu_item(ui, Some(G::Settings), "Channel settings…", "").clicked() {
                 out.open_settings = Some((ch.id, false));
-                ui.close();
             }
             if ch.instrument().is_some() {
                 let open = host.plugin_editor_open(PluginTarget::Channel(ch.id));
-                if ui
-                    .button(if open {
-                        "Close instrument editor"
-                    } else {
-                        "Open instrument editor"
-                    })
-                    .clicked()
-                {
+                let text = if open {
+                    "Close instrument editor"
+                } else {
+                    "Open instrument editor"
+                };
+                if menu_item(ui, Some(G::Plugins), text, "").clicked() {
                     out.toggle_editor = Some(ch.id);
-                    ui.close();
                 }
-                if ui.button("Instrument parameters").clicked() {
+                if menu_item(ui, Some(G::Mixer), "Instrument parameters", "").clicked() {
                     out.show_params = Some(ch.id);
-                    ui.close();
                 }
             } else if !ch.is_audio() {
-                if ui.button("Load sample…").clicked() {
+                if menu_item(ui, Some(G::Files), "Load sample…", "").clicked() {
                     out.pick = Some(crate::library::PickFor::Channel(ch.id));
-                    ui.close();
                 }
-                if ui
-                    .add_enabled(ch.sample().is_some(), egui::Button::new("Clear sample"))
-                    .clicked()
+                if menu_item_on(
+                    ui,
+                    Some(G::Close),
+                    "Clear sample",
+                    "",
+                    ch.sample().is_some(),
+                )
+                .clicked()
                 {
                     out.edits.push((Edit::SetChannelSample(ch.id, None), false));
-                    ui.close();
                 }
             }
             ui.separator();
-            if ui.button("Rename / color…").clicked() {
+            if menu_item(ui, Some(G::Rename), "Rename / color…", "F2").clicked() {
                 out.rename = Some(crate::RenameTarget::Channel(ch.id));
-                ui.close();
             }
             let clone = if ch.is_audio() {
                 format!("Make unique — same file, no clips ({})", selection.len())
             } else {
                 format!("Clone ({})", selection.len())
             };
-            if ui.button(clone).clicked() {
+            if menu_item(ui, Some(G::Clone), &clone, "").clicked() {
                 out.clone.extend(selection.iter().copied());
-                ui.close();
             }
-            if ui
-                .button(format!("Route to free mixer track ({})", selection.len()))
-                .on_hover_text("Each channel gets an empty mixer track of its own")
-                .clicked()
+            if menu_item(
+                ui,
+                Some(G::Send),
+                &format!("Route to free mixer track ({})", selection.len()),
+                "",
+            )
+            .on_hover_text("Each channel gets an empty mixer track of its own")
+            .clicked()
             {
                 out.free_track.extend(selection.iter().copied());
-                ui.close();
             }
-            let n = project.channels.len();
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(index > 0, egui::Button::new("Move up"))
-                    .clicked()
-                {
-                    out.edits.push((Edit::MoveChannel(ch.id, index - 1), false));
-                }
-                if ui
-                    .add_enabled(index + 1 < n, egui::Button::new("Move down"))
-                    .clicked()
-                {
-                    out.edits.push((Edit::MoveChannel(ch.id, index + 1), false));
-                }
-            });
             ui.menu_button("Route to mixer track", |ui| {
                 for t in project.mixer.all_tracks() {
                     let label = format!("{} · {}", track_number(project, t.id), t.name);
@@ -770,9 +868,21 @@ impl RackView {
                     }
                 }
             });
+            let n = project.channels.len();
+            if menu_item_on(ui, Some(G::Prev), "Move up", "", index > 0).clicked() {
+                out.edits.push((Edit::MoveChannel(ch.id, index - 1), false));
+            }
+            if menu_item_on(ui, Some(G::Next), "Move down", "", index + 1 < n).clicked() {
+                out.edits.push((Edit::MoveChannel(ch.id, index + 1), false));
+            }
             ui.separator();
             if ui
-                .button(RichText::new(format!("Delete ({})…", selection.len())).color(theme::ERROR))
+                .add(
+                    egui::Button::new(
+                        RichText::new(format!("Delete ({})…", selection.len())).color(theme::ERROR),
+                    )
+                    .frame(false),
+                )
                 .clicked()
             {
                 out.delete = selection.clone();
@@ -875,6 +985,9 @@ impl RackView {
                     }
                 }
             }
+            if i % 4 == 3 {
+                ui.add_space(GROUP_GAP);
+            }
             if ui.is_rect_visible(rect) {
                 draw_step(ui, rect, step, i, current_step == Some(i), resp.hovered());
                 if caret_step == Some(i) {
@@ -907,37 +1020,57 @@ fn draw_step(ui: &egui::Ui, rect: Rect, step: Step, index: u32, playhead: bool, 
     let painter = ui.painter();
     let alt = (index / 4) % 2 == 1;
     let base = if alt {
-        egui::Color32::from_rgb(0x22, 0x27, 0x2D)
+        egui::Color32::from_rgb(0x1E, 0x22, 0x27)
     } else {
-        egui::Color32::from_rgb(0x2B, 0x31, 0x38)
+        theme::RAISED
     };
     let r = CornerRadius::same(4);
+    painter.rect_filled(rect, r, base);
     if step.on {
-        painter.rect_filled(rect, r, theme::AMBER);
-        let dark = rect.height() * (1.0 - step.velocity);
-        if dark > 0.5 {
-            painter.rect_filled(
-                Rect::from_min_size(rect.min, vec2(rect.width(), dark)),
-                CornerRadius {
-                    nw: 4,
-                    ne: 4,
-                    sw: 0,
-                    se: 0,
-                },
-                egui::Color32::from_rgba_unmultiplied(14, 16, 19, 110),
-            );
-        }
-    } else {
-        painter.rect_filled(rect, r, base);
+        // UI-RD §3: amber fill up to the velocity.
+        let h = (rect.height() * step.velocity).max(4.0);
+        let fill = Rect::from_min_max(pos2(rect.left(), rect.bottom() - h), rect.right_bottom());
+        let top = if h >= rect.height() - 0.5 { 4 } else { 1 };
+        painter.rect_filled(
+            fill,
+            CornerRadius {
+                nw: top,
+                ne: top,
+                sw: 4,
+                se: 4,
+            },
+            theme::AMBER,
+        );
+        painter.hline(
+            fill.x_range().shrink(1.0),
+            fill.top() + 0.5,
+            Stroke::new(1.0, egui::Color32::from_rgb(0xFF, 0xD5, 0x8A)),
+        );
     }
-    let stroke = if playhead {
-        Stroke::new(2.0, theme::TEXT)
+    if playhead {
+        painter.rect_stroke(rect, r, Stroke::new(1.5, theme::TEXT), StrokeKind::Inside);
     } else if hovered {
-        Stroke::new(1.0, theme::MUTED)
-    } else {
-        Stroke::new(1.0, egui::Color32::from_rgb(0x36, 0x3D, 0x45))
+        painter.rect_stroke(rect, r, Stroke::new(1.0, theme::MUTED), StrokeKind::Inside);
+    }
+}
+
+/// A dashed rounded-ish outline (drop zones, "+ New track").
+pub(crate) fn dashed_rect(painter: &egui::Painter, rect: Rect, color: egui::Color32) {
+    let s = Stroke::new(1.0, color);
+    let dash = |a: egui::Pos2, b: egui::Pos2| {
+        let len = a.distance(b);
+        let n = (len / 7.0).floor().max(1.0) as usize;
+        for k in 0..n {
+            let t0 = k as f32 / n as f32;
+            let t1 = t0 + 4.0 / len;
+            painter.line_segment([a.lerp(b, t0), a.lerp(b, t1.min(1.0))], s);
+        }
     };
-    painter.rect_stroke(rect, r, stroke, StrokeKind::Inside);
+    let r = rect.shrink(0.5);
+    dash(r.left_top(), r.right_top());
+    dash(r.right_top(), r.right_bottom());
+    dash(r.right_bottom(), r.left_bottom());
+    dash(r.left_bottom(), r.left_top());
 }
 
 /// Miniature of the channel's notes in the pattern; click opens the
@@ -949,7 +1082,7 @@ fn notes_preview(
     color: egui::Color32,
     out: &mut RackOutput,
 ) {
-    let width = pattern.length_steps as f32 * (STEP_W + 3.0) - 3.0;
+    let width = steps_width(pattern.length_steps);
     let (rect, resp) = ui.allocate_exact_size(vec2(width, STEP_H), Sense::click());
     let painter = ui.painter();
     painter.rect(
@@ -985,6 +1118,14 @@ fn notes_preview(
     );
     if resp.on_hover_text("Click to open the Piano Roll").clicked() {
         out.open_piano = Some(channel);
+    }
+}
+
+fn kind_glyph(kind: &str) -> crate::icons::Glyph {
+    match kind {
+        "VST3" => crate::icons::Glyph::Plugins,
+        "Audio" => crate::icons::Glyph::Automation,
+        _ => crate::icons::Glyph::Sample,
     }
 }
 
