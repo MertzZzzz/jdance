@@ -4737,15 +4737,19 @@ impl<H: Host, S: ProjectStore> JdanceApp<H, S> {
                 ("Add effect", format!("Click: the effect into {track_name}"))
             }
         };
-        egui::Window::new(title)
+        // UI-RD §7 (board R5 · Plugins, picker F8): the search on top,
+        // filter chips, grouped rows, the keys at the bottom.
+        egui::Window::new(egui::RichText::new(title).font(theme::strong(13.0)))
             .id(egui::Id::unique("plugin_picker"))
             .open(&mut open)
-            .default_size([420.0, 480.0])
+            .collapsible(false)
+            .default_size([440.0, 500.0])
             .show(ctx, |ui| {
-                ui.label(egui::RichText::new(hint).size(11.5).color(theme::MUTED));
+                picker.list.badge = "F8";
                 picked = picker
                     .list
-                    .show(ui, "picker", &mut self.host, picker.scope, 400.0);
+                    .show(ui, "picker", &mut self.host, picker.scope, 380.0);
+                ui.label(egui::RichText::new(hint).size(10.5).color(theme::DIM));
             });
         if let Some(d) = picked.load {
             match d.kind {
@@ -6576,7 +6580,7 @@ mod plugin_picker_tests {
     }
 
     fn picker_open(d: &Driver) -> bool {
-        d.find("★ Favorites only").is_some()
+        d.find("Favorites").is_some()
     }
 
     /// The picker for `scope`, with the stub's plugins.
@@ -6605,7 +6609,7 @@ mod plugin_picker_tests {
         let mut ui = |ui: &mut egui::Ui| app.plugin_picker_window(ui.ctx(), 0.0);
         d.frame(vec![], &mut ui);
         d.frame(vec![], &mut ui);
-        for filter in ["VST3", "★ Favorites only", "★ Favorites only", "VST3"] {
+        for filter in ["VST3", "Favorites", "Favorites", "VST3"] {
             let at = d.find(filter).expect(filter);
             d.click(at, &mut ui);
             assert!(picker_open(&d), "{filter}: the window stays");
@@ -6632,6 +6636,26 @@ mod plugin_picker_tests {
         d.click(at, &mut ui);
         assert_ne!(app.mixer_view.selected, track);
         assert_eq!(app.project.mixer.track(track).unwrap().inserts.len(), 1);
+    }
+
+    #[test]
+    fn ctrl_d_makes_the_highlighted_plugin_a_favorite() {
+        let ctrl_d = Event::Key {
+            key: Key::D,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND,
+        };
+        let app = pick(vec![
+            vec![Event::Text("plate".into())],
+            vec![key(Key::ArrowDown)],
+            vec![ctrl_d],
+        ]);
+        let favs = &app.host.plugin_prefs.favorites;
+        assert_eq!(favs.len(), 1);
+        assert_eq!(favs[0].name, "Plate Reverb");
+        assert!(app.plugin_picker.is_some(), "the window stays");
     }
 
     #[test]

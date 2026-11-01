@@ -665,3 +665,11 @@ Linux, тест окна редактора под Xvfb), clippy `-D warnings` �
 | Диалоги R5: Plugins, Recording, Transpose | PASS | вручную (Xvfb) |
 | Каретка в Automation Editor | — | не сделана (см. известные ограничения v0.4.1) |
 | Windows MSI 0.4.1 | — | workflow `Release` |
+
+## Релиз 0.4.1.1 (исправление: окно выбора плагинов)
+
+| Пункт | Статус | Артефакт / комментарий |
+|---|---|---|
+| Окно выбора плагинов F8 и список Plugins в Browser по борду R5 · Plugins; Ctrl+D — избранное | PASS | `ui` тесты `plugin_picker_tests::*`; вручную (Xvfb) с тестовым плагином `jdance-test-fx`, скриншот `after/plugin-picker.png` |
+| Тип плагина в окне Plugins не обрезается | PASS | вручную (Xvfb) |
+| Windows MSI 0.4.1.1 | — | workflow `Release` |

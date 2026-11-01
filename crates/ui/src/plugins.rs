@@ -306,9 +306,7 @@ fn lists(ui: &mut egui::Ui, host: &mut dyn Host) {
                                 .corner_radius(4)
                                 .inner_margin(egui::Margin::symmetric(6, 1))
                                 .show(ui, |ui| {
-                                    ui.add(
-                                        egui::Label::new(RichText::new(tag).size(10.5)).truncate(),
-                                    );
+                                    ui.label(RichText::new(tag).size(10.5));
                                 });
                             ui.label(
                                 RichText::new(&d.plugin.version)
