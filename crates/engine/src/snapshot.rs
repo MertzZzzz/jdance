@@ -652,8 +652,11 @@ pub fn compile_full(
         .iter()
         .take(MAX_CHANNELS)
         .map(|c| {
-            c.instrument()
-                .map(|slot| InstrumentRt::new(plugins(PluginTarget::Channel(c.id), slot)))
+            c.instrument().map(|slot| {
+                let mut i = InstrumentRt::new(plugins(PluginTarget::Channel(c.id), slot));
+                i.bend_range = f32::from(c.pitch_bend_range);
+                i
+            })
         })
         .collect();
     for (c, inst) in project.channels.iter().zip(&instruments) {

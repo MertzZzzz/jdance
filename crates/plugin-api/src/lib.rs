@@ -209,6 +209,14 @@ pub enum NoteKind {
         velocity: f32,
     },
     Off,
+    /// The note's pitch offset from its key, in semitones, from this
+    /// offset on (slide notes, spec 0.3.6). Sent as a per-note tuning
+    /// expression when the plugin has one, else as MIDI pitch bend with
+    /// `bend_range` semitones at full bend.
+    Tuning {
+        semitones: f32,
+        bend_range: f32,
+    },
 }
 
 /// Realtime part of a plugin instance, owned by the audio thread.

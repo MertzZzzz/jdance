@@ -579,6 +579,26 @@ pub struct Channel {
     /// sample is, measured by its Playlist clips. Samplers only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clip_asset: Option<AssetId>,
+    /// Plugin instruments without per-note tuning: semitones at full
+    /// pitch bend, for slide notes (spec 0.3.6 §6).
+    #[serde(
+        default = "default_bend_range",
+        skip_serializing_if = "is_default_bend_range"
+    )]
+    pub pitch_bend_range: u8,
+}
+
+/// Pitch bend range of new channels, semitones (spec 0.3.6 §6).
+pub const DEFAULT_PITCH_BEND_RANGE: u8 = 2;
+/// Largest pitch bend range, semitones.
+pub const MAX_PITCH_BEND_RANGE: u8 = 48;
+
+fn default_bend_range() -> u8 {
+    DEFAULT_PITCH_BEND_RANGE
+}
+
+fn is_default_bend_range(v: &u8) -> bool {
+    *v == DEFAULT_PITCH_BEND_RANGE
 }
 
 fn is_zero_i32(v: &i32) -> bool {
@@ -807,6 +827,7 @@ impl Channel {
             mono: false,
             sampler: SamplerSettings::default(),
             clip_asset: None,
+            pitch_bend_range: DEFAULT_PITCH_BEND_RANGE,
         }
     }
 

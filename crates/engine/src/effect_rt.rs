@@ -486,6 +486,34 @@ pub const MAX_INSTRUMENT_EVENTS: usize = 512;
 pub const MAX_SOUNDING_NOTES: usize = 256;
 /// Gate end marking live notes: never reached by the timeline.
 const LIVE: u64 = u64::MAX - 1;
+/// Pitch glides of plugin notes send a point this often, in samples
+/// (spec 0.3.6 §3).
+pub const GLIDE_STEP: u64 = 64;
+
+/// A plugin note gliding (slide notes): its tuning goes from `from` to
+/// `to` semitones over `[start, start + len)` of the timeline.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Glide {
+    note_id: i32,
+    key: u8,
+    from: f32,
+    to: f32,
+    start: u64,
+    len: u64,
+}
+
+impl Glide {
+    fn at(&self, pos: u64) -> f32 {
+        if pos >= self.start + self.len {
+            self.to
+        } else if pos <= self.start {
+            self.from
+        } else {
+            let t = (pos - self.start) as f32 / self.len as f32;
+            self.from + (self.to - self.from) * t
+        }
+    }
+}
 
 /// A plugin instrument playing a channel (PLG-033): note-ons at their
 /// sample offsets, note-offs when the gate ends, and note-off for every
@@ -505,6 +533,13 @@ pub struct InstrumentRt {
     hush: Smoothed,
     /// Samples the plugin has been silent while hushed.
     quiet: u32,
+    /// Running pitch glides (slide notes, spec 0.3.6).
+    glides: Vec<Glide>,
+    /// A tuning other than 0 was sent: the next note-on resets it (§5).
+    tuned: bool,
+    /// The channel's pitch bend range for plugins without per-note
+    /// tuning, in semitones.
+    pub bend_range: f32,
 }
 
 impl InstrumentRt {
@@ -517,6 +552,92 @@ impl InstrumentRt {
             next_id: 0,
             hush: Smoothed::new(1.0, HUSH_RAMP),
             quiet: 0,
+            glides: Vec::with_capacity(MAX_SOUNDING_NOTES),
+            tuned: false,
+            bend_range: 2.0,
+        }
+    }
+
+    fn tuning(&mut self, offset: usize, note_id: i32, key: u8, semitones: f32) {
+        if semitones != 0.0 {
+            self.tuned = true;
+        }
+        self.push(jdance_plugin_api::NoteEvent {
+            offset: offset as u32,
+            note_id,
+            key,
+            kind: jdance_plugin_api::NoteKind::Tuning {
+                semitones,
+                bend_range: self.bend_range,
+            },
+        });
+    }
+
+    /// A slide note at block `offset`, timeline `pos` (spec 0.3.6 §2):
+    /// the sounding sequencer notes glide over `length` samples so that
+    /// the highest reaches `key`, the others by the same interval.
+    pub fn slide(&mut self, pos: u64, key: u8, length: u64) {
+        let target_of =
+            |g: &[Glide], id: i32| g.iter().find(|g| g.note_id == id).map_or(0.0, |g| g.to);
+        let top = self
+            .sounding
+            .iter()
+            .filter(|(end, _, _)| *end != LIVE + 1 && *end > pos)
+            .map(|&(_, k, id)| f32::from(k) + target_of(&self.glides, id))
+            .fold(f32::NEG_INFINITY, f32::max);
+        if !top.is_finite() {
+            return;
+        }
+        let interval = f32::from(key) - top;
+        for i in 0..self.sounding.len() {
+            let (end, k, id) = self.sounding[i];
+            if end == LIVE + 1 || end <= pos {
+                continue;
+            }
+            let (from, to) = match self.glides.iter().position(|g| g.note_id == id) {
+                Some(j) => {
+                    let g = self.glides.swap_remove(j);
+                    (g.at(pos), g.to + interval)
+                }
+                None => (0.0, interval),
+            };
+            if self.glides.len() < self.glides.capacity() {
+                self.glides.push(Glide {
+                    note_id: id,
+                    key: k,
+                    from,
+                    to,
+                    start: pos,
+                    len: length.max(1),
+                });
+            }
+        }
+    }
+
+    /// Tuning points of the running glides in `[from, to)` of the
+    /// timeline, which starts at block offset `offset`: every
+    /// [`GLIDE_STEP`] samples and the exact target at each glide's end.
+    /// A finished glide stays (sending nothing) to remember the note's
+    /// tuning for the next slide.
+    pub fn glides(&mut self, from: u64, to: u64, offset: usize) {
+        let sounding = &self.sounding;
+        self.glides
+            .retain(|g| sounding.iter().any(|s| s.2 == g.note_id));
+        for i in 0..self.glides.len() {
+            let g = self.glides[i];
+            let end = g.start + g.len;
+            let mut t = g.start.max(from);
+            let rem = (t - g.start) % GLIDE_STEP;
+            if rem != 0 {
+                t += GLIDE_STEP - rem;
+            }
+            while t < to && t < end {
+                self.tuning(offset + (t - from) as usize, g.note_id, g.key, g.at(t));
+                t += GLIDE_STEP;
+            }
+            if end >= from && end < to {
+                self.tuning(offset + (end - from) as usize, g.note_id, g.key, g.to);
+            }
         }
     }
 
@@ -590,6 +711,11 @@ impl InstrumentRt {
             key,
             kind: jdance_plugin_api::NoteKind::On { velocity },
         });
+        // After a slide the new note plays at its own pitch (§5).
+        if self.tuned {
+            self.tuning(offset, note_id, key, 0.0);
+            self.tuned = false;
+        }
         self.sounding.push((pos + length.max(1), key, note_id));
     }
 
@@ -633,13 +759,15 @@ impl InstrumentRt {
     /// Renders the block into `l`/`r` (overwritten). Realtime-safe on the
     /// host side.
     pub fn render(&mut self, l: &mut [f32], r: &mut [f32], transport: &Transport) {
-        // Offs before ons at the same offset (retriggers).
+        // Offs before ons, ons before their tuning, at the same offset
+        // (retriggers, spec 0.3.6 §4).
         self.events.sort_unstable_by_key(|e| {
-            (
-                e.offset,
-                matches!(e.kind, jdance_plugin_api::NoteKind::On { .. }),
-                e.note_id,
-            )
+            let rank = match e.kind {
+                jdance_plugin_api::NoteKind::Off => 0,
+                jdance_plugin_api::NoteKind::On { .. } => 1,
+                jdance_plugin_api::NoteKind::Tuning { .. } => 2,
+            };
+            (e.offset, rank, e.note_id)
         });
         match &mut self.plugin.processor {
             Some(p) => p.process_instrument(l, r, &self.events, transport),
@@ -679,7 +807,9 @@ impl InstrumentRt {
         if self.plugin.processor.is_some() && old.plugin.processor.is_none() {
             // Same instance: keep its sounding notes.
             std::mem::swap(&mut self.sounding, &mut old.sounding);
+            std::mem::swap(&mut self.glides, &mut old.glides);
             self.next_id = old.next_id;
+            self.tuned = old.tuned;
         }
     }
 }

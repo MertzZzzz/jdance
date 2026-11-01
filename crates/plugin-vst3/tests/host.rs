@@ -76,11 +76,14 @@ fn scan_lists_classes_and_kinds() {
             "JD Test Synth",
             "JD Test Drums",
             "JD Test Mono",
-            "JD Test Strict"
+            "JD Test Strict",
+            "JD Test Bend Synth"
         ]
     );
     for x in &d {
-        let kind = if ["JD Test Synth", "JD Test Drums"].contains(&x.plugin.name.as_str()) {
+        let kind = if ["JD Test Synth", "JD Test Drums", "JD Test Bend Synth"]
+            .contains(&x.plugin.name.as_str())
+        {
             PluginKind::Instrument
         } else {
             PluginKind::Effect
@@ -101,7 +104,7 @@ fn scan_lists_classes_and_kinds() {
 fn out_of_process_scan_and_blocklist_reasons() {
     let scanner = Path::new(env!("CARGO_BIN_EXE_jdance-plugin-scanner"));
     match scan_out_of_process(scanner, bundle(), Duration::from_secs(30)) {
-        ScanOutcome::Ok(d) => assert_eq!(d.len(), 8),
+        ScanOutcome::Ok(d) => assert_eq!(d.len(), 9),
         f => panic!("{f:?}"),
     }
     let missing = bundle().with_file_name("Missing.vst3");
@@ -175,7 +178,7 @@ fn plugin_output_on_stdout_does_not_break_the_scan() {
     let mut cmd = Command::new(scanner);
     cmd.arg(bundle()).env("JDANCE_TEST_FX_FAULT", "chatty");
     match run_scanner(cmd, Duration::from_secs(30)) {
-        ScanOutcome::Ok(d) => assert_eq!(d.len(), 8),
+        ScanOutcome::Ok(d) => assert_eq!(d.len(), 9),
         f => panic!("{f:?}"),
     }
 }
@@ -389,6 +392,93 @@ fn instrument_receives_sample_accurate_notes() {
     );
 }
 
+/// The synth's log with full values: (id, offset, value).
+fn synth_values(c: &mut Vst3Controller) -> Vec<(u32, i32, f64)> {
+    let s = c.state().unwrap().component;
+    let n = u32::from_le_bytes(s[13..17].try_into().unwrap()) as usize;
+    (0..n)
+        .map(|i| {
+            let e = &s[17 + i * 16..17 + (i + 1) * 16];
+            (
+                u32::from_le_bytes(e[0..4].try_into().unwrap()),
+                i32::from_le_bytes(e[4..8].try_into().unwrap()),
+                f64::from_le_bytes(e[8..16].try_into().unwrap()),
+            )
+        })
+        .collect()
+}
+
+/// Zero crossings upwards in `x`: the frequency in cycles per sample.
+fn cycles(x: &[f32]) -> f64 {
+    let ups = x.windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count();
+    ups as f64 / x.len() as f64
+}
+
+#[test]
+fn slide_tuning_goes_as_note_expression_to_plugins_that_list_it() {
+    use jdance_plugin_api::{NoteEvent, NoteKind};
+    let (mut p, mut c) = open("JD Test Synth", None);
+    let on = NoteEvent {
+        offset: 0,
+        note_id: 5,
+        key: 57,
+        kind: NoteKind::On { velocity: 1.0 },
+    };
+    let (mut l, mut r) = (vec![0.0; 4800], vec![0.0; 4800]);
+    p.process_instrument(&mut l, &mut r, &[on], &Transport::default());
+    let before = cycles(&l[100..]);
+    let up = NoteEvent {
+        offset: 0,
+        kind: NoteKind::Tuning {
+            semitones: 12.0,
+            bend_range: 2.0,
+        },
+        ..on
+    };
+    p.process_instrument(&mut l, &mut r, &[up], &Transport::default());
+    let after = cycles(&l[100..]);
+    // A3 = 220 Hz → A4 = 440 Hz: twice the zero crossings.
+    assert!((after / before - 2.0).abs() < 0.05, "{before} → {after}");
+    let log = synth_values(&mut c);
+    assert_eq!(log.last().map(|e| (e.0, e.1)), Some((0x1002, 0)));
+    assert!((log.last().unwrap().2 - 12.0).abs() < 1e-9);
+}
+
+#[test]
+fn slide_tuning_goes_as_pitch_bend_through_the_midi_mapping() {
+    use jdance_plugin_api::{NoteEvent, NoteKind};
+    let (mut p, mut c) = open("JD Test Bend Synth", None);
+    let on = NoteEvent {
+        offset: 0,
+        note_id: 1,
+        key: 57,
+        kind: NoteKind::On { velocity: 1.0 },
+    };
+    let bend = |offset, semitones| NoteEvent {
+        offset,
+        kind: NoteKind::Tuning {
+            semitones,
+            bend_range: 12.0,
+        },
+        ..on
+    };
+    let (mut l, mut r) = (vec![0.0; 4800], vec![0.0; 4800]);
+    p.process_instrument(&mut l, &mut r, &[on], &Transport::default());
+    let before = cycles(&l[100..]);
+    // Two notes at one offset share the bend: one point, the last.
+    let events = [bend(10, 6.0), bend(10, 12.0), bend(20, 24.0)];
+    p.process_instrument(&mut l, &mut r, &events, &Transport::default());
+    let log: Vec<(u32, i32, f64)> = synth_values(&mut c)
+        .into_iter()
+        .filter(|e| e.0 == 77)
+        .collect();
+    // 12 of 12 semitones: full bend; beyond the range: clamped.
+    assert_eq!(log, [(77, 10, 1.0), (77, 20, 1.0)]);
+    p.process_instrument(&mut l, &mut r, &[], &Transport::default());
+    let after = cycles(&l[100..]);
+    assert!((after / before - 2.0).abs() < 0.05, "{before} → {after}");
+}
+
 #[test]
 fn a_multi_output_instrument_that_refuses_stereo_everywhere_opens() {
     use jdance_plugin_api::{NoteEvent, NoteKind};
@@ -474,7 +564,7 @@ fn a_renamed_bundle_loads() {
         return;
     }
     let m = Vst3Module::load(&renamed).unwrap();
-    assert_eq!(m.descriptors().len(), 8);
+    assert_eq!(m.descriptors().len(), 9);
     drop(m);
     let _ = std::fs::remove_dir_all(&dir);
 }

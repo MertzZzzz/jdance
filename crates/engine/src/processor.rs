@@ -741,12 +741,12 @@ impl EngineProcessor {
                     let offset = done + (e.pos - p) as usize;
                     k += 1;
                     if e.slide {
-                        // Plugins get no slides (spec 0.3.5 §9).
-                        if snap
-                            .channels
-                            .get(e.channel)
-                            .is_some_and(|c| c.instrument.is_none())
+                        if let Some(c) = snap.channels.get_mut(e.channel)
+                            && let Some(inst) = c.instrument.as_mut()
                         {
+                            // Plugins: tuning points (spec 0.3.6).
+                            inst.slide(e.pos, transpose(e.key, c.pitch), e.length);
+                        } else {
                             render_voices(snap, voices, channels, cursor, offset);
                             cursor = offset;
                             slide(snap, voices, &e);
@@ -764,6 +764,12 @@ impl EngineProcessor {
                     render_voices(snap, voices, channels, cursor, offset);
                     cursor = offset;
                     trigger(snap, voices, voice_serial, feedback, &e);
+                }
+                // Pitch glides of plugin notes in this segment.
+                for ch in snap.channels.iter_mut() {
+                    if let Some(inst) = &mut ch.instrument {
+                        inst.glides(p, seg_end, done);
+                    }
                 }
                 // Audio clips of this segment into their channels; the
                 // channel's volume, pan, mute and delay compensation follow.

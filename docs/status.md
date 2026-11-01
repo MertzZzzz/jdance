@@ -616,3 +616,14 @@ Linux, тест окна редактора под Xvfb), clippy `-D warnings` �
 | Слайд в движке: скольжение, сложение, тишина без ноты, мьют, слайд в одном тике с нотой (§8) | PASS | `engine` тесты `a_slide_note_glides_*`, `slides_add_up`, `a_slide_alone_or_muted_does_nothing`, `a_slide_on_the_note_start_*` |
 | Каналы VST3 не получают слайд-ноты (§9) | PASS | по коду (`processor.rs`), отдельного теста нет |
 | Windows MSI 0.3.5 | — | workflow `Release` |
+
+## Релиз 0.3.6 (слайды на VST3, [spec-0.3.6](spec/spec-0.3.6.md))
+
+| Пункт | Статус | Артефакт / комментарий |
+|---|---|---|
+| Слайд на канале плагина: не нота, точки Tuning каждые 64 сэмпла и точное конечное значение, сложение слайдов, аккорд целиком, сброс у новой ноты, без аллокаций (§1–5, §9) | PASS | `engine` тесты `slides_on_plugins_send_tuning_points_and_no_note`, `slides_on_plugins_add_up_and_move_chords_together` |
+| Note Expression «Tuning», если контроллер его объявляет (§ «Как передаётся высота») | PASS | `plugin-vst3` тест `slide_tuning_goes_as_note_expression_to_plugins_that_list_it` (тестовый синтезатор: частота вдвое после +12) |
+| Pitch bend через `IMidiMapping`, одна точка на смещение, обрезка по диапазону | PASS | `plugin-vst3` тест `slide_tuning_goes_as_pitch_bend_through_the_midi_mapping` (новый класс JD Test Bend Synth) |
+| Pitch bend range: поле канала, формат 20, окно канала (§6–7) | PASS | `persistence` тест `the_pitch_bend_range_round_trips_and_defaults_to_2`; поле в окне — без автотеста |
+| Проверка на реальных плагинах (Surge XT, Serum, Vital) | — | вручную не проверялось |
+| Windows MSI 0.3.6 | — | workflow `Release` |
