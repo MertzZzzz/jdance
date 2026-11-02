@@ -538,6 +538,41 @@ fn a_picky_plugin_gets_what_it_needs_from_the_host() {
     assert_eq!(c.latency(), 32);
 }
 
+/// ShamiKoto asks the state stream for its size before reading it and
+/// crashed without `ISizeableStream`; the strict class refuses instead.
+#[test]
+fn state_restores_into_a_plugin_that_needs_the_stream_size() {
+    let (mut p, mut c) = open("JD Test Strict", None);
+    c.set_param_normalized(0, 0.3);
+    run(&mut p, &ramp(64), None);
+    let state = c.state().unwrap();
+    let d = descriptor("JD Test Strict");
+    let (_p2, c2) = instantiate(&module(), &d.plugin.class_id, &SETUP, Some(&state))
+        .expect("setState gets a stream that tells its size");
+    assert_eq!(c2.param_normalized(0), 0.3);
+}
+
+/// VPS Avenger reports its parameters with `performEdit` while it loads.
+/// A value the host sets before those reports are taken must win: they
+/// used to follow it to the processor and put the old value back.
+#[test]
+fn a_host_value_wins_over_edits_the_plugin_reported_before_it() {
+    let (mut p, mut c) = open("JD Test Strict", None);
+    // The plugin reported gain 0.5 while loading; not polled yet.
+    c.set_param_normalized(0, 0.25);
+    let input = ramp(256);
+    run(&mut p, &input, None);
+    c.poll();
+    let (l, _) = run(&mut p, &input, None);
+    let half: Vec<f32> = input.iter().map(|x| x * 0.5).collect();
+    assert_eq!(l, half, "the processor keeps the host's value");
+    // Edits after the host's value still reach the processor.
+    c.set_param_normalized(0, 0.5);
+    run(&mut p, &input, None);
+    let (l, _) = run(&mut p, &input, None);
+    assert_eq!(l, input);
+}
+
 fn copy_dir(from: &Path, to: &Path) {
     std::fs::create_dir_all(to).unwrap();
     for e in std::fs::read_dir(from).unwrap().flatten() {

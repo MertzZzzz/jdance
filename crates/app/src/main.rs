@@ -193,6 +193,16 @@ fn cmd_render(args: &[String]) -> Result<(), String> {
         format,
         mp3,
     };
+    // Made on this thread, which runs their messages while they load;
+    // released here after the render (controllers before modules).
+    let modules = plugins::ModuleCache::default();
+    let (prepared, controllers) = render::prepare_plugins_here(
+        &project,
+        &plugins::Catalog::load_cached(),
+        &modules,
+        render::export_rate(rate, &options),
+    );
+    let prepared = std::sync::Mutex::new(prepared);
     let outcome = render::render_to_file(
         &project,
         project_path.parent(),
@@ -200,12 +210,12 @@ fn cmd_render(args: &[String]) -> Result<(), String> {
         rate,
         &options,
         &render::ExportTags::default(),
-        Some(&render::ExportPlugins {
-            catalog: &plugins::Catalog::load_cached(),
-            modules: &plugins::ModuleCache::default(),
-        }),
+        Some(&render::ExportPlugins::Prepared(&prepared)),
         &mut |_| true,
-    )?;
+    );
+    drop(prepared);
+    drop(controllers);
+    let outcome = outcome?;
     if let Some(w) = &outcome.tail_warning {
         eprintln!("warning: {w}");
     }

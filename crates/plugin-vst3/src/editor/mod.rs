@@ -56,6 +56,14 @@ pub fn run_plugin_timers() {
     win32::run_timers();
 }
 
+/// Runs this thread's waiting messages and due plugin timers, for a
+/// thread without a message loop that created plugin instances
+/// (`jdance render`). Elsewhere than Windows a no-op.
+pub fn pump_plugin_messages() {
+    #[cfg(windows)]
+    win32::pump_messages();
+}
+
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 pub(crate) fn note_space_press() {
     SPACE_PRESSES.fetch_add(1, Ordering::Relaxed);

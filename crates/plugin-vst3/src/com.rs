@@ -4,7 +4,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_void};
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use vst3::Steinberg::Vst::*;
 use vst3::Steinberg::*;
@@ -124,9 +124,17 @@ pub fn cstring(src: &[std::ffi::c_char]) -> String {
 pub struct ComponentHandler {
     events: Mutex<Vec<PluginEvent>>,
     restart: AtomicI32,
+    /// `IProgress` operations started and not finished.
+    progress: Mutex<Vec<u64>>,
+    next_progress: AtomicU64,
 }
 
 impl ComponentHandler {
+    /// The plugin reports work in progress (`IProgress`).
+    pub fn busy(&self) -> bool {
+        self.progress.lock().is_ok_and(|p| !p.is_empty())
+    }
+
     pub fn take_events(&self) -> Vec<PluginEvent> {
         let mut out = self
             .events
@@ -146,6 +154,17 @@ impl ComponentHandler {
             out.push(PluginEvent::ReloadRequested);
         }
         out
+    }
+
+    /// Drops the plugin's edits of `id` not yet taken: the host has just
+    /// set a newer value. Forwarded after it, they would put the old value
+    /// back into the processor. VPS Avenger reports every parameter with
+    /// `performEdit` while it loads; a value set before the next poll was
+    /// undone by those reports and stayed undone.
+    pub fn discard_edits(&self, id: ParamID) {
+        if let Ok(mut e) = self.events.lock() {
+            e.retain(|ev| !matches!(ev, PluginEvent::ParamChanged { id: i, .. } if *i == id));
+        }
     }
 
     pub fn push(&self, event: PluginEvent) {
@@ -197,6 +216,8 @@ impl IUnitHandlerTrait for ComponentHandler {
     }
 }
 
+/// Progress the plugin reports (state restored in the background, content
+/// loading): the host waits for it before an export renders.
 impl IProgressTrait for ComponentHandler {
     unsafe fn start(
         &self,
@@ -204,8 +225,12 @@ impl IProgressTrait for ComponentHandler {
         _description: *const tchar,
         id: *mut IProgress_::ID,
     ) -> tresult {
+        let n = self.next_progress.fetch_add(1, Ordering::AcqRel) + 1;
+        if let Ok(mut p) = self.progress.lock() {
+            p.push(n);
+        }
         if !id.is_null() {
-            unsafe { *id = 1 };
+            unsafe { *id = n };
         }
         kResultOk
     }
@@ -214,7 +239,10 @@ impl IProgressTrait for ComponentHandler {
         kResultOk
     }
 
-    unsafe fn finish(&self, _id: IProgress_::ID) -> tresult {
+    unsafe fn finish(&self, id: IProgress_::ID) -> tresult {
+        if let Ok(mut p) = self.progress.lock() {
+            p.retain(|x| *x != id);
+        }
         kResultOk
     }
 }
@@ -455,7 +483,28 @@ impl MemStream {
 }
 
 impl Class for MemStream {
-    type Interfaces = (IBStream,);
+    type Interfaces = (IBStream, ISizeableStream);
+}
+
+/// The stream's size, as the SDK's own memory stream offers it. Plugins
+/// ask for it before reading their state and some do not check that the
+/// host has it: ShamiKoto crashed on every state restore without it.
+impl ISizeableStreamTrait for MemStream {
+    unsafe fn getStreamSize(&self, size: *mut i64) -> tresult {
+        if size.is_null() {
+            return kInvalidArgument;
+        }
+        unsafe { *size = self.data.borrow().len() as i64 };
+        kResultOk
+    }
+
+    unsafe fn setStreamSize(&self, size: i64) -> tresult {
+        if size < 0 {
+            return kInvalidArgument;
+        }
+        self.data.borrow_mut().resize(size as usize, 0);
+        kResultOk
+    }
 }
 
 impl IBStreamTrait for MemStream {

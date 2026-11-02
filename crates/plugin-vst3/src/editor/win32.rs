@@ -156,6 +156,25 @@ pub fn run_timers() {
     }
 }
 
+/// Runs every message waiting for this thread, for a thread with no
+/// message loop of its own (`jdance render`): plugins load their content
+/// through messages to the thread that created them.
+pub fn pump_messages() {
+    let _gl = GlGuard::new();
+    let mut msg: MSG = unsafe { std::mem::zeroed() };
+    // Bounded like `run_timers`.
+    for _ in 0..256 {
+        if unsafe { PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) } == 0 {
+            break;
+        }
+        unsafe {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+    run_timers();
+}
+
 /// Keeps the app's OpenGL context away from a plugin while the UI thread
 /// calls into it, and current again afterwards. Plugins that draw with
 /// OpenGL switch contexts and leave none current; VPS Avenger, closing,

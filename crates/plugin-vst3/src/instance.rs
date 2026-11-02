@@ -514,6 +514,115 @@ fn tuning_event(e: &NoteEvent, base: usize, semitones: f32) -> Event {
     ev
 }
 
+/// The first number in `s` (either decimal separator), the number of
+/// decimals it was written with, and the text after it.
+fn leading_number(s: &str) -> Option<(f64, i32, &str)> {
+    let b = s.as_bytes();
+    let start = (0..b.len()).find(|&i| {
+        b[i].is_ascii_digit()
+            || (matches!(b[i], b'-' | b'+' | b'.' | b',')
+                && b.get(i + 1).is_some_and(u8::is_ascii_digit))
+    })?;
+    let mut end = start + 1;
+    let mut point = None;
+    while end < b.len() {
+        match b[end] {
+            c if c.is_ascii_digit() => {}
+            b'.' | b',' if point.is_none() && b.get(end + 1).is_some_and(u8::is_ascii_digit) => {
+                point = Some(end);
+            }
+            _ => break,
+        }
+        end += 1;
+    }
+    if matches!(b[start], b'.' | b',') {
+        point = Some(start);
+    }
+    let number: String = s[start..end].replace(',', ".");
+    let decimals = point.map_or(0, |p| (end - p - 1) as i32);
+    Some((number.parse().ok()?, decimals, &s[end..]))
+}
+
+/// Whether `typed` names the value the plugin shows as `shown`: the same
+/// words, or the same number at the precision shown ("5" and "5.00 ms").
+fn same_value_text(typed: &str, shown: &str) -> bool {
+    let norm = |s: &str| s.split_whitespace().collect::<String>().to_lowercase();
+    if norm(typed) == norm(shown) {
+        return true;
+    }
+    match (leading_number(typed), leading_number(shown)) {
+        // Only a number with the same units or nothing after it ("1/16"
+        // is not 1, "100% L" is not "100% R").
+        (Some((a, _, rest)), Some((b, decimals, shown_rest)))
+            if !rest.chars().any(|c| c.is_ascii_digit())
+                && (norm(rest).is_empty() || norm(rest) == norm(shown_rest)) =>
+        {
+            (a - b).abs() <= 0.5 * 10f64.powi(-decimals) + 1e-9
+        }
+        _ => false,
+    }
+}
+
+/// Most steps searched one by one in [`find_by_text`].
+const MAX_SEARCHED_STEPS: u32 = 4096;
+
+/// The normalized value whose text, as `show` writes it, names `typed`:
+/// for plugins whose own parse is no help (Xtressor and Camel Strip read
+/// "0.0 dB" as 0.0 with an identity plain-to-normalized conversion; Ozone
+/// parses nothing). Stepped parameters are tried step by step; continuous
+/// ones by the number in their text, sampled and then bisected, so any
+/// monotonic stretch of the curve is found.
+fn find_by_text(typed: &str, step_count: u32, show: impl Fn(f64) -> String) -> Option<f64> {
+    if step_count > 0 {
+        if step_count > MAX_SEARCHED_STEPS {
+            return None;
+        }
+        let n = f64::from(step_count);
+        return (0..=step_count)
+            .map(|k| f64::from(k) / n)
+            .find(|&v| same_value_text(typed, &show(v)));
+    }
+    let Some((want, _, _)) = leading_number(typed) else {
+        // A name on a continuous scale ("slow", "Msec"): look it up.
+        const NAMED: u32 = 512;
+        return (0..=NAMED)
+            .map(|k| f64::from(k) / f64::from(NAMED))
+            .find(|&v| same_value_text(typed, &show(v)));
+    };
+    let number = |v: f64| leading_number(&show(v)).map(|(x, _, _)| x);
+    const SAMPLES: u32 = 64;
+    let mut prev: Option<(f64, f64)> = None;
+    for k in 0..=SAMPLES {
+        let v = f64::from(k) / f64::from(SAMPLES);
+        let Some(x) = number(v) else {
+            prev = None;
+            continue;
+        };
+        if same_value_text(typed, &show(v)) {
+            return Some(v);
+        }
+        if let Some((pv, px)) = prev
+            && (px - want) * (x - want) < 0.0
+        {
+            // Bisect the bracket [pv, v], keeping `lo` on `px`'s side.
+            let (mut lo, mut hi) = (pv, v);
+            for _ in 0..48 {
+                let mid = 0.5 * (lo + hi);
+                if same_value_text(typed, &show(mid)) {
+                    return Some(mid);
+                }
+                match number(mid) {
+                    Some(m) if (m - want) * (px - want) > 0.0 => lo = mid,
+                    Some(_) => hi = mid,
+                    None => break,
+                }
+            }
+        }
+        prev = Some((v, x));
+    }
+    None
+}
+
 /// Left becomes the mix of left and right, for a mono bus.
 fn mix_into_left(pair: &mut [Vec<f32>; 2], n: usize) {
     let [l, r] = pair;
@@ -951,6 +1060,12 @@ impl Vst3Controller {
         crate::Vst3Editor::open(&self.controller, self.core.clone(), title, scaling)
     }
 
+    /// The plugin reports work in progress through `IProgress` (for
+    /// example its state restoring in the background).
+    pub fn busy(&self) -> bool {
+        self.core.handler.busy()
+    }
+
     /// The plugin's latency now. After `LatencyChanged` the host reads it
     /// here and keeps the instance (and its open editor) instead of
     /// recreating it; plugins report the new value at once.
@@ -973,6 +1088,9 @@ impl PluginController for Vst3Controller {
 
     fn set_param_normalized(&mut self, id: u32, value: f64) {
         let value = value.clamp(0.0, 1.0);
+        // Older edits from the plugin must not follow this value to the
+        // processor.
+        self.core.handler.discard_edits(id);
         unsafe { self.controller.setParamNormalized(id, value) };
         let _ = self.to_rt.push((id, value));
     }
@@ -986,15 +1104,59 @@ impl PluginController for Vst3Controller {
         }
     }
 
+    /// The plugin's own parse, checked against the plugin's own text for
+    /// the result. Many plugins get `getParamValueByString` wrong: they
+    /// return the plain value instead of the normalized one (Camel Strip
+    /// "0.0 dB" → 0.0, Xtressor "5.0" → 5.0) or cannot read the decimal
+    /// comma they write themselves (Ozone "40,00"). When the result does
+    /// not read back as what was typed, its plain-to-normalized
+    /// conversion and the other decimal separator are tried, then the
+    /// value is looked up by the plugin's own text ([`find_by_text`]);
+    /// failing all, the plugin's answer stands.
     fn param_from_text(&self, id: u32, text: &str) -> Option<f64> {
-        let mut s: String128 = [0; 128];
-        copy_wstring(text, &mut s);
-        let mut v = 0.0;
-        (unsafe {
-            self.controller
-                .getParamValueByString(id, s.as_mut_ptr(), &mut v)
-        } == kResultOk)
+        let parse = |t: &str| {
+            let mut s: String128 = [0; 128];
+            copy_wstring(t, &mut s);
+            let mut v = 0.0;
+            (unsafe {
+                self.controller
+                    .getParamValueByString(id, s.as_mut_ptr(), &mut v)
+            } == kResultOk
+                && v.is_finite())
             .then_some(v)
+        };
+        let swapped: String = text
+            .chars()
+            .map(|c| match c {
+                ',' => '.',
+                '.' => ',',
+                c => c,
+            })
+            .collect();
+        let answers: Vec<f64> = [
+            parse(text),
+            (swapped != text).then(|| parse(&swapped)).flatten(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let reads_back =
+            |v: f64| (0.0..=1.0).contains(&v) && same_value_text(text, &self.param_text(id, v));
+        for &v in &answers {
+            if reads_back(v) {
+                return Some(v);
+            }
+            let plain = unsafe { self.controller.plainParamToNormalized(id, v) };
+            if plain.is_finite() && reads_back(plain) {
+                return Some(plain);
+            }
+        }
+        let step_count = self
+            .params
+            .iter()
+            .find(|p| p.id == id)
+            .map_or(0, |p| p.step_count);
+        find_by_text(text, step_count, |v| self.param_text(id, v)).or(answers.first().copied())
     }
 
     fn state(&mut self) -> Result<PluginState, PluginError> {
@@ -1029,5 +1191,66 @@ impl PluginController for Vst3Controller {
             out.push(PluginEvent::ParamChanged { id, value });
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{find_by_text, leading_number, same_value_text};
+
+    #[test]
+    fn numbers_are_read_with_either_separator() {
+        assert_eq!(leading_number("40,00"), Some((40.0, 2, "")));
+        assert_eq!(leading_number("-12.5 dB"), Some((-12.5, 1, " dB")));
+        assert_eq!(leading_number("Left -100"), Some((-100.0, 0, "")));
+        assert_eq!(leading_number("off"), None);
+    }
+
+    #[test]
+    fn typed_values_match_at_the_precision_shown() {
+        assert!(same_value_text("5", "5.00 ms"));
+        assert!(same_value_text("0,0 dB", "0.0 dB"));
+        assert!(same_value_text("Graph Mode", "graph mode"));
+        assert!(!same_value_text("0.0 dB", "-12.0 dB"));
+        assert!(!same_value_text("632", "631"));
+        assert!(
+            !same_value_text("1/16", "1/4"),
+            "a note value is not its first number"
+        );
+        assert!(!same_value_text("on", "off"));
+        assert!(!same_value_text("100% L", "100% R"), "Lair's pan");
+        assert!(same_value_text("5ms", "5.00 ms"));
+    }
+
+    #[test]
+    fn values_are_found_by_the_plugins_own_text() {
+        // Camel Strip: -12..+12 dB, one decimal.
+        let db = |v: f64| format!("{:.1} dB", -12.0 + 24.0 * v);
+        let v = find_by_text("0.0 dB", 0, db).unwrap();
+        assert_eq!(db(v), "0.0 dB");
+        assert_eq!(db(find_by_text("3", 0, db).unwrap()), "3.0 dB");
+        // Decreasing and non-linear (a frequency knob drawn backwards).
+        let hz = |v: f64| format!("{:.0} Hz", 20.0 * 1000f64.powf(1.0 - v));
+        assert_eq!(hz(find_by_text("440 Hz", 0, hz).unwrap()), "440 Hz");
+        // Ozone writes a decimal comma and parses nothing.
+        let comma = |v: f64| format!("{:.2}", 200.0 * v).replace('.', ",");
+        assert_eq!(comma(find_by_text("40,00", 0, comma).unwrap()), "40,00");
+        // Stepped: by name.
+        let onoff = |v: f64| if v < 0.5 { "Off" } else { "On" }.to_owned();
+        assert_eq!(find_by_text("on", 1, onoff), Some(1.0));
+        // Names on a continuous scale (soothe2 "slow"/"fast").
+        let speed = |v: f64| if v < 0.3 { "fast" } else { "slow" }.to_owned();
+        assert_eq!(speed(find_by_text("slow", 0, speed).unwrap()), "slow");
+        // Lair's pan: "100% L" .. "C" .. "100% R".
+        let pan = |v: f64| match (v - 0.5) * 200.0 {
+            p if p < -0.5 => format!("{:.0}% L", -p),
+            p if p > 0.5 => format!("{p:.0}% R"),
+            _ => "C".to_owned(),
+        };
+        assert_eq!(find_by_text("100% L", 0, pan), Some(0.0));
+        // Out of range or not a value of this parameter: nothing.
+        assert_eq!(find_by_text("30 dB", 0, db), None);
+        assert_eq!(find_by_text("loud", 0, db), None);
+        assert_eq!(find_by_text("Maybe", 1, onoff), None);
     }
 }

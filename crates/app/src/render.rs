@@ -180,12 +180,116 @@ pub fn estimated_tail_seconds(project: &Project, sample_rate: u32) -> f32 {
 /// Renders `options.range` plus the tail through the realtime DSP code
 /// with fresh processor instances (spec "Export"). The output is aligned
 /// to the timeline: plugin delay compensation latency is trimmed.
-/// Where an export finds its plugins. Exports create their own offline
-/// instances from the saved states (PLG-045).
+/// Where an export finds its plugins. Exports use their own offline
+/// instances made from the saved states (PLG-045).
 #[derive(Debug, Clone, Copy)]
-pub struct ExportPlugins<'a> {
-    pub catalog: &'a Catalog,
-    pub modules: &'a ModuleCache,
+pub enum ExportPlugins<'a> {
+    /// The render creates the instances on its own thread and releases
+    /// them there, without running that thread's messages: for plugins
+    /// that need none (tests). `jdance render` prepares them instead
+    /// ([`prepare_plugins_here`]).
+    #[cfg(test)]
+    Create {
+        catalog: &'a Catalog,
+        modules: &'a ModuleCache,
+    },
+    /// Instances made beforehand on the UI thread (File → Export): the
+    /// render only processes them; the UI thread keeps their controllers
+    /// and releases the instances after the render. VST3 asks for this,
+    /// and plugins tie themselves to the thread that creates them: made
+    /// and released on the export's worker instead, Addictive Drums 2
+    /// never loaded its kit (silent export) and ShaperBox 3 crashed the
+    /// application after the export, when the UI thread ran messages the
+    /// released instance had left behind.
+    Prepared(&'a std::sync::Mutex<PreparedPlugins>),
+}
+
+/// Processors of an export's instances by target, or why one could not
+/// be created.
+pub type PreparedPlugins =
+    HashMap<jdance_domain::PluginTarget, Result<jdance_plugin_vst3::Vst3Processor, String>>;
+
+/// The rate an export renders at: the MP3's own rate, else the device's.
+pub fn export_rate(device_rate: u32, options: &ExportOptions) -> u32 {
+    options.mp3.map_or(device_rate, |m| m.sample_rate)
+}
+
+pub fn export_setup(sample_rate: u32) -> ProcessSetupInfo {
+    ProcessSetupInfo {
+        sample_rate: f64::from(sample_rate),
+        max_block: jdance_engine::MAX_BLOCK,
+        offline: true,
+    }
+}
+
+/// Shortest time an export's fresh instances get on the thread that made
+/// them before the render starts: plugins load their content through that
+/// thread's messages (Addictive Drums 2 needs about half a second for its
+/// kit).
+pub const EXPORT_WARMUP: std::time::Duration = std::time::Duration::from_millis(1500);
+/// Longest wait for instances that report loading through `IProgress`.
+pub const EXPORT_WARMUP_MAX: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Whether instances made `waited` ago have had time to load: at least
+/// [`EXPORT_WARMUP`], longer while one of them reports loading (`loading`),
+/// never more than [`EXPORT_WARMUP_MAX`].
+pub fn warmed_up(waited: std::time::Duration, loading: bool) -> bool {
+    waited >= EXPORT_WARMUP_MAX || (waited >= EXPORT_WARMUP && !loading)
+}
+
+/// Frames of the silent blocks fresh instances process while they load.
+const WARM_BLOCK: usize = 512;
+
+/// One block of silence through a fresh instance, offline, transport
+/// stopped. Some plugins start loading their content only once they
+/// process, and then through the messages of the thread that made them:
+/// Addictive Drums 2 loaded no kit, and exported silence, until it had
+/// processed while that thread ran its messages.
+pub fn warm_block(target: jdance_domain::PluginTarget, p: &mut jdance_plugin_vst3::Vst3Processor) {
+    use jdance_plugin_api::PluginProcessor;
+    let (mut l, mut r) = (vec![0.0; WARM_BLOCK], vec![0.0; WARM_BLOCK]);
+    let t = jdance_plugin_api::Transport::default();
+    match target {
+        jdance_domain::PluginTarget::Channel(_) => p.process_instrument(&mut l, &mut r, &[], &t),
+        jdance_domain::PluginTarget::Insert(_) => p.process(&mut l, &mut r, None, &t),
+    }
+}
+
+/// The project's plugin instances for `jdance render`, made on this
+/// thread, which then processes silence through them and runs their
+/// messages until they have loaded ([`warm_block`], [`warmed_up`]); see
+/// [`ExportPlugins::Prepared`]. The controllers are returned to be
+/// released on this thread after the render.
+pub fn prepare_plugins_here(
+    project: &Project,
+    catalog: &Catalog,
+    modules: &ModuleCache,
+    sample_rate: u32,
+) -> (PreparedPlugins, Vec<jdance_plugin_vst3::Vst3Controller>) {
+    let setup = export_setup(sample_rate);
+    let mut prepared = PreparedPlugins::new();
+    let mut controllers = Vec::new();
+    for (target, slot) in crate::plugins::plugin_slots(project) {
+        let created = create_instance(catalog, modules, slot, &setup).map(|(p, c)| {
+            controllers.push(c);
+            p
+        });
+        prepared.insert(target, created);
+        jdance_plugin_vst3::pump_plugin_messages();
+    }
+    let start = std::time::Instant::now();
+    while !controllers.is_empty()
+        && !warmed_up(start.elapsed(), controllers.iter().any(|c| c.busy()))
+    {
+        for (target, p) in &mut prepared {
+            if let Ok(p) = p {
+                warm_block(*target, p);
+            }
+        }
+        jdance_plugin_vst3::pump_plugin_messages();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    (prepared, controllers)
 }
 
 #[cfg(test)]
@@ -221,19 +325,25 @@ pub fn render_project_with(
 ) -> Result<RenderOutcome, String> {
     let project = export_project(project, options.range)?;
     let mut warnings = Vec::new();
-    let setup = ProcessSetupInfo {
-        sample_rate: f64::from(sample_rate),
-        max_block: jdance_engine::MAX_BLOCK,
-        offline: true,
-    };
     let mut instances = HashMap::new();
     for (target, slot) in crate::plugins::plugin_slots(&project) {
         let created = match plugins {
-            Some(p) => create_instance(p.catalog, p.modules, slot, &setup),
+            #[cfg(test)]
+            Some(ExportPlugins::Create { catalog, modules }) => {
+                create_instance(catalog, modules, slot, &export_setup(sample_rate))
+                    .map(|(p, c)| (p, Some(c)))
+            }
+            Some(ExportPlugins::Prepared(prepared)) => prepared
+                .lock()
+                .ok()
+                .and_then(|mut m| m.remove(&target))
+                .unwrap_or_else(|| Err("the plugin was not prepared for the export".into()))
+                .map(|p| (p, None::<jdance_plugin_vst3::Vst3Controller>)),
             None => Err("plugins are not available here".into()),
         };
         match created {
-            // The controller half is not needed offline beyond creation.
+            // The controller half is not needed offline beyond creation;
+            // prepared instances keep theirs on the UI thread.
             Ok((processor, controller)) => {
                 instances.insert(target, (processor, controller));
             }
@@ -357,7 +467,7 @@ pub fn render_to_file(
     plugins: Option<&ExportPlugins>,
     progress: &mut dyn FnMut(f32) -> bool,
 ) -> Result<RenderOutcome, String> {
-    let rate = options.mp3.map_or(device_rate, |m| m.sample_rate);
+    let rate = export_rate(device_rate, options);
     let mut outcome =
         render_project_with(project, project_dir, rate, options, plugins, &mut |f| {
             progress(f * 0.9)
@@ -776,7 +886,7 @@ mod tests {
             &mut p,
             Effect::plugin(plugin_slot(&catalog, "JD Test Latency")),
         );
-        let plugins = ExportPlugins {
+        let plugins = ExportPlugins::Create {
             catalog: &catalog,
             modules: &modules,
         };
@@ -802,6 +912,114 @@ mod tests {
         // the result lines up with the bypassed render.
         assert_eq!(onsets(&o.audio.left).first(), Some(&0));
         assert_eq!(o.audio.left, dry.audio.left);
+    }
+
+    #[test]
+    fn instances_load_for_the_warmup_and_longer_while_busy() {
+        use std::time::Duration;
+        assert!(!warmed_up(Duration::from_millis(1499), false));
+        assert!(warmed_up(EXPORT_WARMUP, false));
+        assert!(!warmed_up(Duration::from_secs(10), true), "still loading");
+        assert!(warmed_up(EXPORT_WARMUP_MAX, true), "but not forever");
+    }
+
+    /// `jdance render`: the instances are made on the calling thread and
+    /// given the warmup there before the render uses them.
+    #[test]
+    fn the_cli_prepares_plugins_on_its_own_thread() {
+        let (dir, mut p) = setup(1);
+        add_clip(&mut p, 0, 1);
+        let (catalog, modules) = test_plugins();
+        master_insert(
+            &mut p,
+            Effect::plugin(plugin_slot(&catalog, "JD Test Gain")),
+        );
+        let reference = render_project(
+            &p,
+            Some(dir.path()),
+            RATE,
+            &opts(ExportRange::Song, 0.0),
+            Some(&ExportPlugins::Create {
+                catalog: &catalog,
+                modules: &modules,
+            }),
+        )
+        .unwrap();
+        let start = std::time::Instant::now();
+        let (prepared, controllers) = prepare_plugins_here(&p, &catalog, &modules, RATE);
+        assert!(start.elapsed() >= EXPORT_WARMUP);
+        assert_eq!(controllers.len(), 1);
+        assert!(prepared.values().all(Result::is_ok));
+        let prepared = std::sync::Mutex::new(prepared);
+        let o = render_project(
+            &p,
+            Some(dir.path()),
+            RATE,
+            &opts(ExportRange::Song, 0.0),
+            Some(&ExportPlugins::Prepared(&prepared)),
+        )
+        .unwrap();
+        assert!(o.warnings.is_empty(), "{:?}", o.warnings);
+        assert_eq!(o.audio.left, reference.audio.left);
+        drop(controllers);
+    }
+
+    /// File → Export: instances made beforehand (on the UI thread), the
+    /// render on another thread only processes them; the controllers stay
+    /// behind, so the instances are released where they were made.
+    #[test]
+    fn prepared_instances_render_on_another_thread_and_are_released_by_their_maker() {
+        use jdance_plugin_api::PluginController;
+        let (dir, mut p) = setup(1);
+        add_clip(&mut p, 0, 1);
+        let (catalog, modules) = test_plugins();
+        master_insert(
+            &mut p,
+            Effect::plugin(plugin_slot(&catalog, "JD Test Gain")),
+        );
+        let reference = render_project(
+            &p,
+            Some(dir.path()),
+            RATE,
+            &opts(ExportRange::Song, 0.0),
+            Some(&ExportPlugins::Create {
+                catalog: &catalog,
+                modules: &modules,
+            }),
+        )
+        .unwrap();
+        let setup_info = export_setup(RATE);
+        let mut prepared = PreparedPlugins::new();
+        let mut controllers = Vec::new();
+        for (target, slot) in crate::plugins::plugin_slots(&p) {
+            let (proc_, ctrl) = create_instance(&catalog, &modules, slot, &setup_info).unwrap();
+            controllers.push(ctrl);
+            prepared.insert(target, Ok(proc_));
+        }
+        let prepared = std::sync::Mutex::new(prepared);
+        let (project, path) = (p.clone(), dir.path().to_path_buf());
+        let o = std::thread::scope(|s| {
+            s.spawn(|| {
+                render_project(
+                    &project,
+                    Some(&path),
+                    RATE,
+                    &opts(ExportRange::Song, 0.0),
+                    Some(&ExportPlugins::Prepared(&prepared)),
+                )
+            })
+            .join()
+            .unwrap()
+        })
+        .unwrap();
+        assert!(o.warnings.is_empty(), "{:?}", o.warnings);
+        assert!(prepared.lock().unwrap().is_empty(), "the render took them");
+        assert_eq!(o.audio.left, reference.audio.left);
+        // The instances are still alive here, through their controllers.
+        for c in &mut controllers {
+            assert!(c.state().is_ok());
+        }
+        drop(controllers);
     }
 
     #[test]
@@ -842,7 +1060,7 @@ mod tests {
         )
         .unwrap();
         master_insert(&mut p, Effect::plugin(slot));
-        let plugins = ExportPlugins {
+        let plugins = ExportPlugins::Create {
             catalog: &catalog,
             modules: &modules,
         };
@@ -871,7 +1089,7 @@ mod tests {
         ));
         p.patterns[0].row_mut(id).steps[4].on = true;
         add_clip(&mut p, 0, 1);
-        let plugins = ExportPlugins {
+        let plugins = ExportPlugins::Create {
             catalog: &catalog,
             modules: &modules,
         };

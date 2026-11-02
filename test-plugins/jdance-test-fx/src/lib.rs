@@ -30,7 +30,10 @@
 //!   output event list, reports a latency that follows the gain (and asks
 //!   for a restart when it changes), and has a resizable editor with
 //!   content scaling that changes its size while attaching without
-//!   asking. Its controller state is a report of what the host did.
+//!   asking. It restores state only from a stream that tells its size
+//!   (`ISizeableStream`), and its controller reports the loaded gain with
+//!   `performEdit` (no `beginEdit`). Its controller state is a report of
+//!   what the host did.
 //!
 //! `JDANCE_TEST_FX_FAULT=crash|hang` makes `GetPluginFactory` abort or
 //! never return, for scanner blocklist and timeout tests; `chatty` makes
@@ -584,6 +587,19 @@ impl IComponentTrait for Processor {
     }
 
     unsafe fn setState(&self, state: *mut IBStream) -> tresult {
+        // Like ShamiKoto, which crashes instead: the stream's size first.
+        if self.mode == Mode::Strict {
+            let sized = unsafe { ComRef::from_raw(state) }
+                .and_then(|s| s.cast::<ISizeableStream>())
+                .is_some_and(|s| {
+                    let mut size = -1;
+                    let r = unsafe { s.getStreamSize(&mut size) };
+                    r == kResultOk && size > 0
+                });
+            if !sized {
+                return kResultFalse;
+            }
+        }
         match unsafe { read_component_gain(state) } {
             Some(g) => {
                 self.gain.store(g.to_bits(), Ordering::Relaxed);
@@ -990,6 +1006,13 @@ impl IEditControllerTrait for Controller {
         match unsafe { read_component_gain(state) } {
             Some(g) => {
                 self.values.borrow_mut()[P_GAIN as usize] = g;
+                // Like VPS Avenger: the loaded values reported as edits,
+                // without beginEdit.
+                if self.mode == Mode::Strict
+                    && let Some(h) = self.handler.borrow().as_ref()
+                {
+                    unsafe { h.performEdit(P_GAIN, g) };
+                }
                 kResultOk
             }
             None => kResultFalse,

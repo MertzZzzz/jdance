@@ -148,6 +148,66 @@ struct Active {
     failure_reported: bool,
 }
 
+/// UI-thread time per frame for creating an export's instances.
+const EXPORT_LOAD_BUDGET: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// An export's plugin instances, made and released on the UI thread
+/// (see [`crate::render::ExportPlugins::Prepared`]).
+struct ExportPrep {
+    /// Instances still to create.
+    todo: Vec<(PluginTarget, jdance_domain::PluginSlot)>,
+    sample_rate: u32,
+    /// Processors for the render, taken by its thread once `go` is set.
+    prepared: Arc<std::sync::Mutex<crate::render::PreparedPlugins>>,
+    /// Kept on this thread until the export ends; dropping them releases
+    /// the instances.
+    controllers: Vec<jdance_plugin_vst3::Vst3Controller>,
+    /// When the last instance was created.
+    created_at: Option<std::time::Instant>,
+    go: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl ExportPrep {
+    /// Creates instances within this frame's budget, then lets the render
+    /// start once they had time to load.
+    fn advance(&mut self, plugins: &PluginHost) {
+        if self.go.load(Relaxed) {
+            return;
+        }
+        let started = std::time::Instant::now();
+        let setup = crate::render::export_setup(self.sample_rate);
+        while let Some((target, slot)) = self.todo.pop() {
+            let created =
+                crate::plugins::create_instance(&plugins.catalog, &plugins.modules, &slot, &setup)
+                    .map(|(p, c)| {
+                        self.controllers.push(c);
+                        p
+                    });
+            if let Ok(mut m) = self.prepared.lock() {
+                m.insert(target, created);
+            }
+            if started.elapsed() > EXPORT_LOAD_BUDGET {
+                return;
+            }
+        }
+        // Silence through them each frame while this thread runs their
+        // messages: some load their content only once they process.
+        if let Ok(mut m) = self.prepared.lock() {
+            for (target, p) in m.iter_mut() {
+                if let Ok(p) = p {
+                    crate::render::warm_block(*target, p);
+                }
+            }
+        }
+        let created_at = *self.created_at.get_or_insert_with(std::time::Instant::now);
+        let waited = created_at.elapsed();
+        let loading = self.controllers.iter().any(|c| c.busy());
+        if self.controllers.is_empty() || crate::render::warmed_up(waited, loading) {
+            self.go.store(true, Relaxed);
+        }
+    }
+}
+
 pub struct AudioHost {
     /// MIDI input ports and the channel they play (spec 0.3.0 §12).
     midi: crate::midi_in::MidiIn,
@@ -172,6 +232,9 @@ pub struct AudioHost {
         Arc<std::sync::atomic::AtomicU32>,
         Arc<std::sync::atomic::AtomicBool>,
     )>,
+    /// The running export's plugin instances: being created, or rendering
+    /// with their controllers kept here until the export ends.
+    export_prep: Option<ExportPrep>,
     plugins: PluginHost,
     /// Incremented for every new engine; instances sent to an older one
     /// are gone.
@@ -321,6 +384,7 @@ impl AudioHost {
             notices,
             exports: Vec::new(),
             export_state: None,
+            export_prep: None,
             plugins,
             engine_generation: 0,
             scan: None,
@@ -796,11 +860,17 @@ impl Host for AudioHost {
         } else {
             self.reading = FeedbackReading::default();
         }
+        if let Some(prep) = &mut self.export_prep {
+            prep.advance(&self.plugins);
+        }
         let mut finished = Vec::new();
         for (i, rx) in self.exports.iter().enumerate() {
             if let Ok(result) = rx.try_recv() {
                 finished.push(i);
                 self.export_state = None;
+                // The render has let go of the processors: the instances
+                // are released here, on the UI thread.
+                self.export_prep = None;
                 self.notices.push(match result {
                     Ok((msg, file)) => Notice::info(msg).with_file(file),
                     Err(e) if e == crate::render::CANCELLED => {
@@ -1429,18 +1499,48 @@ impl Host for AudioHost {
         // The export uses its own instances, restored from the current
         // plugin states (spec "Export").
         self.plugins.capture_states(&mut project);
-        let catalog = self.plugins.catalog.clone();
-        let modules = std::sync::Arc::clone(&self.plugins.modules);
         let dir = project_dir.map(Path::to_path_buf);
         let rate = self.engine_rate();
         let progress = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.export_state = Some((Arc::clone(&progress), Arc::clone(&cancel)));
+        // The instances are created here, on the UI thread, a few per
+        // frame ([`ExportPrep::advance`]); the render waits until they are
+        // all made and have had time to load.
+        let todo: Vec<(PluginTarget, jdance_domain::PluginSlot)> =
+            crate::plugins::plugin_slots(&project)
+                .map(|(t, s)| (t, s.clone()))
+                .collect();
+        let go = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let prepared = Arc::new(std::sync::Mutex::new(crate::render::PreparedPlugins::new()));
+        self.export_prep = Some(ExportPrep {
+            todo,
+            sample_rate: crate::render::export_rate(rate, &options),
+            prepared: Arc::clone(&prepared),
+            controllers: Vec::new(),
+            created_at: None,
+            go: Arc::clone(&go),
+        });
         std::thread::spawn(move || {
-            let plugins = crate::render::ExportPlugins {
-                catalog: &catalog,
-                modules: &modules,
+            // Until the UI thread has the instances ready (or the export
+            // is cancelled meanwhile).
+            while !go.load(Relaxed) {
+                if cancel.load(Relaxed) {
+                    let _ = tx.send(Err(crate::render::CANCELLED.to_owned()));
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let prepared = match Arc::try_unwrap(prepared) {
+                Ok(m) => m,
+                Err(shared) => std::sync::Mutex::new(
+                    shared
+                        .lock()
+                        .map(|mut m| std::mem::take(&mut *m))
+                        .unwrap_or_default(),
+                ),
             };
+            let plugins = crate::render::ExportPlugins::Prepared(&prepared);
             let tags = ExportTags { title, artist };
             let result = render_to_file(
                 &project,
