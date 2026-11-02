@@ -673,3 +673,10 @@ Linux, тест окна редактора под Xvfb), clippy `-D warnings` �
 | Окно выбора плагинов F8 и список Plugins в Browser по борду R5 · Plugins; Ctrl+D — избранное | PASS | `ui` тесты `plugin_picker_tests::*`; вручную (Xvfb) с тестовым плагином `jdance-test-fx`, скриншот `after/plugin-picker.png` |
 | Тип плагина в окне Plugins не обрезается | PASS | вручную (Xvfb) |
 | Windows MSI 0.4.1.1 | — | workflow `Release` |
+
+## Релиз 0.4.1.2 (исправление: инспектор микшера)
+
+| Пункт | Статус | Артефакт / комментарий |
+|---|---|---|
+| Инспектор микшера не выходит за край окна: счётчик эффектов и значения параметров видны, ползунки сужаются | PASS | вручную (Xvfb, окно 1440 px): Reverb, Compressor, Parametric EQ — скриншот `after/mixer-inspector.png`; автотеста нет |
+| Windows MSI 0.4.1.2 | — | workflow `Release` |
