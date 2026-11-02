@@ -427,7 +427,10 @@ pub(crate) fn show(
     );
     let height = ui.available_height();
     ui.horizontal_top(|ui| {
-        let band_w = (ui.available_width() - INSPECTOR_W - 12.0).max(200.0);
+        // The inspector keeps its width inside the panel: the separator
+        // and its spacing are left out of the band (UI-RD §2.3).
+        let band_w = (ui.available_width() - INSPECTOR_W - 2.0 * ui.spacing().item_spacing.x - 8.0)
+            .max(200.0);
         ui.vertical(|ui| {
             ui.set_width(band_w);
             egui::ScrollArea::horizontal()
@@ -498,11 +501,18 @@ pub(crate) fn show(
         });
         ui.separator();
         ui.vertical(|ui| {
-            ui.set_width(INSPECTOR_W);
+            // What is left of the panel, never past its right edge.
+            let w = (ui.available_width() - 4.0).clamp(160.0, INSPECTOR_W);
+            ui.set_width(w);
             egui::ScrollArea::vertical()
                 .id_salt("mixer_inspector")
                 .max_height(height)
+                .auto_shrink([false, true])
                 .show(ui, |ui| {
+                    // Room for the scroll bar; sliders shrink to fit.
+                    let inner = ui.available_width() - 12.0;
+                    ui.set_max_width(inner);
+                    ui.spacing_mut().slider_width = (inner - 170.0).clamp(40.0, 120.0);
                     if let Some(t) = mixer.track(view.selected) {
                         inspector(
                             ui, mixer, automation, t, latency, meters, host, view, &mut out,
@@ -1999,7 +2009,7 @@ fn eq_graph(ui: &mut egui::Ui, effect: &Effect) {
     }
     eq.prepare(SR, 64);
     eq.settle();
-    let (rect, _) = ui.allocate_exact_size(vec2(INSPECTOR_W - 20.0, 80.0), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 80.0), Sense::hover());
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, CornerRadius::same(3), ui.visuals().extreme_bg_color);
     let to_y = |db: f64| rect.center().y - (db / 24.0) as f32 * (rect.height() / 2.0 - 2.0);
